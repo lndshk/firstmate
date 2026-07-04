@@ -338,7 +338,10 @@ if [ "$KIND" != secondmate ]; then
   # which would record the wrong worktree path.
   for _ in $(seq 1 60); do
     p=$(tmux display-message -p -t "$T" '#{pane_current_path}' 2>/dev/null || true)
+    [ -n "$p" ] || { sleep 1; continue; }
+    p=$(cd "$p" 2>/dev/null && pwd -P) || { sleep 1; continue; }
     case "$p" in
+      "$PROJ_ABS"|"$PROJ_ABS"/*) ;;
       */.treehouse/*) WT="$p"; break ;;
     esac
     sleep 1
