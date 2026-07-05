@@ -103,8 +103,9 @@ fm_tmux_strip_ghost() {
 }
 
 # fm_tmux_composer_text: print the normalized cursor/composer line of <target>.
-# The result has dim/faint ghost text removed, composer borders stripped, and
-# surrounding whitespace trimmed. Returns non-zero if the pane cannot be read.
+# The result has dim/faint ghost text removed, composer borders stripped, NBSP and
+# narrow-NBSP prompt padding normalized to spaces, and surrounding whitespace
+# trimmed. Returns non-zero if the pane cannot be read.
 fm_tmux_composer_text() {  # <target>
   local target=$1 cy raw line stripped
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
