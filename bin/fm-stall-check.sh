@@ -342,26 +342,6 @@ check_advisor_idle_stalls() {
   done
 }
 
-# Resolve a worktree's default branch name (origin/HEAD, then main, then
-# master), matching the fallback the rest of the fleet uses so the unlanded
-# sweep is not itself blind to master-based clones. Falls back to remote-tracking
-# refs because the sweep compares against origin/<default>.
-default_branch_for() { # <worktree>
-  local wt=$1 ref branch
-  ref=$(git -C "$wt" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    printf '%s\n' "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$wt" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
-      printf '%s\n' "$branch"
-      return 0
-    fi
-  done
-  return 1
-}
-
 # True while a rebase is in progress in the worktree. .git is a pointer file in
 # a worktree, so the rebase state dir is resolved via git rather than $wt/.git.
 rebase_in_progress() { # <worktree>
@@ -375,16 +355,19 @@ rebase_in_progress() { # <worktree>
   return 1
 }
 
-# Unlanded-work sweep. Flags an in-flight crew that has commits ahead of the
-# default branch but whose branch is not pushed - committed work living only in
-# a disposable worktree, which teardown would discard. Uses origin/<default>
-# (not @{u}, which returns 0 when no upstream is set and silently hides local
-# commits) and a local remote-tracking ref check (no network), so it is cheap
-# enough to run on the fast path. It is a verify-candidate ("unlanded?:"): a
-# squash-merged branch whose remote copy was deleted can also match, so the
-# finding says push-it-or-confirm-merged rather than asserting loss.
+# Unlanded-work sweep. Flags an in-flight crew whose worktree HEAD carries
+# commits reachable from no remote-tracking branch at all - committed work living
+# only in a disposable worktree, which teardown would discard. This matches
+# teardown's own landed-definition (git log HEAD --not --remotes): work reachable
+# from ANY remote (origin, the no-mistakes gate remote during validation, or a
+# contributor fork for upstream contributions) is teardown-safe and not flagged,
+# which also removes any default-branch-name dependence. Local remote-tracking
+# refs only (no network), so it is cheap enough to run on the fast path. It is a
+# verify-candidate ("unlanded?:"): a squash-merged branch whose remote copy was
+# deleted can also match, so the finding says push-it-or-confirm-merged rather
+# than asserting loss.
 check_unlanded_work() {
-  local meta id kind wt br ahead default
+  local meta id kind wt unpushed
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
@@ -395,15 +378,9 @@ check_unlanded_work() {
     wt=$(worktree_for_meta "$meta")
     [ -n "$wt" ] && [ -d "$wt" ] || continue
     rebase_in_progress "$wt" && continue     # mid-rebase: HEAD is detached, branch temporarily empty
-    default=$(default_branch_for "$wt") || continue
-    ahead=$(git -C "$wt" rev-list --count "origin/$default..HEAD" 2>/dev/null || echo 0)
-    [ "${ahead:-0}" -gt 0 ] 2>/dev/null || continue
-    br=$(git -C "$wt" branch --show-current 2>/dev/null || true)
-    if [ -z "$br" ] \
-       || ! git -C "$wt" rev-parse --verify -q "refs/remotes/origin/$br" >/dev/null 2>&1 \
-       || ! git -C "$wt" merge-base --is-ancestor HEAD "refs/remotes/origin/$br" 2>/dev/null; then
-      printf 'unlanded?: %s - %s commit(s) ahead of origin/%s, branch not pushed (lost on teardown unless merged); push it or confirm it is a merged branch\n' "$id" "$ahead" "$default"
-    fi
+    unpushed=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null || echo 0)
+    [ "${unpushed:-0}" -gt 0 ] 2>/dev/null || continue
+    printf 'unlanded?: %s - %s commit(s) not on any remote, lost on teardown; push it or confirm it is a merged branch\n' "$id" "$unpushed"
   done
 }
 
