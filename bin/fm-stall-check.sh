@@ -174,6 +174,10 @@ kind_for_meta() {
   printf '%s\n' "$kind"
 }
 
+mode_for_meta() {
+  grep '^mode=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
 home_for_secondmate_meta() { # <id> <meta>
   local id=$1 meta=$2 home
   home=$(grep '^home=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
@@ -374,6 +378,7 @@ check_unlanded_work() {
     kind=$(kind_for_meta "$meta")
     [ "$kind" = secondmate ] && continue
     [ "$kind" = scout ] && continue          # scout deliverable is the report, not a branch
+    [ "$(mode_for_meta "$meta")" = local-only ] && continue  # no remote by design; landed = merged to local main, checked at teardown
     meta_has_pr "$id" && continue            # PR-parked: already tracked by the merge poll
     wt=$(worktree_for_meta "$meta")
     [ -n "$wt" ] && [ -d "$wt" ] || continue
