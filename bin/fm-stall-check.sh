@@ -381,7 +381,8 @@ check_unlanded_work() {
     [ "$(mode_for_meta "$meta")" = local-only ] && continue  # no remote by design; landed = merged to local main, checked at teardown
     meta_has_pr "$id" && continue            # PR-parked: already tracked by the merge poll
     wt=$(worktree_for_meta "$meta")
-    [ -n "$wt" ] && [ -d "$wt" ] || continue
+    [ -n "$wt" ] || continue
+    [ -d "$wt" ] || continue
     rebase_in_progress "$wt" && continue     # mid-rebase: HEAD is detached, branch temporarily empty
     unpushed=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null || echo 0)
     [ "${unpushed:-0}" -gt 0 ] 2>/dev/null || continue
