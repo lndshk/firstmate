@@ -163,6 +163,10 @@ window_for_meta() {
   grep '^window=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+worktree_for_meta() {
+  grep '^worktree=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
 kind_for_meta() {
   local kind
   kind=$(grep '^kind=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true)
@@ -338,6 +342,35 @@ check_advisor_idle_stalls() {
   done
 }
 
+# Unlanded-work sweep. Flags an in-flight crew that has commits ahead of
+# origin/main but whose branch is not pushed - committed work living only in a
+# disposable worktree, which teardown would discard. Uses origin/main (not
+# @{u}, which returns 0 when no upstream is set and silently hides local
+# commits) and a local remote-tracking ref check (no network), so it is cheap
+# enough to run on the fast path. It is a verify-candidate ("unlanded?:"): a
+# squash-merged branch whose remote copy was deleted can also match, so the
+# finding says push-it-or-confirm-merged rather than asserting loss.
+check_unlanded_work() {
+  local meta id kind wt br ahead
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    kind=$(kind_for_meta "$meta")
+    [ "$kind" = secondmate ] && continue
+    [ "$kind" = scout ] && continue          # scout deliverable is the report, not a branch
+    meta_has_pr "$id" && continue            # PR-parked: already tracked by the merge poll
+    wt=$(worktree_for_meta "$meta")
+    [ -n "$wt" ] && [ -d "$wt" ] || continue
+    git -C "$wt" rev-parse --verify -q origin/main >/dev/null 2>&1 || continue
+    ahead=$(git -C "$wt" rev-list --count origin/main..HEAD 2>/dev/null || echo 0)
+    [ "${ahead:-0}" -gt 0 ] 2>/dev/null || continue
+    br=$(git -C "$wt" branch --show-current 2>/dev/null || true)
+    if [ -z "$br" ] || ! git -C "$wt" rev-parse --verify -q "refs/remotes/origin/$br" >/dev/null 2>&1; then
+      printf 'unlanded?: %s - %s commit(s) ahead of origin/main, branch not pushed (lost on teardown unless merged); push it or confirm it is a merged branch\n' "$id" "$ahead"
+    fi
+  done
+}
+
 # --fast skips checks that spawn a tmux peek per pane. fm-guard runs in this
 # mode on the hot supervision path, where it only needs the presence of a
 # finding from the cheap backlog/state reads; a full sweep (including the pane
@@ -350,6 +383,7 @@ esac
 check_finished_not_advanced
 check_unblocked_queued
 check_date_gates
+check_unlanded_work
 if ! "$FAST"; then
   check_idle_stalls
   check_advisor_idle_stalls
