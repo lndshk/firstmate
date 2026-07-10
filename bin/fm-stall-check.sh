@@ -399,7 +399,9 @@ check_unlanded_work() {
     ahead=$(git -C "$wt" rev-list --count "origin/$default..HEAD" 2>/dev/null || echo 0)
     [ "${ahead:-0}" -gt 0 ] 2>/dev/null || continue
     br=$(git -C "$wt" branch --show-current 2>/dev/null || true)
-    if [ -z "$br" ] || ! git -C "$wt" rev-parse --verify -q "refs/remotes/origin/$br" >/dev/null 2>&1; then
+    if [ -z "$br" ] \
+       || ! git -C "$wt" rev-parse --verify -q "refs/remotes/origin/$br" >/dev/null 2>&1 \
+       || ! git -C "$wt" merge-base --is-ancestor HEAD "refs/remotes/origin/$br" 2>/dev/null; then
       printf 'unlanded?: %s - %s commit(s) ahead of origin/%s, branch not pushed (lost on teardown unless merged); push it or confirm it is a merged branch\n' "$id" "$ahead" "$default"
     fi
   done
