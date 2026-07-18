@@ -176,29 +176,18 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
-window_kind() {
-  local w=$1 meta mw kind
+# window_meta_field: print <field> from the state/*.meta whose window= matches
+# <window>, <default> when the matching meta lacks the field, and "unknown"
+# when no meta records the window.
+window_meta_field() {  # <window> <field> <default>
+  local w=$1 field=$2 default=$3 meta mw val
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     mw=$(grep '^window=' "$meta" | cut -d= -f2- || true)
     [ "$mw" = "$w" ] || continue
-    kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
-    [ -n "$kind" ] || kind=ship
-    echo "$kind"
-    return 0
-  done
-  echo unknown
-}
-
-window_harness() {
-  local w=$1 meta mw harness
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
-    mw=$(grep '^window=' "$meta" | cut -d= -f2- || true)
-    [ "$mw" = "$w" ] || continue
-    harness=$(grep '^harness=' "$meta" | cut -d= -f2- || true)
-    [ -n "$harness" ] || harness=unknown
-    echo "$harness"
+    val=$(grep "^$field=" "$meta" | cut -d= -f2- || true)
+    [ -n "$val" ] || val=$default
+    echo "$val"
     return 0
   done
   echo unknown
@@ -339,26 +328,35 @@ EOF
     # Codex can block mid-turn on its additional-safety menu. Clear it before
     # classifying the recorded crewmate pane so the pause never reads as stale.
     # Only panes whose meta records the codex harness get keys, and at most
-    # FM_SAFETY_AUTOCLEAR_MAX consecutive clears: a menu that keeps matching
-    # (copy-mode, lookalike content) falls through to stale classification
-    # instead of receiving keypresses forever. The counter resets once the
-    # menu is gone.
-    if [ "$(window_harness "$w")" = codex ]; then
+    # FM_SAFETY_AUTOCLEAR_MAX consecutive attempts - verified clears and
+    # unverified attempts (copy-mode absorbing keys, lookalike content) both
+    # count - after which the pane falls through to stale classification
+    # instead of receiving keypresses forever. The counter resets only once
+    # the menu is confirmed gone.
+    if [ "$(window_meta_field "$w" harness unknown)" = codex ]; then
       clearf="$STATE/.count-safety-$key"
       cleared=$(cat "$clearf" 2>/dev/null || echo 0)
       if [ "$cleared" -lt "${FM_SAFETY_AUTOCLEAR_MAX:-5}" ]; then
-        if fm_clear_safety_prompt "$w"; then
-          echo $(( cleared + 1 )) > "$clearf"
-          continue
-        fi
-        rm -f "$clearf"
+        fm_clear_safety_prompt "$w"
+        case $? in
+          0)
+            echo $(( cleared + 1 )) > "$clearf"
+            continue
+            ;;
+          2)
+            echo $(( cleared + 1 )) > "$clearf"
+            ;;
+          *)
+            rm -f "$clearf"
+            ;;
+        esac
       elif ! tmux capture-pane -p -t "$w" -S -20 2>/dev/null | fm_tmux_safety_prompt_selection >/dev/null; then
         rm -f "$clearf"
       fi
     fi
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
-    [ "$(window_kind "$w")" = secondmate ] && continue
+    [ "$(window_meta_field "$w" kind ship)" = secondmate ] && continue
     tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"

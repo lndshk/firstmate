@@ -186,6 +186,27 @@ test_watcher_skips_non_codex_harness() {
   pass "watcher never sends keys to a pane whose recorded harness is not codex"
 }
 
+test_watcher_counts_unverified_attempt() {
+  local dir fb capture log state out
+  dir="$TMP_ROOT/unverified"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/capture"; log="$dir/tmux.log"; state="$dir/state"; out="$dir/out"
+  mkdir -p "$state"
+  write_prompt "$capture" 1
+  printf '%s\n' 'window=crew:fm-recorded' 'kind=ship' 'harness=codex' > "$state/task.meta"
+  echo 2 > "$state/.count-safety-crew_fm-recorded"
+  : > "$log"
+  run_watch "$fb" "$capture" "$log" "$state" "$out" || fail "watcher exited non-zero"
+  grep -q 'send-keys -t crew:fm-recorded Down' "$log" || fail "no clear was attempted"
+  ! grep -q 'send-keys -t crew:fm-recorded Enter' "$log" \
+    || fail "an unverified attempt still confirmed the menu"
+  [ "$(cat "$state/.count-safety-crew_fm-recorded" 2>/dev/null)" = 3 ] \
+    || fail "an unverified attempt did not advance the consecutive-attempt count"
+  [ -e "$state/.hash-crew_fm-recorded" ] \
+    || fail "an unverified attempt was exempted from stale classification"
+  pass "a pane still rendering Retry after Down advances the attempt count"
+}
+
 test_watcher_caps_consecutive_clears() {
   local dir fb capture log state out
   dir="$TMP_ROOT/capped"; mkdir -p "$dir"
@@ -228,6 +249,7 @@ test_non_menu_content_does_not_trigger
 test_disabled_does_not_capture_or_send
 test_watcher_clears_only_recorded_window
 test_watcher_skips_non_codex_harness
+test_watcher_counts_unverified_attempt
 test_watcher_caps_consecutive_clears
 test_watcher_resets_clear_count_when_menu_gone
 printf 'all safety auto-clear tests passed\n'
