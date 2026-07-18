@@ -20,6 +20,8 @@ mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$SCRIPT_DIR/fm-tmux-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
@@ -319,6 +321,9 @@ EOF
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale state is reported once (.stale-* remembers the hash already reported).
   while IFS= read -r w; do
+    # Codex can block mid-turn on its additional-safety menu. Clear it before
+    # classifying the recorded crewmate pane so the pause never reads as stale.
+    fm_clear_safety_prompt "$w" && continue
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
     [ "$(window_kind "$w")" = secondmate ] && continue
