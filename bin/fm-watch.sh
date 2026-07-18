@@ -190,6 +190,20 @@ window_kind() {
   echo unknown
 }
 
+window_harness() {
+  local w=$1 meta mw harness
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    mw=$(grep '^window=' "$meta" | cut -d= -f2- || true)
+    [ "$mw" = "$w" ] || continue
+    harness=$(grep '^harness=' "$meta" | cut -d= -f2- || true)
+    [ -n "$harness" ] || harness=unknown
+    echo "$harness"
+    return 0
+  done
+  echo unknown
+}
+
 recorded_windows() {
   local meta w seen=
   for meta in "$STATE"/*.meta; do
@@ -321,15 +335,32 @@ EOF
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale state is reported once (.stale-* remembers the hash already reported).
   while IFS= read -r w; do
+    key=$(printf '%s' "$w" | tr ':/.' '___')
     # Codex can block mid-turn on its additional-safety menu. Clear it before
     # classifying the recorded crewmate pane so the pause never reads as stale.
-    fm_clear_safety_prompt "$w" && continue
+    # Only panes whose meta records the codex harness get keys, and at most
+    # FM_SAFETY_AUTOCLEAR_MAX consecutive clears: a menu that keeps matching
+    # (copy-mode, lookalike content) falls through to stale classification
+    # instead of receiving keypresses forever. The counter resets once the
+    # menu is gone.
+    if [ "$(window_harness "$w")" = codex ]; then
+      clearf="$STATE/.count-safety-$key"
+      cleared=$(cat "$clearf" 2>/dev/null || echo 0)
+      if [ "$cleared" -lt "${FM_SAFETY_AUTOCLEAR_MAX:-5}" ]; then
+        if fm_clear_safety_prompt "$w"; then
+          echo $(( cleared + 1 )) > "$clearf"
+          continue
+        fi
+        rm -f "$clearf"
+      elif ! tmux capture-pane -p -t "$w" -S -20 2>/dev/null | fm_tmux_safety_prompt_selection >/dev/null; then
+        rm -f "$clearf"
+      fi
+    fi
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
     [ "$(window_kind "$w")" = secondmate ] && continue
     tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
-    key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
     sf="$STATE/.stale-$key"

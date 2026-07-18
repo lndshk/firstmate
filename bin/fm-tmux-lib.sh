@@ -218,9 +218,11 @@ fm_tmux_safety_prompt_selection() {
 
 # fm_clear_safety_prompt: choose "Keep waiting" in Codex's additional-safety
 # dialog for <target>. Returns 0 only when it sent the confirmation keys, 1 when
-# no actionable dialog is present (or auto-clear is disabled/unreadable). Safe
-# to call every poll: after Down but before a confirmed Enter, a subsequent call
-# sees Keep waiting selected and submits it without moving to Learn more.
+# no actionable dialog is present (or auto-clear is disabled/unreadable). Enter
+# is sent only after a recapture confirms Keep waiting is selected: a Down
+# dropped mid-redraw must not confirm "Retry with a faster model". Safe to call
+# every poll: after Down but before a confirmed Enter, a subsequent call sees
+# Keep waiting selected and submits it without moving to Learn more.
 fm_clear_safety_prompt() {  # <target>
   local target=$1 tail20 selection
   [ "${FM_SAFETY_AUTOCLEAR:-1}" != "0" ] || return 1
@@ -229,6 +231,9 @@ fm_clear_safety_prompt() {  # <target>
   if [ "$selection" = retry ]; then
     tmux send-keys -t "$target" Down 2>/dev/null || return 1
     sleep "${FM_SAFETY_AUTOCLEAR_DELAY:-0.1}"
+    tail20=$(tmux capture-pane -p -t "$target" -S -20 2>/dev/null) || return 1
+    selection=$(printf '%s\n' "$tail20" | fm_tmux_safety_prompt_selection) || return 1
+    [ "$selection" = waiting ] || return 1
   fi
   tmux send-keys -t "$target" Enter 2>/dev/null || return 1
   return 0
