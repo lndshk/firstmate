@@ -65,6 +65,16 @@ first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }
 
+working_tree_status() {
+  local rc=0
+  STATUS_OUTPUT=$(git -C "$PROJ" status --porcelain 2>/dev/null) || rc=$?
+  STATUS_ERR=
+  if [ "$rc" != 0 ]; then
+    STATUS_ERR=$(first_line "$(git -C "$PROJ" status --porcelain 2>&1 1>/dev/null || true)")
+  fi
+  return "$rc"
+}
+
 remote_default_snapshot() {
   REMOTE_HEAD_REF=
   REMOTE_HEAD_OID=
@@ -213,13 +223,13 @@ sync_project() {
     echo "$label: skipped: on $cur, expected $DEFAULT"
     return 0
   fi
-  if ! status_output=$(git -C "$PROJ" status --porcelain 2>&1); then
+  if ! working_tree_status; then
     reason="cannot read working tree status"
-    [ -z "$status_output" ] || reason="$reason: $(first_line "$status_output")"
+    [ -z "$STATUS_ERR" ] || reason="$reason: $STATUS_ERR"
     echo "$label: skipped: $reason"
     return 0
   fi
-  if [ -n "$status_output" ]; then
+  if [ -n "$STATUS_OUTPUT" ]; then
     echo "$label: skipped: dirty working tree"
     return 0
   fi
@@ -269,14 +279,14 @@ sync_project() {
     post_cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
     post_local=$(git -C "$PROJ" rev-parse HEAD 2>/dev/null || echo "")
     post_remote=$(git -C "$PROJ" rev-parse "$BASE" 2>/dev/null || echo "")
-    if ! post_status=$(git -C "$PROJ" status --porcelain 2>&1); then
+    if ! working_tree_status; then
       reason="post-sync status failed"
-      [ -z "$post_status" ] || reason="$reason: $(first_line "$post_status")"
+      [ -z "$STATUS_ERR" ] || reason="$reason: $STATUS_ERR"
       echo "$label: skipped: $reason"
       return 0
     fi
     if [ "$post_cur" != "$DEFAULT" ] || [ -z "$post_local" ] || [ "$post_local" != "$post_remote" ] \
-      || [ -n "$post_status" ]; then
+      || [ -n "$STATUS_OUTPUT" ]; then
       echo "$label: skipped: post-sync verification did not prove a clean $DEFAULT at $BASE"
       return 0
     fi
