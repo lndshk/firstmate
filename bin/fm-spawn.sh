@@ -384,7 +384,7 @@ if tmux has-session -t "$SES" 2>/dev/null \
 fi
 
 if [ "$KIND" = secondmate ] && [ -n "$PROJECT_NATIVE_ABS" ]; then
-  if ! FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= \
+  if ! FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
     FM_HOME="$PROJ_ABS" FM_FLEET_PRUNE=0 \
     "$FM_ROOT/bin/fm-fleet-sync.sh" --require-current "$PROJECT_NATIVE_ABS" >&2; then
     echo "error: secondmate $ID project clone is not proven current; refusing to spawn" >&2

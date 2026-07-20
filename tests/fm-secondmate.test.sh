@@ -2270,6 +2270,7 @@ seed_secondmate_home_marker() {
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
 }
 
+# shellcheck disable=SC2016 # single quotes are deliberate: these grep -F patterns match literal $FM_HOME and `AGENTS.md` text in the brief.
 test_secondmate_charter_brief_is_idle_by_default() {
   local home brief
   home="$TMP_ROOT/idle-charter-home"
