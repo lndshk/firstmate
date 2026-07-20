@@ -146,7 +146,7 @@ sync_project() {
   SYNC_CURRENT=0
 
   if [ -L "$PROJ" ]; then
-    if ! resolved=$(CDPATH= cd -- "$PROJ" 2>/dev/null && pwd -P); then
+    if ! resolved=$(CDPATH='' cd -- "$PROJ" 2>/dev/null && pwd -P); then
       echo "$label: skipped: cannot resolve symlink target"
       return 0
     fi
