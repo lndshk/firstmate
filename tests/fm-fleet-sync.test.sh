@@ -129,14 +129,29 @@ test_symlink_target_fast_forwards_during_fleet_iteration() {
   pass "fleet iteration resolves and fast-forwards a symlink target"
 }
 
-test_dirty_symlink_target_is_skipped() {
+test_symlink_target_fast_forwards_by_project_name() {
+  local w out
+  w=$(new_world named-fast-forward)
+  bump_origin "$w" remote-ahead
+
+  out=$(run_sync "$w" linked) || fail "named symlink sync failed: $out"
+
+  assert_contains "$out" "linked: synced " "named symlink sync was not reported"
+  [ "$(git -C "$w/canonical target" rev-parse HEAD)" = "$(git -C "$w/canonical target" rev-parse origin/main)" ] \
+    || fail "named sync did not fast-forward the canonical target to origin/main"
+  [ -L "$w/home/projects/linked" ] || fail "named sync replaced the project symlink"
+  assert_canonical_git_target "$w"
+  pass "named sync resolves and fast-forwards a symlink target"
+}
+
+test_dirty_symlink_target_is_skipped_by_project_name() {
   local w out before
   w=$(new_world dirty)
   bump_origin "$w" remote-ahead
   before=$(git -C "$w/canonical target" rev-parse HEAD)
   printf 'local edit\n' >> "$w/canonical target/tracked.txt"
 
-  out=$(run_sync "$w" "$w/home/projects/linked") || fail "explicit dirty sync failed: $out"
+  out=$(run_sync "$w" linked) || fail "named dirty sync failed: $out"
 
   assert_contains "$out" "linked: skipped: dirty working tree" "dirty target skip was not reported"
   [ "$(git -C "$w/canonical target" rev-parse HEAD)" = "$before" ] \
@@ -144,7 +159,7 @@ test_dirty_symlink_target_is_skipped() {
   grep -F 'local edit' "$w/canonical target/tracked.txt" >/dev/null \
     || fail "dirty target edit was discarded"
   assert_canonical_git_target "$w"
-  pass "explicit sync safely skips a dirty symlink target"
+  pass "named sync safely skips a dirty symlink target"
 }
 
 test_diverged_symlink_target_is_skipped() {
@@ -233,7 +248,8 @@ test_symlink_target_pruning_respects_live_worktrees() {
 }
 
 test_symlink_target_fast_forwards_during_fleet_iteration
-test_dirty_symlink_target_is_skipped
+test_symlink_target_fast_forwards_by_project_name
+test_dirty_symlink_target_is_skipped_by_project_name
 test_diverged_symlink_target_is_skipped
 test_off_default_symlink_target_is_skipped
 test_offline_symlink_target_fails_require_current
