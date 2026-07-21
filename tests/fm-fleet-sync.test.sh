@@ -94,12 +94,21 @@ bump_origin() {
 run_sync() {
   local w=$1
   shift
+  run_sync_from "$w" "$ROOT" "$@"
+}
+
+run_sync_from() {
+  local w=$1 cwd=$2
+  shift 2
   : > "$w/git-c.log"
-  PATH="$w/fakebin:$PATH" \
-  FM_TEST_REAL_GIT="$REAL_GIT" \
-  FM_TEST_GIT_C_LOG="$w/git-c.log" \
-  FM_HOME="$w/home" \
-    "$SYNC" "$@" 2>/dev/null
+  (
+    cd "$cwd" || exit 1
+    PATH="$w/fakebin:$PATH" \
+    FM_TEST_REAL_GIT="$REAL_GIT" \
+    FM_TEST_GIT_C_LOG="$w/git-c.log" \
+    FM_HOME="$w/home" \
+      "$SYNC" "$@" 2>/dev/null
+  )
 }
 
 assert_canonical_git_target() {
@@ -142,6 +151,22 @@ test_symlink_target_fast_forwards_by_project_name() {
   [ -L "$w/home/projects/linked" ] || fail "named sync replaced the project symlink"
   assert_canonical_git_target "$w"
   pass "named sync resolves and fast-forwards a symlink target"
+}
+
+test_existing_bare_relative_symlink_target_fast_forwards() {
+  local w out
+  w=$(new_world bare-relative)
+  ln -s "$w/canonical target" "$w/bare-linked"
+  bump_origin "$w" remote-ahead
+
+  out=$(run_sync_from "$w" "$w" bare-linked) || fail "bare relative symlink sync failed: $out"
+
+  assert_contains "$out" "bare-linked: synced " "bare relative symlink sync was not reported"
+  [ "$(git -C "$w/canonical target" rev-parse HEAD)" = "$(git -C "$w/canonical target" rev-parse origin/main)" ] \
+    || fail "bare relative symlink did not fast-forward the canonical target"
+  [ -L "$w/bare-linked" ] || fail "bare relative project symlink was replaced"
+  assert_canonical_git_target "$w"
+  pass "existing bare relative symlink paths remain supported"
 }
 
 test_dirty_symlink_target_is_skipped_by_project_name() {
@@ -249,6 +274,7 @@ test_symlink_target_pruning_respects_live_worktrees() {
 
 test_symlink_target_fast_forwards_during_fleet_iteration
 test_symlink_target_fast_forwards_by_project_name
+test_existing_bare_relative_symlink_target_fast_forwards
 test_dirty_symlink_target_is_skipped_by_project_name
 test_diverged_symlink_target_is_skipped
 test_off_default_symlink_target_is_skipped

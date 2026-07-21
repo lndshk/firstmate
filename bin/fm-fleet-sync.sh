@@ -53,7 +53,13 @@ resolve_project_arg() {
   case "$path" in
     projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
     */*|.|..) printf '%s\n' "$path" ;;
-    *) printf '%s/%s\n' "$PROJECTS" "$path" ;;
+    *)
+      if [ -e "$path" ] || [ -L "$path" ]; then
+        printf '%s\n' "$path"
+      else
+        printf '%s/%s\n' "$PROJECTS" "$path"
+      fi
+      ;;
   esac
 }
 
