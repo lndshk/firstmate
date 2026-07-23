@@ -1143,6 +1143,16 @@ test_secondmate_spawn_records_home_meta() {
   grep -Fx "worktree=$subhome_abs" "$meta" >/dev/null || fail "meta worktree path moved away from the persistent home"
   grep -Fx "home=$subhome_abs" "$meta" >/dev/null || fail "meta did not record subhome"
   grep -Fx 'projects=alpha, beta' "$meta" >/dev/null || fail "meta did not record project clone list"
+  grep -Fx "manifest=$home/state/spawn-sub.manifest" "$meta" >/dev/null || fail "meta did not publish mandatory manifest pointer"
+  grep -Fx 'manifest-state=verified' "$meta" >/dev/null || fail "new spawn metadata did not mark its manifest verified"
+  grep -Fx 'schema=firstmate.operation-manifest/v1' "$home/state/spawn-sub.manifest" >/dev/null || fail "spawn did not write typed operation manifest"
+  grep -Fx 'verification=verified' "$home/state/spawn-sub.manifest" >/dev/null || fail "new spawn manifest was not verified"
+  grep -Fx 'task-id=spawn-sub' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest task id is missing"
+  grep -Fx 'owner=firstmate' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest owner is missing"
+  grep -Fx 'route=normal' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest route is missing"
+  grep -Fx 'success-predicate-id=receipt-json-schema' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest success predicate is missing"
+  grep -Fx 'failure-predicate-id=deadline-expired' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest failure predicate is missing"
+  grep -Fx 'escalation-action=create-owned-action' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest escalation action is missing"
   grep -F 'treehouse get' "$log" >/dev/null && fail "secondmate spawn should not run project treehouse get"
   grep -F "FM_HOME='$subhome_abs'" "$log" >/dev/null || fail "secondmate launch did not set FM_HOME to subhome"
   grep -F 'FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=' "$log" >/dev/null || fail "secondmate launch did not clear operational overrides"
@@ -1158,6 +1168,46 @@ test_secondmate_spawn_records_home_meta() {
   grep -F -- "-c 'projects={\"$subhome_abs\"={trust_level=\"trusted\"}}'" "$log" >/dev/null \
     || fail "Codex fallback launch was not pre-trusted for its window cwd"
   pass "kind=secondmate missing-clone fallback preserves home metadata and FM_HOME"
+}
+
+test_legacy_meta_migration_is_explicit_and_unverified() {
+  local home out meta manifest
+  home="$TMP_ROOT/legacy-manifest-home"
+  mkdir -p "$home/state"
+  meta="$home/state/legacy-x1.meta"
+  manifest="$home/state/legacy-x1.manifest"
+  printf 'window=fm-legacy-x1\nkind=ship\n' > "$meta"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" --migrate-legacy legacy-x1) || fail "explicit legacy migration failed"
+  grep -F 'manifest-state=legacy-unverified' "$meta" >/dev/null || fail "legacy migration silently treated meta as verified"
+  grep -Fx 'verification=legacy-unverified' "$manifest" >/dev/null || fail "legacy manifest did not retain unverified state"
+  grep -Fx 'migration=explicit' "$manifest" >/dev/null || fail "legacy manifest did not record explicit migration"
+  grep -F 'legacy-unverified' <<<"$out" >/dev/null || fail "legacy migration receipt did not disclose unverified state"
+  if FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" --migrate-legacy legacy-x1 >/dev/null 2>&1; then
+    fail "legacy migration overwrote an existing manifest"
+  fi
+  pass "legacy metadata migration is explicit and never silently verifies a task"
+}
+
+test_spawn_refuses_invalid_manifest_without_publishing_meta() {
+  local home subhome fakebin err log
+  home="$TMP_ROOT/invalid-manifest-main"
+  subhome="$TMP_ROOT/invalid-manifest-sub"
+  mkdir -p "$home/data/invalid-manifest" "$home/state" "$subhome/data"
+  mark_firstmate_home "$subhome"
+  printf 'invalid-manifest\n' > "$subhome/.fm-secondmate-home"
+  printf 'charter\n' > "$subhome/data/charter.md"
+  printf '%s\n' '- invalid-manifest - invalid manifest (home: '"$subhome"'; scope: test; projects: ; added 2026-07-23)' > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/invalid-manifest-fake")
+  err="$TMP_ROOT/invalid-manifest.err"
+  log="$TMP_ROOT/invalid-manifest-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/invalid-manifest-fake/pane.txt" FM_MANIFEST_OWNER=$'bad\nowner' \
+    "$ROOT/bin/fm-spawn.sh" invalid-manifest "$subhome" codex --secondmate >/dev/null 2>"$err"; then
+    fail "spawn accepted a newline-injected manifest field"
+  fi
+  grep -F 'manifest values may not contain newline' "$err" >/dev/null || fail "spawn did not explain invalid manifest refusal: $(tr '\n' ' ' < "$err")"
+  [ ! -e "$home/state/invalid-manifest.meta" ] || fail "invalid manifest spawn published task metadata"
+  [ ! -e "$home/state/invalid-manifest.manifest" ] || fail "invalid manifest spawn published partial manifest"
+  pass "invalid manifest overrides publish neither a contract nor task metadata"
 }
 
 test_secondmate_spawn_without_primary_project_falls_back_home() {
@@ -2488,6 +2538,8 @@ test_home_seed_refuses_project_destinations_outside_subhome
 test_home_seed_refuses_operational_dirs_outside_subhome
 test_home_seed_refuses_symlinked_leaf_files
 test_secondmate_spawn_records_home_meta
+test_legacy_meta_migration_is_explicit_and_unverified
+test_spawn_refuses_invalid_manifest_without_publishing_meta
 test_secondmate_spawn_without_primary_project_falls_back_home
 test_secondmate_spawn_fast_forwards_primary_clone_project_native
 test_secondmate_project_native_override_selects_specific_clone

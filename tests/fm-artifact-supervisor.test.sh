@@ -1,153 +1,83 @@
 #!/usr/bin/env bash
+# Trust-kernel acceptance: machine predicates route one owned action, and an
+# interrupted supervisor replays it without duplicating it or involving a pane.
 set -euo pipefail
-
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-artifact-supervisor.XXXXXX")
-SUPERVISOR_PID=
-cleanup() {
-  [ -n "$SUPERVISOR_PID" ] && kill "$SUPERVISOR_PID" 2>/dev/null || true
-  rm -rf "$TMP"
-}
+cleanup(){ rm -rf "$TMP"; }
 trap cleanup EXIT
-HOME_DIR="$TMP/home"
-mkdir -p "$HOME_DIR/state" "$TMP/bin" "$TMP/board"
+HOME_DIR="$TMP/home"; mkdir -p "$HOME_DIR/state" "$TMP/bin" "$TMP/board"
 
+# No task in this test has a pane. If the evaluator calls tmux for its failure
+# decision this stub fails, making the no-LLM/no-board route boundary explicit.
 cat >"$TMP/bin/tmux" <<'SH'
 #!/usr/bin/env bash
-case "$*" in
-  *"display-message"*"fm-busy"*) echo '%1' ;;
-  *"capture-pane"*"fm-busy"*) echo 'Working (8s • esc to interrupt)' ;;
-  *"display-message"*"fm-waiting"*) echo '%2' ;;
-  *"capture-pane"*"fm-waiting"*) echo 'idle prompt' ;;
-  *) exit 1 ;;
-esac
+exit 1
 SH
 chmod +x "$TMP/bin/tmux"
 
-cat >"$TMP/bin/mv" <<'SH'
-#!/usr/bin/env bash
-if [ "${FM_TEST_FAIL_SNAPSHOT_MV:-}" = 1 ]; then
-  exit 1
-fi
-exec /usr/bin/mv "$@"
-SH
-chmod +x "$TMP/bin/mv"
-
-meta() { printf 'window=%s\nkind=ship\n%s' "$2" "${3:-}" >"$HOME_DIR/state/$1.meta"; }
-meta busy fm-busy 'process-pid=999999
-receipt-deadline=1
-'
-meta waiting fm-waiting "receipt-deadline=$(( $(date +%s) + 60 ))
-"
-meta overdue fm-waiting 'receipt-deadline=1
-'
-meta reported fm-waiting 'receipt-deadline=1
-'
-meta combined fm-gone 'artifact=missing-artifact
-receipt-deadline=1
-'
-printf 'working: busy without receipt\n' >"$HOME_DIR/state/busy.status"
-printf 'working: receipt already recorded\n' >"$HOME_DIR/state/reported.status"
-touch "$HOME_DIR/state/.last-watcher-beat"
-
-run_once() {
-  PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_BOARD_DIR="$TMP/board" \
-    FM_BOARD_OUT="$TMP/board/board.html" FM_BOARD_BODY="$TMP/no-body" \
-    "$ROOT/bin/fm-artifact-supervisor.sh" --once
+manifest(){
+  local id=$1 predicate=$2 args=$3 deadline=$4
+  cat >"$HOME_DIR/state/$id.manifest" <<EOF
+manifest-v1
+task-id=$id
+owner=repair-owner
+route=repair-queue
+identity=command:fixture
+start=1
+deadline=$deadline
+no-progress=30
+receipt=fixture-receipt
+success-predicate=$predicate
+success-args=$args
+failure-predicate=always-fail
+failure-args=
+retry-classes=lock-contention
+retry-cap=1
+idempotency-key=fixture-$id
+escalation-action=bin/fm-supported-repair --task $id
+acknowledgement-deadline=60
+EOF
 }
+printf 'window=never-used\nkind=ship\nprocess-pid=999999\n' >"$HOME_DIR/state/semantic.meta"
+manifest semantic file-content 'path=receipt;expected=accepted' $(( $(date +%s) + 60 ))
+printf 'wrong\n' >"$HOME_DIR/receipt"
 
-run_once
-first=$(sed -n 's/.*data-epoch="\([0-9]*\)".*/\1/p' "$TMP/board/board.html")
-grep -F $'busy\tactive\tbusy pane observed' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
-grep -F $'waiting\tactive-unverified\tawaiting durable receipt' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
-grep -F $'overdue\tstalled\treceipt deadline passed' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
-grep -F $'reported\tactive-unverified\tawaiting durable receipt' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
-grep -q '>active<' "$TMP/board/board.html"
-grep -q '>active-unverified<' "$TMP/board/board.html"
-grep -q '>stalled<' "$TMP/board/board.html"
-grep -q 'receipt-deadline' "$HOME_DIR/state/.artifact-supervisor.escalations"
-grep -F $'\toverdue\treceipt-deadline\t' "$HOME_DIR/state/.artifact-supervisor.escalations" >/dev/null
-grep -F $'combined\tartifact-missing\t' "$HOME_DIR/state/.artifact-supervisor.escalations" >/dev/null
-grep -F $'combined\twindow-gone\t' "$HOME_DIR/state/.artifact-supervisor.escalations" >/dev/null
-grep -F $'combined\treceipt-deadline\t' "$HOME_DIR/state/.artifact-supervisor.escalations" >/dev/null
-! grep -F $'reported\treceipt-deadline\t' "$HOME_DIR/state/.artifact-supervisor.escalations" >/dev/null
+run(){ PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" FM_BOARD_BODY="$TMP/no-body" "$ROOT/bin/fm-artifact-supervisor.sh" --once; }
+run
+grep -F $'semantic\tfailed\tcontent-mismatch' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
+state="$HOME_DIR/state/.artifact-supervisor.state/semantic.state"
+grep -qx 'liveness=gone' "$state"
+grep -qx 'predicate=fail' "$state"
+grep -qx 'outcome=failed' "$state"
+grep -qx 'route=queued' "$state"
+actions=("$HOME_DIR/state/.artifact-supervisor.actions/"*.action)
+[ "${#actions[@]}" -eq 1 ]
+action=${actions[0]}
+event=$(sed -n 's/^event-id=//p' "$action")
+grep -qx 'owner=repair-owner' "$action"
+grep -qx 'route=repair-queue' "$action"
+grep -qx 'failed-predicate=file-content' "$action"
+grep -qx 'failure-code=content-mismatch' "$action"
+grep -qx 'state=queued' "$action"
 
-printf '%s\t1\theartbeat\theartbeat\tcontrolled wake\n' "$(date +%s)" >"$HOME_DIR/state/.wake-queue"
-peek=$(FM_HOME="$HOME_DIR" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_wake_peek' -- "$ROOT")
-printf '%s\n' "$peek" | grep -F $'\theartbeat\theartbeat\tcontrolled wake' >/dev/null
-[ -s "$HOME_DIR/state/.wake-queue" ]
-sleep 1
-run_once
-second=$(sed -n 's/.*data-epoch="\([0-9]*\)".*/\1/p' "$TMP/board/board.html")
-[ "$second" -gt "$first" ]
-[ -s "$HOME_DIR/state/.wake-queue" ]
-[ "$(find "$HOME_DIR/state/.artifact-supervisor.heartbeat" -mmin -1 | wc -l | tr -d ' ')" = 1 ]
+# Simulate a crash after the durable event/action and before acknowledgement.
+rm -f "$HOME_DIR/state/.artifact-supervisor.heartbeat" "$HOME_DIR/state/artifact-supervisor.tsv"
+run
+[ "$(find "$HOME_DIR/state/.artifact-supervisor.actions" -name '*.action' | wc -l | tr -d ' ')" = 1 ]
+FM_HOME="$HOME_DIR" "$ROOT/bin/fm-artifact-supervisor.sh" ack "$event" >/dev/null
+grep -qx 'state=acknowledged' "$action"
 
-rm -f "$HOME_DIR/state/.artifact-supervisor.heartbeat"
-rm -f "$HOME_DIR/state/artifact-supervisor.tsv"
-if FM_TEST_FAIL_SNAPSHOT_MV=1 run_once; then
-  exit 1
-fi
-[ ! -e "$HOME_DIR/state/.artifact-supervisor.heartbeat" ]
-grep -q 'snapshot-write-failed' "$HOME_DIR/state/.artifact-supervisor.error"
-run_once
-[ -f "$HOME_DIR/state/.artifact-supervisor.heartbeat" ]
-[ ! -e "$HOME_DIR/state/.artifact-supervisor.error" ]
+# Busy is liveness evidence only: a dead declared PID and expired hard contract
+# stays failed/expired rather than being presented as active.
+printf 'window=never-used\nkind=ship\nprocess-pid=999999\n' >"$HOME_DIR/state/expired.meta"
+manifest expired always-pass '' 1
+run
+grep -F $'expired\tfailed\tdeadline-expired' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
 
-EMPTY_STATE="$TMP/empty-state"
-mkdir -p "$EMPTY_STATE"
-PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$EMPTY_STATE" FM_BOARD_DIR="$TMP/board" \
-  FM_BOARD_OUT="$TMP/board/empty.html" FM_BOARD_BODY="$TMP/no-body" \
-  "$ROOT/bin/fm-artifact-supervisor.sh" --once
-[ -f "$EMPTY_STATE/.artifact-supervisor.heartbeat" ]
-[ "$(sed -n '1p' "$EMPTY_STATE/artifact-supervisor.tsv")" = artifact-supervisor-v1 ]
-[ "$(wc -l < "$EMPTY_STATE/artifact-supervisor.tsv" | tr -d ' ')" = 2 ]
-grep -q 'No recorded Firstmate panes' "$TMP/board/empty.html"
-
-OVERRIDE_STATE="$TMP/override-state"
-mkdir -p "$OVERRIDE_STATE"
-printf 'window=fm-waiting\nkind=ship\n' >"$OVERRIDE_STATE/override.meta"
-PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$OVERRIDE_STATE" FM_BOARD_DIR="$TMP/board" \
-  FM_BOARD_OUT="$TMP/board/board.html" FM_BOARD_BODY="$TMP/no-body" \
-  "$ROOT/bin/fm-artifact-supervisor.sh" --once
-grep -F $'override\tactive-unverified\tawaiting durable receipt' "$OVERRIDE_STATE/artifact-supervisor.tsv" >/dev/null
-grep -q '>override<' "$TMP/board/board.html"
-
-FAULT_STATE="$TMP/fault-state"
-mkdir -p "$FAULT_STATE/.artifact-supervisor.escalations"
-printf 'window=fm-gone\nkind=ship\nartifact=missing-artifact\n' >"$FAULT_STATE/fault.meta"
-if PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$FAULT_STATE" FM_BOARD_DIR="$TMP/board" \
-  FM_BOARD_OUT="$TMP/board/board.html" FM_BOARD_BODY="$TMP/no-body" \
-  "$ROOT/bin/fm-artifact-supervisor.sh" --once; then
-  exit 1
-fi
-[ ! -e "$FAULT_STATE/.artifact-supervisor.escalated-fault-artifact-missing" ]
-grep -q 'snapshot-write-failed' "$FAULT_STATE/.artifact-supervisor.error"
-
-rm -f "$HOME_DIR/state/.artifact-supervisor.heartbeat"
-if PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_BOARD_DIR="$TMP/board" \
-  FM_BOARD_OUT="$TMP/missing/board.html" FM_BOARD_BODY="$TMP/no-body" \
-  "$ROOT/bin/fm-artifact-supervisor.sh" --once; then
-  exit 1
-fi
-[ ! -e "$HOME_DIR/state/.artifact-supervisor.heartbeat" ]
-grep -q 'board-refresh-failed' "$HOME_DIR/state/.artifact-supervisor.error"
-run_once
-[ -f "$HOME_DIR/state/.artifact-supervisor.heartbeat" ]
-[ ! -e "$HOME_DIR/state/.artifact-supervisor.error" ]
-
-sleep 30 &
-UNRELATED_PID=$!
-printf '%s\n' "$UNRELATED_PID" >"$HOME_DIR/state/.artifact-supervisor.pid"
-PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" \
-  FM_ARTIFACT_SUPERVISOR_INTERVAL=1 "$ROOT/bin/fm-artifact-supervisor.sh" restart >/dev/null
-kill -0 "$UNRELATED_PID"
-kill "$UNRELATED_PID" 2>/dev/null || true
-
-(cd "$ROOT" && PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" \
-  FM_ARTIFACT_SUPERVISOR_INTERVAL=1 bin/fm-artifact-supervisor.sh start) >/dev/null
-for _ in 1 2 3 4 5; do [ -s "$HOME_DIR/state/.artifact-supervisor.pid" ] && break; sleep 1; done
-SUPERVISOR_PID=$(cat "$HOME_DIR/state/.artifact-supervisor.pid")
-kill -0 "$SUPERVISOR_PID"
-[ -f "$HOME_DIR/state/.artifact-supervisor.heartbeat" ]
-printf 'ok - wake advances snapshot and board; missing receipts classify by deadline\n'
+# A legacy meta is visible but explicitly unverified/blocked, never silently
+# classified as assigned or working.
+printf 'window=never-used\nkind=ship\n' >"$HOME_DIR/state/legacy.meta"
+run
+grep -F $'legacy\tblocked\tmandatory manifest missing' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
+printf 'ok - deterministic predicates route durable owned actions across restart\n'

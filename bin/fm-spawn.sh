@@ -3,6 +3,7 @@
 # its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> [harness|launch-command] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [harness|launch-command] --secondmate
+#        fm-spawn.sh --migrate-legacy <task-id>
 #   With no harness arg, the harness comes from fm-harness.sh crew (config/crew-harness,
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
 #   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
@@ -38,6 +39,123 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 SUB_HOME_MARKER=".fm-secondmate-home"
+
+# A task is not a contract merely because it has a tmux window.  Every new
+# dispatch publishes this typed manifest before its .meta becomes visible.
+# Keep this deliberately line-oriented and dependency-free: the deterministic
+# supervisor can validate it with POSIX tooling on macOS as well as Linux.
+MANIFEST_SCHEMA="firstmate.operation-manifest/v1"
+
+now_epoch() { date +%s; }
+
+manifest_value() {
+  case "$1" in
+    *$'\n'*|*$'\r'*)
+      echo "error: manifest values may not contain newline or carriage return" >&2
+      return 1
+      ;;
+  esac
+  printf '%s' "$1"
+}
+
+manifest_uint() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
+}
+
+atomic_publish() { # <destination>; content is read from stdin
+  local dest=$1 tmp
+  mkdir -p "$(dirname "$dest")"
+  tmp=$(mktemp "$(dirname "$dest")/.${ID}.tmp.XXXXXX") || return 1
+  if ! cat > "$tmp"; then rm -f "$tmp"; return 1; fi
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
+}
+
+manifest_path_for() { printf '%s/%s.manifest' "$STATE" "$1"; }
+
+publish_operation_manifest() { # <task-id> <kind> <harness> <worktree> <route>
+  local task_id=$1 task_kind=$2 task_harness=$3 task_worktree=$4 route=$5
+  local started deadline no_progress ack_deadline max_attempts manifest_path value
+  started=$(now_epoch)
+  deadline=$((started + ${FM_MANIFEST_DEADLINE_SECONDS:-86400}))
+  no_progress=${FM_MANIFEST_NO_PROGRESS_SECONDS:-3600}
+  ack_deadline=$((started + ${FM_MANIFEST_ACK_SECONDS:-900}))
+  max_attempts=${FM_MANIFEST_RETRY_MAX_ATTEMPTS:-0}
+  if ! manifest_uint "$deadline" || ! manifest_uint "$no_progress" || ! manifest_uint "$ack_deadline" || ! manifest_uint "$max_attempts"; then
+    echo "error: manifest timing/retry settings must be unsigned integers" >&2
+    return 1
+  fi
+  # Validate before opening the temporary file.  Do not rely on a command
+  # substitution's exit status in the writer below: bash otherwise permits a
+  # malformed environment override to degrade into an empty, apparently valid
+  # field.
+  for value in "$task_id" "${FM_MANIFEST_OWNER:-firstmate}" "$route" "$task_kind" "$task_harness" \
+    "${FM_MANIFEST_COMMAND_ID:-$task_harness}" "$task_worktree" "${FM_MANIFEST_RECEIPT_ID:-task-receipt-json}" \
+    "${FM_MANIFEST_RECEIPT_PATH:-state/$task_id.receipt.json}" "${FM_MANIFEST_ARTIFACTS:-}" \
+    "${FM_MANIFEST_SUCCESS_PREDICATE:-receipt-json-schema}" "${FM_MANIFEST_SUCCESS_ARGS:-schema=firstmate-receipt/v1}" \
+    "${FM_MANIFEST_FAILURE_PREDICATE:-deadline-expired}" "${FM_MANIFEST_FAILURE_ARGS:-deadline=$deadline}" \
+    "${FM_MANIFEST_RETRY_CLASSES:-}" "${FM_MANIFEST_IDEMPOTENCY_KEY:-$task_id:$started}" \
+    "${FM_MANIFEST_ESCALATION_ACTION:-create-owned-action}"; do
+    manifest_value "$value" >/dev/null || return 1
+  done
+  manifest_path=$(manifest_path_for "$task_id")
+  {
+    printf 'schema=%s\n' "$MANIFEST_SCHEMA"
+    printf 'verification=verified\n'
+    printf 'task-id=%s\n' "$(manifest_value "$task_id")"
+    printf 'owner=%s\n' "$(manifest_value "${FM_MANIFEST_OWNER:-firstmate}")"
+    printf 'route=%s\n' "$(manifest_value "$route")"
+    printf 'worker-kind=%s\n' "$(manifest_value "$task_kind")"
+    printf 'worker-identity=%s\n' "$(manifest_value "$task_harness")"
+    printf 'command-identity=%s\n' "$(manifest_value "${FM_MANIFEST_COMMAND_ID:-$task_harness}")"
+    printf 'worktree=%s\n' "$(manifest_value "$task_worktree")"
+    printf 'started-at=%s\n' "$started"
+    printf 'deadline=%s\n' "$deadline"
+    printf 'no-progress-seconds=%s\n' "$no_progress"
+    printf 'expected-receipt-id=%s\n' "$(manifest_value "${FM_MANIFEST_RECEIPT_ID:-task-receipt-json}")"
+    printf 'expected-receipt-path=%s\n' "$(manifest_value "${FM_MANIFEST_RECEIPT_PATH:-state/$task_id.receipt.json}")"
+    printf 'expected-artifacts=%s\n' "$(manifest_value "${FM_MANIFEST_ARTIFACTS:-}")"
+    printf 'success-predicate-id=%s\n' "$(manifest_value "${FM_MANIFEST_SUCCESS_PREDICATE:-receipt-json-schema}")"
+    printf 'success-predicate-args=%s\n' "$(manifest_value "${FM_MANIFEST_SUCCESS_ARGS:-schema=firstmate-receipt/v1}")"
+    printf 'failure-predicate-id=%s\n' "$(manifest_value "${FM_MANIFEST_FAILURE_PREDICATE:-deadline-expired}")"
+    printf 'failure-predicate-args=%s\n' "$(manifest_value "${FM_MANIFEST_FAILURE_ARGS:-deadline=$deadline}")"
+    printf 'retry-classes=%s\n' "$(manifest_value "${FM_MANIFEST_RETRY_CLASSES:-}")"
+    printf 'retry-max-attempts=%s\n' "$max_attempts"
+    printf 'idempotency-key=%s\n' "$(manifest_value "${FM_MANIFEST_IDEMPOTENCY_KEY:-$task_id:$started}")"
+    printf 'escalation-action=%s\n' "$(manifest_value "${FM_MANIFEST_ESCALATION_ACTION:-create-owned-action}")"
+    printf 'acknowledgement-deadline=%s\n' "$ack_deadline"
+  } | atomic_publish "$manifest_path"
+}
+
+migrate_legacy_manifest() { # explicit only: never verifies or changes task ownership
+  local task_id=$1 meta manifest_path tmp
+  meta="$STATE/$task_id.meta"
+  [ -f "$meta" ] || { echo "error: no legacy meta at $meta" >&2; return 1; }
+  manifest_path=$(manifest_path_for "$task_id")
+  [ ! -e "$manifest_path" ] || { echo "error: manifest already exists for $task_id; refusing legacy migration" >&2; return 1; }
+  {
+    printf 'schema=%s\n' "$MANIFEST_SCHEMA"
+    printf 'verification=legacy-unverified\n'
+    printf 'task-id=%s\n' "$task_id"
+    printf 'migration=explicit\n'
+    printf 'migration-reason=legacy-meta-has-no-verified-operation-contract\n'
+    printf 'predicate-state=unknown\n'
+    printf 'route=unqueued\n'
+  } | atomic_publish "$manifest_path" || return 1
+  tmp=$(mktemp "$STATE/.${task_id}.meta.XXXXXX") || { rm -f "$manifest_path"; return 1; }
+  cat "$meta" > "$tmp" && {
+    printf 'manifest=%s\n' "$manifest_path"
+    printf 'manifest-state=legacy-unverified\n'
+  } >> "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$meta" || { rm -f "$tmp"; rm -f "$manifest_path"; return 1; }
+  printf 'migrated legacy task %s: manifest-state=legacy-unverified\n' "$task_id"
+}
+
+if [ "${1:-}" = --migrate-legacy ]; then
+  [ "$#" = 2 ] || { echo "usage: $0 --migrate-legacy <task-id>" >&2; exit 2; }
+  ID=$2
+  migrate_legacy_manifest "$ID"
+  exit 0
+fi
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -503,6 +621,12 @@ EOF
 fi
 
 mkdir -p "$STATE"
+MANIFEST_ROUTE=${FM_MANIFEST_ROUTE:-normal}
+publish_operation_manifest "$ID" "$KIND" "${HARNESS:-raw-command}" "$WT" "$MANIFEST_ROUTE" || {
+  echo "error: failed to atomically publish mandatory operation manifest for $ID" >&2
+  exit 1
+}
+MANIFEST_PATH=$(manifest_path_for "$ID")
 {
   echo "window=$T"
   echo "worktree=$WT"
@@ -511,11 +635,19 @@ mkdir -p "$STATE"
   echo "kind=$KIND"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  echo "manifest=$MANIFEST_PATH"
+  echo "manifest-state=verified"
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} | atomic_publish "$STATE/$ID.meta" || {
+  # A manifest without a visible task is inert. Remove it so a later dispatch
+  # cannot accidentally inherit a contract from this failed publication.
+  rm -f "$MANIFEST_PATH"
+  echo "error: failed to atomically publish task metadata for $ID" >&2
+  exit 1
+}
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
