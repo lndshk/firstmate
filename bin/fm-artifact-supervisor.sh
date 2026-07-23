@@ -64,8 +64,8 @@ escalate_once() { # <id> <reason> <action>
   key=$(printf '%s' "$id-$reason" | tr -c 'A-Za-z0-9_.-' '_')
   marker="$STATE/.artifact-supervisor.escalated-$key"
   [ -e "$marker" ] && return 0
-  printf '%s\t%s\t%s\t%s\n' "$(now_epoch)" "$id" "$reason" "$action" >> "$ESCALATIONS"
-  : > "$marker"
+  printf '%s\t%s\t%s\t%s\n' "$(now_epoch)" "$id" "$reason" "$action" >> "$ESCALATIONS" || return 1
+  : > "$marker" || return 1
 }
 clear_escalation() { # <id> <reason>
   local key
@@ -131,22 +131,31 @@ classify_meta() { # <meta>; prints snapshot row
     fi
   fi
 
-  if [ -n "$artifact_reason" ]; then escalate_once "$id" "$artifact_reason" "$artifact_action"; else clear_escalation "$id" artifact-missing; clear_escalation "$id" artifact-stale; fi
-  if [ -n "$receipt_reason" ]; then escalate_once "$id" "$receipt_reason" "$receipt_action"; else clear_escalation "$id" receipt-failure; fi
-  if [ -n "$process_reason" ]; then escalate_once "$id" "$process_reason" "$process_action"; else clear_escalation "$id" process-gone; fi
-  if [ -n "$window_reason" ]; then escalate_once "$id" "$window_reason" "$window_action"; else clear_escalation "$id" window-gone; fi
-  if [ -n "$deadline_reason" ]; then escalate_once "$id" "$deadline_reason" "$deadline_action"; else clear_escalation "$id" receipt-deadline; fi
+  if [ -n "$artifact_reason" ]; then escalate_once "$id" "$artifact_reason" "$artifact_action" || return 1; else clear_escalation "$id" artifact-missing; clear_escalation "$id" artifact-stale; fi
+  if [ -n "$receipt_reason" ]; then escalate_once "$id" "$receipt_reason" "$receipt_action" || return 1; else clear_escalation "$id" receipt-failure; fi
+  if [ -n "$process_reason" ]; then escalate_once "$id" "$process_reason" "$process_action" || return 1; else clear_escalation "$id" process-gone; fi
+  if [ -n "$window_reason" ]; then escalate_once "$id" "$window_reason" "$window_action" || return 1; else clear_escalation "$id" window-gone; fi
+  if [ -n "$deadline_reason" ]; then escalate_once "$id" "$deadline_reason" "$deadline_action" || return 1; else clear_escalation "$id" receipt-deadline; fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$class" "$reason" "$(printf '%s' "$receipt" | clean_field)" "$receipt_age" "${deadline:-}" "$artifact_age"
 }
 
 write_snapshot() {
-  local tmp meta
+  local tmp rows meta status
   tmp="$SNAPSHOT.tmp.$$"
+  rows="$tmp.rows"
+  rm -f "$rows"
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    classify_meta "$meta" >> "$rows" || { rm -f "$tmp" "$rows"; return 1; }
+  done
   {
     printf 'artifact-supervisor-v1\n'
     printf 'generated-at\t%s\n' "$(now_epoch)"
-    for meta in "$STATE"/*.meta; do [ -f "$meta" ] && classify_meta "$meta"; done | LC_ALL=C sort
+    LC_ALL=C sort "$rows"
   } > "$tmp" && mv -f "$tmp" "$SNAPSHOT"
+  status=$?
+  rm -f "$rows"
+  return "$status"
 }
 
 cycle() {
@@ -156,7 +165,7 @@ cycle() {
     printf '%s\tsnapshot-write-failed\n' "$(now_epoch)" > "$ERROR" 2>/dev/null || true
     return 1
   fi
-  if ! [ -x "$SCRIPT_DIR/fm-board.sh" ] || ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_ARTIFACT_SNAPSHOT="$SNAPSHOT" "$SCRIPT_DIR/fm-board.sh" --once >/dev/null 2>&1; then
+  if ! [ -x "$SCRIPT_DIR/fm-board.sh" ] || ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_ARTIFACT_SNAPSHOT="$SNAPSHOT" FM_ARTIFACT_STALE_AFTER="$((INTERVAL * 3))" "$SCRIPT_DIR/fm-board.sh" --once >/dev/null 2>&1; then
     printf '%s\tboard-refresh-failed\n' "$(now_epoch)" >> "$LOG" 2>/dev/null || true
     printf '%s\tboard-refresh-failed\n' "$(now_epoch)" > "$ERROR" 2>/dev/null || true
     return 1

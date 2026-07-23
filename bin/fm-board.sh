@@ -13,6 +13,7 @@ HEARTBEAT="${FM_BOARD_HEARTBEAT:-$BOARD_DIR/.board-generator.heartbeat}"
 SESSION="${FM_BOARD_SESSION:-fm-board-generator}"
 INTERVAL="${FM_BOARD_INTERVAL:-8}"
 STALE_AFTER="${FM_BOARD_STALE_AFTER:-$((INTERVAL * 3))}"
+ARTIFACT_STALE_AFTER="${FM_ARTIFACT_STALE_AFTER:-$STALE_AFTER}"
 STALL_AFTER="${FM_BOARD_STALL_AFTER:-180}"
 SNAPSHOT="${FM_ARTIFACT_SNAPSHOT:-$STATE/artifact-supervisor.tsv}"
 
@@ -104,7 +105,7 @@ supervisor_card() {
   [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null && daemon_state=running
   activity=$(cat "$STATE/.fm-activity" 2>/dev/null || echo 'no activity receipt')
   activity_age=$(age_of "$STATE/.fm-activity")
-  if [ "$artifact_age" -ge "$STALE_AFTER" ]; then
+  if [ "$artifact_age" -ge "$ARTIFACT_STALE_AFTER" ]; then
     printf '<div class="supervisor bad"><b>Artifact supervisor: stale</b><span>No artifact heartbeat for %s; restart artifact supervision before trusting task state.</span><small>watcher %s (%s ago) · daemon %s · %s (%s ago)</small></div>' "$(age_text "$artifact_age")" "$watcher_state" "$(age_text "$watcher_age")" "$daemon_state" "$(printf '%s' "$activity" | escape_html)" "$(age_text "$activity_age")"
   else
     printf '<div class="supervisor"><b>Artifact supervisor: healthy</b><span>Artifact heartbeat %s ago. State is derived from files, mtimes, and pane footers only.</span><small>watcher %s (%s ago) · daemon %s · %s (%s ago)</small></div>' "$(age_text "$artifact_age")" "$watcher_state" "$(age_text "$watcher_age")" "$daemon_state" "$(printf '%s' "$activity" | escape_html)" "$(age_text "$activity_age")"

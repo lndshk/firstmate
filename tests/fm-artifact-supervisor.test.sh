@@ -95,6 +95,17 @@ PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$OVERRIDE_STATE" FM
 grep -F $'override\tactive-unverified\tawaiting durable receipt' "$OVERRIDE_STATE/artifact-supervisor.tsv" >/dev/null
 grep -q '>override<' "$TMP/board/board.html"
 
+FAULT_STATE="$TMP/fault-state"
+mkdir -p "$FAULT_STATE/.artifact-supervisor.escalations"
+printf 'window=fm-gone\nkind=ship\nartifact=missing-artifact\n' >"$FAULT_STATE/fault.meta"
+if PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$FAULT_STATE" FM_BOARD_DIR="$TMP/board" \
+  FM_BOARD_OUT="$TMP/board/board.html" FM_BOARD_BODY="$TMP/no-body" \
+  "$ROOT/bin/fm-artifact-supervisor.sh" --once; then
+  exit 1
+fi
+[ ! -e "$FAULT_STATE/.artifact-supervisor.escalated-fault-artifact-missing" ]
+grep -q 'snapshot-write-failed' "$FAULT_STATE/.artifact-supervisor.error"
+
 rm -f "$HOME_DIR/state/.artifact-supervisor.heartbeat"
 if PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_BOARD_DIR="$TMP/board" \
   FM_BOARD_OUT="$TMP/missing/board.html" FM_BOARD_BODY="$TMP/no-body" \
