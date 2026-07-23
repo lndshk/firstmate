@@ -603,7 +603,7 @@ housekeeping() {  # <state>
       local seen
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
-      escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
+      escalate_add "$state" "$(status_escalation "$f")"
       mark_status_seen "$state" "$task" "$last"
     done
   fi

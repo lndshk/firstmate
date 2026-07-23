@@ -91,6 +91,27 @@ EOF
   pass "detects terminal status still listed in In flight"
 }
 
+test_failed_receipt_requires_repair() {
+  local dir out
+  dir=$(make_case failed_receipt)
+  cat > "$dir/data/backlog.md" <<'EOF'
+## In flight
+- [ ] failed-f2 - failed task (repo: firstmate)
+
+## Queued
+
+## Done
+EOF
+  printf '%s\n' 'working: ran focused tests' 'failed: focused test failed' > "$dir/state/failed-f2.status"
+
+  out=$(run_check "$dir") || fail "failed receipt check exited non-zero"
+  printf '%s\n' "$out" | grep -F 'failed: failed-f2 - failed: focused test failed; last useful action: working: ran focused tests; required next action: inspect the failure and repair, retry, or escalate the needed decision' >/dev/null \
+    || fail "failed receipt did not request repair: $out"
+  ! printf '%s\n' "$out" | grep -F 'advance: failed-f2' >/dev/null \
+    || fail "failed receipt was routed to delivery close: $out"
+  pass "routes failed terminal receipts to repair instead of delivery"
+}
+
 test_result_receipt_is_terminal_not_stalled() {
   local dir out capture
   dir=$(make_case result_receipt)
@@ -570,6 +591,7 @@ EOF
 }
 
 test_finished_but_not_advanced
+test_failed_receipt_requires_repair
 test_result_receipt_is_terminal_not_stalled
 test_unblocked_parked_item
 test_unblocked_item_blocker_in_archive

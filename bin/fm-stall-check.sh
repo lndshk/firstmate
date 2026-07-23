@@ -203,6 +203,10 @@ last_status_line() { # <status-file>
   awk 'NF { line = $0 } END { print line }' "$1" 2>/dev/null || true
 }
 
+previous_status_line() { # <status-file>
+  awk 'NF { previous = line; line = $0 } END { print previous }' "$1" 2>/dev/null || true
+}
+
 terminal_status_line() { # <line>
   case "$1" in
     done:*|result:*|failed:*) return 0 ;;
@@ -254,7 +258,7 @@ meta_has_pr() { # <id>
 }
 
 check_finished_not_advanced() {
-  local inflight terminal id
+  local inflight terminal id status last previous
   inflight=$(in_flight_ids)
   [ -n "$inflight" ] || return 0
   terminal=$(terminal_status_ids)
@@ -263,7 +267,15 @@ check_finished_not_advanced() {
     [ -n "$id" ] || continue
     meta_has_pr "$id" && continue
     if is_in_set "$id" "$inflight"; then
-      printf 'advance: %s - terminal status but still in-flight; advance and close through its delivery path without a pane peek\n' "$id"
+      status="$STATE/$id.status"
+      last=$(last_status_line "$status")
+      case "$last" in
+        failed:*)
+          previous=$(previous_status_line "$status")
+          printf 'failed: %s - %s; last useful action: %s; required next action: inspect the failure and repair, retry, or escalate the needed decision\n' "$id" "$last" "${previous:-none recorded}" ;;
+        *)
+          printf 'advance: %s - terminal status but still in-flight; advance and close through its delivery path without a pane peek\n' "$id" ;;
+      esac
     fi
   done <<EOF
 $terminal

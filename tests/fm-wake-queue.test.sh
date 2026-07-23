@@ -713,6 +713,36 @@ test_heartbeat_scan_dedup() {
   pass "catch-all scan escalates a missed terminal once, not twice"
 }
 
+test_heartbeat_scan_uses_status_escalation() {
+  local dir state task receipt expected
+  dir=$(make_supercase scan-format)
+  state="$dir/state"
+  for task in done-h1 result-h2 failed-h3; do
+    case "$task" in
+      done-h1)
+        receipt='done: delivery ready'
+        expected='task done-h1 terminal: done: delivery ready; required next action: advance its delivery path and close it without a pane inspection' ;;
+      result-h2)
+        receipt='result: report complete'
+        expected='task result-h2 terminal: result: report complete; required next action: advance its delivery path and close it without a pane inspection' ;;
+      failed-h3)
+        receipt='failed: focused test failed'
+        expected='task failed-h3 failed: failed: focused test failed; last useful action: working: ran focused tests; required next action: inspect the failure and repair, retry, or escalate the needed decision' ;;
+    esac
+    if [ "$task" = failed-h3 ]; then
+      printf '%s\n' 'working: ran focused tests' "$receipt" > "$state/$task.status"
+    else
+      printf '%s\n' "$receipt" > "$state/$task.status"
+    fi
+    rm -f "$state/.subsuper-last-scan"
+    FM_STATE_OVERRIDE="$state" housekeeping "$state"
+    grep -F "$expected" "$state/.subsuper-escalations" >/dev/null \
+      || fail "catch-all scan did not use status escalation for $receipt"
+    : > "$state/.subsuper-escalations"
+  done
+  pass "catch-all scan uses actionable status receipts"
+}
+
 test_handle_wake_routes_self_and_escalate() {
   local dir state
   dir=$(make_supercase handle)
@@ -1453,6 +1483,7 @@ test_housekeeping_terminal_receipt_clears_stale
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
+test_heartbeat_scan_uses_status_escalation
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
