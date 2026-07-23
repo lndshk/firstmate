@@ -85,12 +85,12 @@ projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" lines
   <id>.turn-ended    touched by turn-end hooks
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check appends pr=)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check records pr= and pr-state=)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
-  .hash-* .count-* .stale-* .seen-* .last-* .heartbeat-streak   watcher internals; never touch
+  .hash-* .count-* .stale-* .interrupted-* .seen-* .last-* .heartbeat-streak   watcher internals; never touch
   .last-watcher-beat watcher liveness beacon, touched every poll; fm-guard.sh reads it
   .watch.keepalive.* keepalive sidecar lock, log, and stderr; never touch
   .subsuper-* .supervise-daemon.*   sub-supervisor internals (stale markers, escalation buffer, inject-wedged marker, seen-status dedup, log, lock, pid); never touch
@@ -503,11 +503,11 @@ Do not pkill-and-restart the watcher as a routine operation; just arm it, and le
 P2 of the watcher reliability design - proactive routing of wakes into supervisor turns for chat-mode / walk-away supervision - is provided by the optional sub-supervisor (`bin/fm-supervise-daemon.sh`, below), which is presence-gated via the `/afk` skill.
 P3, a blocking-waiter split, remains deferred; the one-shot restart model is otherwise preserved.
 Waiting on the watcher is intentionally silent.
-After arming it, do not send idle progress updates to the captain; wait until it returns `signal`, `stale`, `check`, or `heartbeat`, unless the captain asks for status.
+After arming it, do not send idle progress updates to the captain; wait until it returns `signal`, `stale`, `interrupted`, `check`, or `heartbeat`, unless the captain asks for status.
 Empty polls, elapsed waiting time, and "still no change" are tool bookkeeping, not conversational progress.
 
 ```sh
-bin/fm-watch.sh   # run in background; exits with: signal|stale|check|heartbeat
+bin/fm-watch.sh   # run in background; exits with: signal|stale|interrupted|check|heartbeat
 bin/fm-wake-drain.sh   # drain queued wake records at turn start
 ```
 
@@ -516,8 +516,9 @@ On wake, in order of cheapness:
 1. Read the reason line and drain queued wake records with `bin/fm-wake-drain.sh`.
 2. `signal:` read the listed status files first; a wake lists every signal that landed within the coalescing grace window (e.g. a status write plus the same turn's turn-end marker), and each is ~30 tokens and usually sufficient.
 3. `stale:` the crewmate stopped without reporting; peek the pane (`bin/fm-peek.sh <window>`) to diagnose.
-4. `check:` a per-task poll fired (usually a merge); act on it.
-5. `heartbeat:` review the whole fleet: skim each window's status file, peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then re-arm the watcher.
+4. `interrupted:` a recorded pane disappeared; recover or relaunch the task using its last status as the last useful action.
+5. `check:` a per-task poll fired (usually a merge); act on it.
+6. `heartbeat:` review the whole fleet: skim each window's status file, peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then re-arm the watcher.
    A heartbeat with no captain-relevant change is internal; do not report that the fleet is unchanged.
 
 Run `bin/fm-stall-check.sh` at every heartbeat and every wake-handling turn, immediately after draining queued wakes and before deciding the fleet is quiet.
@@ -527,7 +528,7 @@ It also emits `advisor-idle?:` when a live `kind=secondmate` pane has been idle 
 It also emits `unlanded?:` when an in-flight push-based crew's worktree holds commits reachable from no remote-tracking branch - committed work living only in a disposable worktree that teardown would discard; push the branch, or, if it is a squash-merged branch whose remote copy was deleted, confirm it already landed. Like `stall?:`, this is a verify-candidate, not an assertion. Secondmate, scout, and `local-only` tasks are exempt (a scout ships a report, `local-only` has no remote by design), and PR-parked tasks are skipped because the merge poll already tracks them.
 `bin/fm-guard.sh` also warns when the stall detector has any finding, so the next supervision script invocation surfaces dormant work mechanically.
 
-Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.
+Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, interrupted, or check wake resets the cadence to the base interval.
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
 
 Never rely on hooks or status files alone; the heartbeat review of every window is mandatory and unconditional. The exception is a terminal receipt: status is sufficient to advance and close that task, so do not peek merely because its pane remains present.

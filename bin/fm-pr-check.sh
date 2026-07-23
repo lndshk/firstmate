@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: appends pr=<url> to state/<id>.meta and arms the
+# Record a PR-ready task: records pr=<url> and pr-state=<category> in
+# state/<id>.meta and arms the
 # watcher's merge poll by writing state/<id>.check.sh, which prints one line iff
 # the PR is merged (the watcher's check contract: output = wake firstmate,
 # silence = keep sleeping).
