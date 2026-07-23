@@ -52,6 +52,8 @@ terminal_receipt() {
 # upgrade or while the supervisor has not completed its first cycle.
 snapshot_row() { # <task-id>
   [ -f "$SNAPSHOT" ] || return 1
+  [ "$(age_of "$SNAPSHOT")" -lt "$ARTIFACT_STALE_AFTER" ] || return 1
+  [ "$(age_of "$STATE/.artifact-supervisor.heartbeat")" -lt "$ARTIFACT_STALE_AFTER" ] || return 1
   awk -F '\t' -v wanted="$1" 'NR > 2 && $1 == wanted { print; exit }' "$SNAPSHOT"
 }
 
@@ -87,6 +89,7 @@ EOF
       state=stalled; class=stalled; reason="No durable update for $(age_text "$age"); inspect the idle pane."
     fi
   fi
+  id=$(printf '%s' "$id" | escape_html)
   receipt=$(printf '%s' "$receipt" | cut -c1-260 | escape_html)
   reason=$(printf '%s' "$reason" | escape_html)
   printf '<tr><td><code>%s</code><small>%s</small></td><td><span class="state %s">%s</span></td><td>%s</td><td>%s ago</td><td class="reason %s">%s</td></tr>\n' \
