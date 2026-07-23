@@ -64,8 +64,10 @@ test_documented_lifecycle_is_advisory_and_durable() {
     || fail "lifecycle omitted durable record-first ordering"
   grep -F 'Firstmate owns every accepted request through a verified terminal outcome' "$ROOT/AGENTS.md" >/dev/null \
     || fail "lifecycle omitted interruption and restart ownership"
-  grep -F 'live metadata and pane evidence together show that the launch command was submitted or the agent started' "$ROOT/AGENTS.md" >/dev/null \
+  grep -F 'live metadata and pane evidence together show that the agent started and is processing the brief' "$ROOT/AGENTS.md" >/dev/null \
     || fail "recovery accepts metadata without launch evidence"
+  grep -F 'leave the request Queued and reconcile the partial window before retrying' "$ROOT/AGENTS.md" >/dev/null \
+    || fail "recovery omits partial-window reconciliation"
   grep -F 'mechanical exception alarm' "$ROOT/AGENTS.md" >/dev/null \
     || fail "watcher guidance stopped being a thin exception alarm"
   grep -F 'reconcile that claim against the brief'\''s named success evidence' "$ROOT/AGENTS.md" >/dev/null \

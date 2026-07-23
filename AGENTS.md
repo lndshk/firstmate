@@ -384,7 +384,7 @@ Three is an advisory default for direct ship/scout crewmates, not a hard spawn g
 
 Every incoming work request becomes a durable `data/backlog.md` record before it is dispatched or left queued.
 The sequence is always Queued -> dispatch -> In flight: record the request under Queued, then scaffold and spawn a direct crewmate or steer the selected secondmate, and only after that dispatch succeeds move the existing record to In flight.
-A failed dispatch therefore leaves the request durably Queued. During recovery, move a Queued record to In flight only when live metadata and pane evidence together show that the launch command was submitted or the agent started; metadata alone is insufficient.
+A failed dispatch therefore leaves the request durably Queued. During recovery, move a Queued record to In flight only when live metadata and pane evidence together show that the agent started and is processing the brief; a submitted command, confirmation gate, or metadata alone is insufficient. Otherwise leave the request Queued and reconcile the partial window before retrying.
 Never use an add-and-start operation for new work and never mark a queued item In flight before its dispatch succeeds.
 For secondmate-routed work, the main home keeps the durable request record and follows up after interruptions or restarts until the secondmate reports a terminal outcome; before retrying a queued send after interruption, reconcile the secondmate's pane and status so already-started work is not dispatched twice.
 A later urgent request may change priority or interrupt which queued task goes next, but it never erases, replaces, or silently abandons the earlier task.
