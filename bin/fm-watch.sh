@@ -357,14 +357,19 @@ EOF
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
     [ "$(window_meta_field "$w" kind ship)" = secondmate ] && continue
+    interruptedf="$STATE/.interrupted-$key"
     tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || {
       # A recorded pane disappearing is an interruption, not an idle task.
       # Preserve it in the durable wake queue and escalate immediately instead
       # of letting the task silently remain in flight forever.
-      fm_wake_append interrupted "$w" "interrupted: $w" || exit 1
-      wake "interrupted: $w"
+      if [ ! -e "$interruptedf" ]; then
+        fm_wake_append interrupted "$w" "interrupted: $w" || exit 1
+        : > "$interruptedf" || exit 1
+        wake "interrupted: $w"
+      fi
       continue
     }
+    rm -f "$interruptedf"
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"

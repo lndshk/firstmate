@@ -284,7 +284,7 @@ test_stale_enqueue_before_suppressor() {
 }
 
 test_interrupted_enqueue_before_stale_classification() {
-  local dir state fakebin out drain_out window
+  local dir state fakebin out drain_out window key watcher
   dir=$(make_case interrupted)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -292,13 +292,25 @@ test_interrupted_enqueue_before_stale_classification() {
   drain_out="$dir/drain.out"
   window="test:fm-interrupted"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/interrupted.meta"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for interrupted pane"
   grep -Fx "interrupted: $window" "$out" >/dev/null || fail "watcher did not print interrupted wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after interrupted wake failed"
   grep "$(printf '\tinterrupted\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "interrupted wake was not queued"
+  [ -e "$state/.interrupted-$key" ] || fail "interrupted suppressor was not written"
   ! grep -F "stale: $window" "$out" >/dev/null || fail "interrupted pane was also classified stale"
-  pass "interrupted pane is queued distinctly before stale classification"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  watcher=$!
+  sleep 1
+  is_live_non_zombie "$watcher" || fail "suppressed interrupted watcher exited"
+  [ ! -s "$out" ] || fail "suppressed interrupted pane emitted another wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after suppressed interruption failed"
+  [ ! -s "$drain_out" ] || fail "suppressed interrupted pane was requeued"
+  kill "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  pass "interrupted pane is queued once before stale classification"
 }
 
 test_check_output_is_queued() {
