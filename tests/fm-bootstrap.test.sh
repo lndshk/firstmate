@@ -3,6 +3,7 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT=
+SUPERVISOR_HOME=
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
 fail() {
@@ -15,6 +16,9 @@ pass() {
 }
 
 cleanup() {
+  if [ -n "${SUPERVISOR_HOME:-}" ]; then
+    FM_HOME="$SUPERVISOR_HOME" "$ROOT/bin/fm-artifact-supervisor-service.sh" stop >/dev/null 2>&1 || true
+  fi
   if [ -n "${TMP_ROOT:-}" ]; then
     rm -rf "$TMP_ROOT"
   fi
@@ -66,17 +70,18 @@ run_bootstrap() {
 }
 
 test_bootstrap_starts_custom_main_home_supervisor() {
-  local case_dir fakebin out pid
+  local case_dir fakebin out
   case_dir="$TMP_ROOT/custom-main-home"
   mkdir -p "$case_dir/home" "$case_dir/board"
   fakebin=$(make_fake_toolchain "$case_dir")
+  SUPERVISOR_HOME="$case_dir/home"
 
   out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_BOARD_DIR="$case_dir/board" "$ROOT/bin/fm-bootstrap.sh")
   [ -z "$out" ] || fail "bootstrap reported problems for custom main home: $out"
   for _ in 1 2 3 4 5; do [ -s "$case_dir/home/state/.artifact-supervisor.pid" ] && break; sleep 1; done
   [ -s "$case_dir/home/state/.artifact-supervisor.pid" ] || fail "bootstrap did not start custom main-home supervisor"
-  pid=$(cat "$case_dir/home/state/.artifact-supervisor.pid")
-  kill "$pid" 2>/dev/null || true
+  FM_HOME="$SUPERVISOR_HOME" "$ROOT/bin/fm-artifact-supervisor-service.sh" stop >/dev/null 2>&1 || fail "bootstrap supervisor service did not stop"
+  SUPERVISOR_HOME=
   pass "bootstrap starts supervisor for custom main home"
 }
 

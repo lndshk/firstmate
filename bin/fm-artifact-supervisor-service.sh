@@ -13,10 +13,15 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 SUPERVISOR="$SCRIPT_DIR/fm-artifact-supervisor.sh"
 INTERVAL="${FM_ARTIFACT_SERVICE_INTERVAL:-2}"
+SUPERVISOR_INTERVAL="${FM_ARTIFACT_SUPERVISOR_INTERVAL:-15}"
+WORKER_STALE_AFTER="${FM_ARTIFACT_WORKER_STALE_AFTER:-$((SUPERVISOR_INTERVAL * 3))}"
+WORKER_STARTUP_GRACE="${FM_ARTIFACT_WORKER_STARTUP_GRACE:-$((SUPERVISOR_INTERVAL * 2))}"
+WORKER_STOP_TIMEOUT="${FM_ARTIFACT_WORKER_STOP_TIMEOUT:-20}"
 LOCK="$STATE/.artifact-supervisor.service.lock"
 PIDFILE="$STATE/.artifact-supervisor.service.pid"
 WORKERFILE="$STATE/.artifact-supervisor.service.worker"
 HEARTBEAT="$STATE/.artifact-supervisor.service.heartbeat"
+WORKER_HEARTBEAT="$STATE/.artifact-supervisor.heartbeat"
 LOG="$STATE/.artifact-supervisor.service.log"
 ERROR="$STATE/.artifact-supervisor.service.error"
 EVENTS="$STATE/.artifact-supervisor.service.events"
@@ -25,7 +30,21 @@ EVENTS="$STATE/.artifact-supervisor.service.events"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 now_epoch() { date +%s; }
-pid_alive() { fm_pid_alive "$1"; }
+pid_alive() {
+  local pid=$1 state
+  fm_pid_alive "$pid" || return 1
+  state=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+  case "$state" in *Z*) return 1 ;; esac
+  [ -n "$state" ]
+}
+mtime_epoch() {
+  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
+}
+age_of() {
+  local modified
+  modified=$(mtime_epoch "$1") || return 1
+  printf '%s\n' "$(( $(now_epoch) - modified ))"
+}
 
 lock_pid() { cat "$LOCK/pid" 2>/dev/null || true; }
 service_pid_is_ours() { # <pid>
@@ -37,20 +56,55 @@ service_pid_is_ours() { # <pid>
   return 1
 }
 worker_pid_is_ours() { # <pid>
-  local pid=$1 command
+  local pid=$1 command worker_lock_pid
   pid_alive "$pid" || return 1
+  worker_lock_pid=$(cat "$STATE/.artifact-supervisor.lock/pid" 2>/dev/null || true)
+  [ "$worker_lock_pid" = "$pid" ] || return 1
   command=$(ps -p "$pid" -o command= 2>/dev/null || true)
   case "$command" in *"$SCRIPT_DIR/fm-artifact-supervisor.sh"*'--loop'*) return 0 ;; esac
   return 1
 }
 worker_pid() { cat "$STATE/.artifact-supervisor.pid" 2>/dev/null || true; }
+owned_worker_pid() { awk 'NR == 1 { print $1 }' "$WORKERFILE" 2>/dev/null || true; }
+owned_worker_phase() { awk 'NR == 1 { print $2 }' "$WORKERFILE" 2>/dev/null || true; }
+record_worker() {
+  local pid=$1 phase=$2 tmp="$WORKERFILE.tmp.$$"
+  printf '%s %s\n' "$pid" "$phase" > "$tmp" && mv -f "$tmp" "$WORKERFILE"
+}
+worker_heartbeat_fresh() {
+  local age
+  age=$(age_of "$WORKER_HEARTBEAT") || return 1
+  [ "$age" -le "$WORKER_STALE_AFTER" ]
+}
+worker_within_startup_grace() {
+  local pid=$1 age
+  [ "$(owned_worker_pid)" = "$pid" ] || return 1
+  [ "$(owned_worker_phase)" = starting ] || return 1
+  age=$(age_of "$WORKERFILE") || return 1
+  [ "$age" -le "$WORKER_STARTUP_GRACE" ]
+}
 event() { printf '%s\t%s\t%s\n' "$(now_epoch)" "$1" "$2" >> "$EVENTS"; }
 
 ensure_worker() {
-  local pid n=0 lock_pid
+  local pid n=0 lock_pid owned phase
   pid=$(worker_pid)
   if worker_pid_is_ours "$pid"; then
-    return 0
+    owned=$(owned_worker_pid)
+    phase=$(owned_worker_phase)
+    if [ "$owned" != "$pid" ]; then
+      record_worker "$pid" running || return 1
+      event worker-adopted "$pid"
+      phase=running
+    fi
+    if worker_heartbeat_fresh; then
+      [ "$phase" = running ] || record_worker "$pid" running || return 1
+      return 0
+    fi
+    if worker_within_startup_grace "$pid"; then
+      return 0
+    fi
+    event worker-unhealthy "$pid heartbeat stale or missing"
+    stop_worker || return 1
   fi
   # A TERM'd worker normally releases this immediately.  If it died between
   # trap delivery and cleanup, remove only a proven-dead lock before relaunch;
@@ -74,7 +128,7 @@ ensure_worker() {
   while [ "$n" -lt 20 ]; do
     pid=$(worker_pid)
     if worker_pid_is_ours "$pid"; then
-      printf '%s\n' "$pid" > "$WORKERFILE"
+      record_worker "$pid" starting || return 1
       event worker-started "$pid"
       return 0
     fi
@@ -85,15 +139,24 @@ ensure_worker() {
 }
 
 stop_worker() {
-  local pid
-  pid=$(cat "$WORKERFILE" 2>/dev/null || true)
+  local pid n=0
+  pid=$(owned_worker_pid)
   if worker_pid_is_ours "$pid"; then
     kill -TERM "$pid" 2>/dev/null || true
-    local n=0
-    while pid_alive "$pid" && [ "$n" -lt 20 ]; do sleep 1; n=$((n + 1)); done
+    while pid_alive "$pid" && [ "$n" -lt "$WORKER_STOP_TIMEOUT" ]; do sleep 1; n=$((n + 1)); done
+    if pid_alive "$pid"; then
+      event worker-stop-timeout "$pid"
+      kill -KILL "$pid" 2>/dev/null || true
+      n=0
+      while pid_alive "$pid" && [ "$n" -lt 5 ]; do sleep 1; n=$((n + 1)); done
+      if pid_alive "$pid"; then
+        event worker-stop-failed "$pid"
+        return 1
+      fi
+    fi
     event worker-stopped "$pid"
   fi
-  rm -f "$WORKERFILE"
+  rm -f "$WORKERFILE" "$WORKER_HEARTBEAT"
 }
 
 loop() {

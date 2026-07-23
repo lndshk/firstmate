@@ -44,6 +44,13 @@ manifest semantic file-content 'path=receipt;expected=accepted' $(( $(date +%s) 
 printf 'wrong\n' >"$HOME_DIR/receipt"
 
 run(){ PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" FM_BOARD_BODY="$TMP/no-body" "$ROOT/bin/fm-artifact-supervisor.sh" --once; }
+
+# An empty fleet is a healthy cycle that still publishes observer receipts.
+run
+grep -qx 'artifact-supervisor-v2' "$HOME_DIR/state/artifact-supervisor.tsv"
+[ -f "$HOME_DIR/state/.artifact-supervisor.heartbeat" ]
+[ ! -e "$HOME_DIR/state/.artifact-supervisor.error" ]
+
 run
 grep -F $'semantic\tfailed\tcontent-mismatch' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
 state="$HOME_DIR/state/.artifact-supervisor.state/semantic.state"
