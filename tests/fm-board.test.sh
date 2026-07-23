@@ -40,6 +40,17 @@ grep -q 'Terminal receipt recorded; pane presence does not imply work' "$TMP/boa
 grep -q 'Recorded pane is gone without a terminal receipt' "$TMP/board/board.html"
 grep -q 'Supervisor: healthy' "$TMP/board/board.html"
 
+cat >"$STATE_HOME/state/artifact-supervisor.tsv" <<'TSV'
+artifact-supervisor-v1
+generated-at	1
+working	active	busy pane observed	working: snapshot authority	0		0
+idle	terminal	terminal receipt	result: snapshot result	0		0
+TSV
+PATH="$TMP/bin:$PATH" FM_HOME="$STATE_HOME" FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" FM_BOARD_BODY="$TMP/none" "$ROOT/bin/fm-board.sh" --once
+grep -q 'working: snapshot authority' "$TMP/board/board.html"
+grep -q 'result: snapshot result' "$TMP/board/board.html"
+rm -f "$STATE_HOME/state/artifact-supervisor.tsv"
+
 sleep 1
 printf 'failed: deterministic failure receipt\n' >"$STATE_HOME/state/working.status"
 PATH="$TMP/bin:$PATH" FM_HOME="$STATE_HOME" FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" FM_BOARD_BODY="$TMP/none" "$ROOT/bin/fm-board.sh" --once

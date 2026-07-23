@@ -25,7 +25,8 @@ SH
 chmod +x "$TMP/bin/tmux"
 
 meta() { printf 'window=%s\nkind=ship\n%s' "$2" "${3:-}" >"$HOME_DIR/state/$1.meta"; }
-meta busy fm-busy 'receipt-deadline=1
+meta busy fm-busy 'process-pid=999999
+receipt-deadline=1
 '
 meta waiting fm-waiting "receipt-deadline=$(( $(date +%s) + 60 ))
 "
@@ -50,17 +51,22 @@ grep -q '>active-unverified<' "$TMP/board/board.html"
 grep -q '>stalled<' "$TMP/board/board.html"
 grep -q 'receipt-deadline' "$HOME_DIR/state/.artifact-supervisor.escalations"
 
-# A durable wake is drained by the supervisor and still causes a fresh snapshot
-# and board render; this is the controlled no-chat wake path.
 printf '%s\t1\theartbeat\theartbeat\tcontrolled wake\n' "$(date +%s)" >"$HOME_DIR/state/.wake-queue"
 sleep 1
 run_once
 second=$(sed -n 's/.*data-epoch="\([0-9]*\)".*/\1/p' "$TMP/board/board.html")
 [ "$second" -gt "$first" ]
-[ ! -s "$HOME_DIR/state/.wake-queue" ]
+[ -s "$HOME_DIR/state/.wake-queue" ]
 [ "$(find "$HOME_DIR/state/.artifact-supervisor.heartbeat" -mmin -1 | wc -l | tr -d ' ')" = 1 ]
 
-# The explicit command creates both singleton receipts without involving chat.
+sleep 30 &
+UNRELATED_PID=$!
+printf '%s\n' "$UNRELATED_PID" >"$HOME_DIR/state/.artifact-supervisor.pid"
+PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" \
+  FM_ARTIFACT_SUPERVISOR_INTERVAL=1 "$ROOT/bin/fm-artifact-supervisor.sh" restart >/dev/null
+kill -0 "$UNRELATED_PID"
+kill "$UNRELATED_PID" 2>/dev/null || true
+
 PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" \
   FM_ARTIFACT_SUPERVISOR_INTERVAL=1 "$ROOT/bin/fm-artifact-supervisor.sh" start >/dev/null
 for _ in 1 2 3 4 5; do [ -s "$HOME_DIR/state/.artifact-supervisor.pid" ] && break; sleep 1; done

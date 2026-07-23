@@ -16,8 +16,11 @@ STALL_AFTER="${FM_BOARD_STALL_AFTER:-180}"
 SNAPSHOT="${FM_ARTIFACT_SNAPSHOT:-$FM_HOME/state/artifact-supervisor.tsv}"
 
 now_epoch() { date +%s; }
-mtime_epoch() { date -r "$1" +%s 2>/dev/null || echo 0; }
-age_of() { local m; m=$(mtime_epoch "$1"); [ "$m" -gt 0 ] && echo "$(( $(now_epoch) - m ))" || echo 999999; }
+mtime_epoch() {
+  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null
+  else stat -c %Y "$1" 2>/dev/null; fi
+}
+age_of() { local m; m=$(mtime_epoch "$1"); [ -n "$m" ] && [ "$m" -gt 0 ] && echo "$(( $(now_epoch) - m ))" || echo 999999; }
 age_text() {
   local s=$1
   if [ "$s" -lt 60 ]; then printf '%ss' "$s"
@@ -29,15 +32,15 @@ escape_html() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'; }
 
 pane_busy() {
   local capture
-  capture=$(timeout 3 tmux capture-pane -p -t "$1" 2>/dev/null | tail -8) || return 1
+  capture=$(tmux capture-pane -p -t "$1" 2>/dev/null | tail -8) || return 1
   printf '%s\n' "$capture" | grep -qiE 'esc to interrupt|esc interrupt|Working \(|Working\.\.\.|thinking'
 }
 
-pane_exists() { timeout 3 tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1; }
+pane_exists() { tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1; }
 
 terminal_receipt() {
   case "$1" in
-    done:*|failed:*|blocked:*|needs-decision:*|terminal:*|pr-ready:*|merged:*) return 0 ;;
+    done:*|failed:*|blocked:*|needs-decision:*|result:*|terminal:*|pr-ready:*|merged:*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -72,16 +75,16 @@ EOF
     age=$status_age
   else
     state=active-unverified; reason='Awaiting the next durable update.'; class=active-unverified
-  # A receipt or recorded PR is authoritative, even if a stale pane still exists.
-  if terminal_receipt "$receipt" || [ -n "$pr" ]; then
-    state=terminal; class=terminal; reason='Terminal receipt recorded; pane presence does not imply work.'
-  elif ! pane_exists "$win"; then
-    state=stalled; class=bad; reason='Recorded pane is gone without a terminal receipt; inspect or relaunch.'
-  elif pane_busy "$win"; then
-    state=active; class=active; reason='Busy footer observed in the pane.'
-  elif [ "$age" -ge "$STALL_AFTER" ]; then
-    state=stalled; class=bad; reason="No durable update for $(age_text "$age"); inspect the idle pane."
-  fi
+    # A receipt or recorded PR is authoritative, even if a stale pane still exists.
+    if terminal_receipt "$receipt" || [ -n "$pr" ]; then
+      state=terminal; class=terminal; reason='Terminal receipt recorded; pane presence does not imply work.'
+    elif ! pane_exists "$win"; then
+      state=stalled; class=stalled; reason='Recorded pane is gone without a terminal receipt; inspect or relaunch.'
+    elif pane_busy "$win"; then
+      state=active; class=active; reason='Busy footer observed in the pane.'
+    elif [ "$age" -ge "$STALL_AFTER" ]; then
+      state=stalled; class=stalled; reason="No durable update for $(age_text "$age"); inspect the idle pane."
+    fi
   fi
   receipt=$(printf '%s' "$receipt" | cut -c1-260 | escape_html)
   reason=$(printf '%s' "$reason" | escape_html)

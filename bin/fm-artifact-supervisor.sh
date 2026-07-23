@@ -45,6 +45,15 @@ receipt_failure() {
 }
 pane_exists() { tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1; }
 pid_alive() { fm_pid_alive "$1"; }
+supervisor_pid_is_ours() { # <pid>
+  local pid=$1 command lock_pid
+  fm_pid_alive "$pid" || return 1
+  lock_pid=$(cat "$LOCK/pid" 2>/dev/null || true)
+  [ "$lock_pid" = "$pid" ] || return 1
+  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  case "$command" in *"$SCRIPT_DIR/fm-artifact-supervisor.sh"*'--loop'*) return 0 ;; esac
+  return 1
+}
 absolute_path() {
   case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "$FM_HOME/$1" ;; esac
 }
@@ -93,12 +102,15 @@ classify_meta() { # <meta>; prints snapshot row
     if receipt_failure "$receipt"; then
       fail_reason=receipt-failure; fail_action="act on terminal receipt: $receipt"
     fi
-  elif [ -n "$pid" ] && ! pid_alive "$pid"; then
-    class=stalled; reason="declared process $pid is gone"; fail_reason=process-gone; fail_action="inspect or relaunch task process"
   elif [ -n "$window" ] && ! pane_exists "$window"; then
     class=stalled; reason="recorded pane is gone"; fail_reason=window-gone; fail_action="inspect or relaunch recorded pane"
   elif [ -n "$window" ] && fm_pane_is_busy "$window"; then
     class=active; reason="busy pane observed"
+    if [ -n "$pid" ] && ! pid_alive "$pid"; then
+      fail_reason=process-gone; fail_action="inspect or relaunch task process"
+    fi
+  elif [ -n "$pid" ] && ! pid_alive "$pid"; then
+    class=stalled; reason="declared process $pid is gone"; fail_reason=process-gone; fail_action="inspect or relaunch task process"
   elif [ -n "$pid" ] && pid_alive "$pid"; then
     class=active; reason="declared process is alive"
   elif is_uint "$deadline" && [ "$deadline" -le "$now" ]; then
@@ -128,9 +140,9 @@ write_snapshot() {
 }
 
 cycle() {
-  local wakes="$STATE/.artifact-supervisor.wakes.$$"
-  "$SCRIPT_DIR/fm-wake-drain.sh" > "$wakes" 2>/dev/null || true
-  rm -f "$wakes"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  [ -s "$FM_WAKE_QUEUE" ] && cat "$FM_WAKE_QUEUE" >/dev/null 2>&1 || true
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   write_snapshot
   [ -x "$SCRIPT_DIR/fm-board.sh" ] && "$SCRIPT_DIR/fm-board.sh" --once >/dev/null 2>&1 || true
   : > "$HEARTBEAT"
@@ -151,7 +163,7 @@ start() {
   local pid
   mkdir -p "$STATE"
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
-  if fm_pid_alive "$pid"; then printf 'artifact supervisor already running: pid %s\n' "$pid"; return 0; fi
+  if supervisor_pid_is_ours "$pid"; then printf 'artifact supervisor already running: pid %s\n' "$pid"; return 0; fi
   rm -f "$PIDFILE"
   nohup "$0" --loop >> "$LOG" 2>&1 &
   printf 'artifact supervisor starting: pid %s\n' "$!"
@@ -160,7 +172,7 @@ start() {
 restart() {
   local pid n=0
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
-  if fm_pid_alive "$pid"; then
+  if supervisor_pid_is_ours "$pid"; then
     kill -TERM "$pid" 2>/dev/null || true
     while fm_pid_alive "$pid" && [ "$n" -lt 20 ]; do sleep 1; n=$((n + 1)); done
   fi
