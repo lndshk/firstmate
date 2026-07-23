@@ -634,6 +634,25 @@ test_housekeeping_resumed_stale_cleared() {
   pass "resumed (busy) stale clears its marker without escalating"
 }
 
+test_housekeeping_terminal_receipt_clears_stale() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase stale-terminal-race)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  win="sess:fm-terminal-r7"
+  pane="$dir/pane.txt"
+  printf 'done: delivery ready\n' > "$state/terminal-r7.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "terminal-r7" | tr ':/. ' '____')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  touch "$state/.subsuper-last-scan"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_HEARTBEAT_SCAN_SECS=999999 housekeeping "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "terminal receipt did not clear stale marker"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "terminal receipt was escalated as stalled"
+  pass "terminal receipt clears stale marker before stalled escalation"
+}
+
 test_escalate_batches_into_one_digest() {
   local dir state fakebin sent capture n
   dir=$(make_supercase batch)
@@ -1430,6 +1449,7 @@ test_interrupted_escalation_has_actionable_receipt
 test_interrupted_terminal_receipts_advance_delivery
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
+test_housekeeping_terminal_receipt_clears_stale
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup

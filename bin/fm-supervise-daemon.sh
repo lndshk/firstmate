@@ -579,11 +579,13 @@ housekeeping() {  # <state>
       # Window gone (task torn down): drop the marker, nothing to escalate.
       rm -f "$marker"; continue
     fi
-    if pane_is_busy "$win"; then
+    task=$(window_to_task "$win")
+    last=$(last_status_line "$state/$task.status")
+    if status_is_terminal_receipt "$last"; then
+      stale_marker_remove "$win" "$state"
+    elif pane_is_busy "$win"; then
       rm -f "$marker"   # crewmate resumed: benign
     else
-      task=$(window_to_task "$win")
-      last=$(last_status_line "$state/$task.status")
       escalate_add "$state" "task $task stalled ${age}s; last useful action: ${last:-no status recorded}; required next action: inspect the pane and recover or relaunch"
       stale_marker_remove "$win" "$state"
     fi
