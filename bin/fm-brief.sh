@@ -25,8 +25,7 @@
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path.
-# Refuses to overwrite an existing brief. fm-spawn rejects any generated
-# contract whose placeholders have not all been filled.
+# Refuses to overwrite an existing brief.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -91,9 +90,6 @@ Do not invent a second delegation system.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
-Every routed instruction names a task id whose durable record has already been transferred into this home's \`data/backlog.md\`.
-Before acting, verify that record exists here; if it does not, append \`blocked: ownership missing for {task-id}\` to the main status file and do not create a duplicate.
-When it exists, append \`working: accepted {task-id}\` to the main status file, then run the normal Queued -> spawn -> In flight lifecycle in this home.
 
 # Escalation to main firstmate
 Handle routine work yourself.

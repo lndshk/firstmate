@@ -29,8 +29,6 @@
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
-# Ordinary ship/scout admission is capped by FM_DIRECT_REPORT_LIMIT (default 3).
-# Persistent secondmates do not consume that capacity.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,17 +38,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 SUB_HOME_MARKER=".fm-secondmate-home"
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
-ACTIVE_HOME="$(cd "$FM_HOME" && pwd -P)"
-ADMISSION_LOCK=
-release_spawn_admission() {
-  [ -n "$ADMISSION_LOCK" ] || return 0
-  rm -f "$ADMISSION_LOCK/identity" 2>/dev/null || true
-  fm_lock_release "$ADMISSION_LOCK"
-  ADMISSION_LOCK=
-}
-trap release_spawn_admission EXIT
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -232,155 +219,6 @@ trim_space() {
   printf '%s\n' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
-brief_has_unfilled_contract() {
-  local brief=$1
-  grep -Eq '\{(TASK|OBJECTIVE|SUCCESS_EVIDENCE|REVIEW_OR_DEADLINE_TRIGGER)\}' "$brief"
-}
-
-line_in_set() {
-  local needle=$1 set=$2
-  [ -n "$set" ] || return 1
-  printf '%s\n' "$set" | grep -qxF "$needle"
-}
-
-registered_secondmate() {
-  local id=$1 reg="$DATA/secondmates.md"
-  [ -f "$reg" ] || return 1
-  awk -v id="$id" '$1 == "-" && $2 == id { found = 1 } END { exit !found }' "$reg"
-}
-
-live_firstmate_windows() {
-  tmux list-windows -a -F $'#{session_name}:#{window_name}\t#{@fm_home}\t#{@fm_kind}' 2>/dev/null \
-    | sed -n '/:fm-/p' || true
-}
-
-# Print one "id<TAB>window" row per active ordinary direct report owned by this
-# firstmate home. A meta record counts only while its recorded window is live, so
-# a dead/stale record cannot hold capacity forever. A live fm-* window whose meta
-# write was interrupted still counts when its window option names this home.
-# Window-, registry-, and meta-identified secondmates are excluded.
-active_ordinary_reports() {
-  local live claimed meta window kind id row target rest owner window_kind
-  live=$(live_firstmate_windows)
-  claimed=
-
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    window=$(sed -n 's/^window=//p' "$meta" | tail -1)
-    [ -n "$window" ] || continue
-    row=$(printf '%s\n' "$live" | awk -F '\t' -v target="$window" '$1 == target { print; exit }')
-    [ -n "$row" ] || continue
-    rest=${row#*$'\t'}
-    if [ "$rest" = "$row" ]; then
-      owner=
-      window_kind=
-    else
-      owner=${rest%%$'\t'*}
-      window_kind=${rest#*$'\t'}
-      [ "$window_kind" != "$rest" ] || window_kind=
-    fi
-    [ -z "$owner" ] || [ "$owner" = "$ACTIVE_HOME" ] || continue
-    claimed="${claimed}${claimed:+$'\n'}$window"
-    kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
-    if [ "$kind" = secondmate ] || [ "$window_kind" = secondmate ]; then
-      continue
-    fi
-    id=$(basename "$meta" .meta)
-    printf '%s\t%s\n' "$id" "$window"
-  done
-
-  while IFS= read -r row; do
-    [ -n "$row" ] || continue
-    target=${row%%$'\t'*}
-    rest=${row#*$'\t'}
-    [ "$rest" != "$row" ] || continue
-    owner=${rest%%$'\t'*}
-    window_kind=${rest#*$'\t'}
-    [ "$window_kind" != "$rest" ] || window_kind=
-    line_in_set "$target" "$claimed" && continue
-    [ "$owner" = "$ACTIVE_HOME" ] || continue
-    [ "$window_kind" = secondmate ] && continue
-    id=${target##*:fm-}
-    registered_secondmate "$id" && continue
-    printf '%s\t%s\n' "$id" "$target"
-  done <<EOF
-$live
-EOF
-}
-
-enforce_ordinary_admission() {
-  local limit active count summary
-  limit=${FM_DIRECT_REPORT_LIMIT:-3}
-  case "$limit" in
-    ''|*[!0-9]*)
-      echo "error: FM_DIRECT_REPORT_LIMIT must be a non-negative integer (got '$limit')" >&2
-      return 1
-      ;;
-  esac
-
-  active=$(active_ordinary_reports | sort -u)
-  if [ -n "$active" ]; then
-    count=$(printf '%s\n' "$active" | wc -l | tr -d '[:space:]')
-    summary=$(printf '%s\n' "$active" | awk -F '\t' '
-      { item = $1 " (" $2 ")"; out = out (out ? ", " : "") item }
-      END { print out }
-    ')
-  else
-    count=0
-    summary=none
-  fi
-
-  if [ "$count" -ge "$limit" ]; then
-    echo "error: direct-report admission refused for $ID: $count active (limit $limit): $summary; task $ID remains or should remain queued" >&2
-    return 1
-  fi
-}
-
-acquire_ordinary_admission() {
-  local owner identity
-  ADMISSION_LOCK="$STATE/.spawn-admission.lock"
-  while ! fm_lock_try_acquire "$ADMISSION_LOCK"; do
-    reclaim_stale_admission_lock || sleep 0.1
-  done
-  owner=$(cat "$ADMISSION_LOCK/pid" 2>/dev/null || true)
-  identity=$(admission_process_identity "$owner")
-  if [ -z "$identity" ] || ! printf '%s\n' "$identity" > "$ADMISSION_LOCK/identity"; then
-    echo "error: could not record admission lock identity" >&2
-    return 1
-  fi
-  enforce_ordinary_admission
-}
-
-admission_process_identity() {
-  local pid=$1
-  case "$pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  if [ -r "/proc/$pid/stat" ] && [ -r /proc/sys/kernel/random/boot_id ]; then
-    printf '%s:' "$(sed -n '1p' /proc/sys/kernel/random/boot_id)"
-    awk '{ print $22 }' "/proc/$pid/stat"
-  else
-    LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
-  fi
-}
-
-reclaim_stale_admission_lock() {
-  local pid stored current age
-  pid=$(cat "$ADMISSION_LOCK/pid" 2>/dev/null || true)
-  stored=$(cat "$ADMISSION_LOCK/identity" 2>/dev/null || true)
-  if [ -n "$stored" ]; then
-    current=$(admission_process_identity "$pid" || true)
-    [ "$current" != "$stored" ] || return 1
-  else
-    age=$(fm_path_age "$ADMISSION_LOCK")
-    [ "$age" -ge 10 ] || return 1
-  fi
-  [ "$(cat "$ADMISSION_LOCK/pid" 2>/dev/null || true)" = "$pid" ] || return 1
-  [ "$(cat "$ADMISSION_LOCK/identity" 2>/dev/null || true)" = "$stored" ] || return 1
-  rm -f "$ADMISSION_LOCK/identity" "$ADMISSION_LOCK/pid" 2>/dev/null || return 1
-  rmdir "$ADMISSION_LOCK" 2>/dev/null
-}
-
 validate_firstmate_home_for_spawn() {
   local id=$1 home=$2 abs_home abs_active_home abs_root marker_id
   abs_home=$(resolved_existing_dir "$home") || return 1
@@ -528,10 +366,6 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
-if brief_has_unfilled_contract "$BRIEF"; then
-  echo "error: brief at $BRIEF contains an unfilled generated contract placeholder; fill the objective, success evidence, and review/deadline trigger before spawning" >&2
-  exit 1
-fi
 
 # Resolve and reject an already-live target before a project-native refresh can
 # mutate the clone beneath that advisor. Outside tmux, do not create the fallback
@@ -547,10 +381,6 @@ if tmux has-session -t "$SES" 2>/dev/null \
   && tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
   echo "error: window $T already exists" >&2
   exit 1
-fi
-
-if [ "$KIND" != secondmate ]; then
-  acquire_ordinary_admission || exit 1
 fi
 
 if [ "$KIND" = secondmate ] && [ -n "$PROJECT_NATIVE_ABS" ]; then
@@ -574,10 +404,7 @@ if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
   exit 1
 fi
 
-tmux new-window -d -t "$SES" -n "$W" -c "$WINDOW_CWD" \
-  \; set-option -w -t "$T" @fm_home "$ACTIVE_HOME" \
-  \; set-option -w -t "$T" @fm_kind "$KIND"
-release_spawn_admission
+tmux new-window -d -t "$SES" -n "$W" -c "$WINDOW_CWD"
 if [ "$KIND" != secondmate ]; then
   tmux send-keys -t "$T" 'treehouse get' Enter
 
