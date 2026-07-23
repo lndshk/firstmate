@@ -15,6 +15,7 @@ HEARTBEAT="$STATE/.artifact-supervisor.heartbeat"
 SNAPSHOT="$STATE/artifact-supervisor.tsv"
 ESCALATIONS="$STATE/.artifact-supervisor.escalations"
 LOG="$STATE/.artifact-supervisor.log"
+ERROR="$STATE/.artifact-supervisor.error"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -150,9 +151,22 @@ write_snapshot() {
 
 cycle() {
   fm_wake_peek >/dev/null 2>&1 || true
-  write_snapshot
-  [ -x "$SCRIPT_DIR/fm-board.sh" ] && FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-board.sh" --once >/dev/null 2>&1 || true
-  : > "$HEARTBEAT"
+  if ! write_snapshot; then
+    printf '%s\tsnapshot-write-failed\n' "$(now_epoch)" >> "$LOG" 2>/dev/null || true
+    printf '%s\tsnapshot-write-failed\n' "$(now_epoch)" > "$ERROR" 2>/dev/null || true
+    return 1
+  fi
+  if ! [ -x "$SCRIPT_DIR/fm-board.sh" ] || ! FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-board.sh" --once >/dev/null 2>&1; then
+    printf '%s\tboard-refresh-failed\n' "$(now_epoch)" >> "$LOG" 2>/dev/null || true
+    printf '%s\tboard-refresh-failed\n' "$(now_epoch)" > "$ERROR" 2>/dev/null || true
+    return 1
+  fi
+  if ! : > "$HEARTBEAT"; then
+    printf '%s\theartbeat-write-failed\n' "$(now_epoch)" >> "$LOG" 2>/dev/null || true
+    printf '%s\theartbeat-write-failed\n' "$(now_epoch)" > "$ERROR" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$ERROR"
 }
 
 loop() {

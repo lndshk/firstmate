@@ -105,7 +105,7 @@ crew=
 fm_tasks_axi_compatible && echo "TASKS_AXI: available"
 fleet_sync
 
-if [ "$FM_HOME" = "$FM_ROOT" ] && [ -x "$SCRIPT_DIR/fm-artifact-supervisor.sh" ]; then
+if [ ! -f "$FM_HOME/.fm-secondmate-home" ] && [ -x "$SCRIPT_DIR/fm-artifact-supervisor.sh" ]; then
   "$SCRIPT_DIR/fm-artifact-supervisor.sh" start >/dev/null 2>&1 || true
 fi
 exit 0

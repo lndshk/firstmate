@@ -61,7 +61,23 @@ SH
 
 run_bootstrap() {
   local home=$1 fakebin=$2
+  : > "$home/.fm-secondmate-home"
   PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_bootstrap_starts_custom_main_home_supervisor() {
+  local case_dir fakebin out pid
+  case_dir="$TMP_ROOT/custom-main-home"
+  mkdir -p "$case_dir/home" "$case_dir/board"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_BOARD_DIR="$case_dir/board" "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "bootstrap reported problems for custom main home: $out"
+  for _ in 1 2 3 4 5; do [ -s "$case_dir/home/state/.artifact-supervisor.pid" ] && break; sleep 1; done
+  [ -s "$case_dir/home/state/.artifact-supervisor.pid" ] || fail "bootstrap did not start custom main-home supervisor"
+  pid=$(cat "$case_dir/home/state/.artifact-supervisor.pid")
+  kill "$pid" 2>/dev/null || true
+  pass "bootstrap starts supervisor for custom main home"
 }
 
 test_bootstrap_accepts_treehouse_lease_support() {
@@ -130,3 +146,4 @@ test_bootstrap_accepts_treehouse_lease_support
 test_bootstrap_reports_treehouse_without_lease_support
 test_bootstrap_reports_tasks_axi_when_available
 test_bootstrap_ignores_incompatible_tasks_axi
+test_bootstrap_starts_custom_main_home_supervisor

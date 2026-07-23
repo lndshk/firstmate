@@ -74,6 +74,30 @@ second=$(sed -n 's/.*data-epoch="\([0-9]*\)".*/\1/p' "$TMP/board/board.html")
 [ -s "$HOME_DIR/state/.wake-queue" ]
 [ "$(find "$HOME_DIR/state/.artifact-supervisor.heartbeat" -mmin -1 | wc -l | tr -d ' ')" = 1 ]
 
+rm -f "$HOME_DIR/state/.artifact-supervisor.heartbeat"
+mkdir "$HOME_DIR/state/artifact-supervisor.tsv"
+if run_once; then
+  exit 1
+fi
+[ ! -e "$HOME_DIR/state/.artifact-supervisor.heartbeat" ]
+grep -q 'snapshot-write-failed' "$HOME_DIR/state/.artifact-supervisor.error"
+rmdir "$HOME_DIR/state/artifact-supervisor.tsv"
+run_once
+[ -f "$HOME_DIR/state/.artifact-supervisor.heartbeat" ]
+[ ! -e "$HOME_DIR/state/.artifact-supervisor.error" ]
+
+rm -f "$HOME_DIR/state/.artifact-supervisor.heartbeat"
+if PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_BOARD_DIR="$TMP/board" \
+  FM_BOARD_OUT="$TMP/missing/board.html" FM_BOARD_BODY="$TMP/no-body" \
+  "$ROOT/bin/fm-artifact-supervisor.sh" --once; then
+  exit 1
+fi
+[ ! -e "$HOME_DIR/state/.artifact-supervisor.heartbeat" ]
+grep -q 'board-refresh-failed' "$HOME_DIR/state/.artifact-supervisor.error"
+run_once
+[ -f "$HOME_DIR/state/.artifact-supervisor.heartbeat" ]
+[ ! -e "$HOME_DIR/state/.artifact-supervisor.error" ]
+
 sleep 30 &
 UNRELATED_PID=$!
 printf '%s\n' "$UNRELATED_PID" >"$HOME_DIR/state/.artifact-supervisor.pid"

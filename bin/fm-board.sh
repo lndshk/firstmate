@@ -126,8 +126,9 @@ $(supervisor_card)
 $body
 </main><script>const t=document.querySelector('#generated'),box=document.querySelector('#generator'),age=()=>Math.floor(Date.now()/1000-Number(t.dataset.epoch));function check(){const s=age();if(s>$STALE_AFTER){box.className='generator bad';box.innerHTML='<b>Board generator: stale/off</b> No new shell snapshot for '+s+'s. Restart fm-board.sh; do not trust this board.'}else document.querySelector('#generator-detail').textContent='fresh shell snapshot '+s+'s ago'}check();setInterval(check,1000)</script></body></html>
 HTML
-  mv -f "$tmp" "$OUT"
-  touch "$HEARTBEAT"
+  [ $? -eq 0 ] || return 1
+  mv -f "$tmp" "$OUT" || return 1
+  touch "$HEARTBEAT" || return 1
 }
 
 loop() {
