@@ -78,9 +78,24 @@ done
 kill -0 "$next"
 grep -F $'worker-started\t' "$HOME_DIR/state/.artifact-supervisor.service.events" >/dev/null
 
+# Restart does not launch a replacement until the recorded old service has
+# actually exited.  This catches the historical `stop; start` overlap where a
+# still-shutting-down instance could retain the singleton lock and worker.
+old_service=$service_pid
+run_service restart >/dev/null
+for _ in 1 2 3 4 5; do
+  replacement_service=$(cat "$HOME_DIR/state/.artifact-supervisor.service.pid" 2>/dev/null || true)
+  [ -n "$replacement_service" ] && [ "$replacement_service" != "$old_service" ] && kill -0 "$replacement_service" 2>/dev/null && break
+  sleep 1
+done
+[ "$replacement_service" != "$old_service" ]
+! kill -0 "$old_service" 2>/dev/null
+replacement_worker=$(cat "$HOME_DIR/state/.artifact-supervisor.pid")
+kill -0 "$replacement_worker"
+
 # Stop owns the worker it launched: no orphaned polling loop remains.
 run_service stop
-for _ in 1 2 3 4 5; do kill -0 "$next" 2>/dev/null || break; sleep 1; done
-! kill -0 "$next" 2>/dev/null
+for _ in 1 2 3 4 5; do kill -0 "$replacement_worker" 2>/dev/null || break; sleep 1; done
+! kill -0 "$replacement_worker" 2>/dev/null
 [ ! -e "$HOME_DIR/state/.artifact-supervisor.service.pid" ]
 echo 'ok - service restarts observer and tears down owned worker'

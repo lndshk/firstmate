@@ -199,13 +199,26 @@ stop() {
   if service_pid_is_ours "$pid"; then
     kill -TERM "$pid" 2>/dev/null || true
     while pid_alive "$pid" && [ "$n" -lt 20 ]; do sleep 1; n=$((n + 1)); done
+    if pid_alive "$pid"; then
+      printf 'artifact supervisor service did not terminate: pid %s\n' "$pid" >&2
+      return 1
+    fi
+    # The service trap normally removes this.  Once the process is proven
+    # gone, removing a stale receipt is safe and prevents start() from ever
+    # treating it as a candidate replacement.
+    rm -f "$PIDFILE"
+  elif [ -n "$pid" ] && pid_alive "$pid"; then
+    printf 'artifact supervisor service PID is not verified; refusing restart: pid %s\n' "$pid" >&2
+    return 1
   fi
 }
 
 case "${1:-start}" in
   start) start ;;
   stop) stop ;;
-  restart) stop; start ;;
+  # Never overlap generations: replacement launch is contingent on a confirmed
+  # old-service exit, including the PID receipt becoming stale.
+  restart) stop && start ;;
   --loop) loop ;;
   status) printf 'service-pid=%s worker-pid=%s heartbeat=%s\n' "$(cat "$PIDFILE" 2>/dev/null || echo off)" "$(worker_pid)" "$HEARTBEAT" ;;
   *) echo "usage: $0 [start|stop|restart|status|--loop]" >&2; exit 2 ;;
