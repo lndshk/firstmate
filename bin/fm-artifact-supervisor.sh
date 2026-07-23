@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Usage: fm-artifact-supervisor.sh [start|restart|status|--once]
 # Durable, presence-neutral artifact supervision for a Firstmate home.
 # It never writes to tmux or a chat pane.  The AFK daemon remains the only
 # component that may batch and inject chat escalation digests.

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Usage: fm-board.sh [start|status|--once]
 # Render the one Firstmate Board from deterministic shell state. The generated
 # page also declares itself stale when this process no longer refreshes it.
 set -u

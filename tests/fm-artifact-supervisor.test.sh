@@ -24,6 +24,15 @@ esac
 SH
 chmod +x "$TMP/bin/tmux"
 
+cat >"$TMP/bin/mv" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_TEST_FAIL_SNAPSHOT_MV:-}" = 1 ]; then
+  exit 1
+fi
+exec /usr/bin/mv "$@"
+SH
+chmod +x "$TMP/bin/mv"
+
 meta() { printf 'window=%s\nkind=ship\n%s' "$2" "${3:-}" >"$HOME_DIR/state/$1.meta"; }
 meta busy fm-busy 'process-pid=999999
 receipt-deadline=1
@@ -57,7 +66,7 @@ grep -q '>active<' "$TMP/board/board.html"
 grep -q '>active-unverified<' "$TMP/board/board.html"
 grep -q '>stalled<' "$TMP/board/board.html"
 grep -q 'receipt-deadline' "$HOME_DIR/state/.artifact-supervisor.escalations"
-grep -F $'busy\treceipt-deadline\t' "$HOME_DIR/state/.artifact-supervisor.escalations" >/dev/null
+grep -F $'\toverdue\treceipt-deadline\t' "$HOME_DIR/state/.artifact-supervisor.escalations" >/dev/null
 grep -F $'combined\tartifact-missing\t' "$HOME_DIR/state/.artifact-supervisor.escalations" >/dev/null
 grep -F $'combined\twindow-gone\t' "$HOME_DIR/state/.artifact-supervisor.escalations" >/dev/null
 grep -F $'combined\treceipt-deadline\t' "$HOME_DIR/state/.artifact-supervisor.escalations" >/dev/null
@@ -75,13 +84,12 @@ second=$(sed -n 's/.*data-epoch="\([0-9]*\)".*/\1/p' "$TMP/board/board.html")
 [ "$(find "$HOME_DIR/state/.artifact-supervisor.heartbeat" -mmin -1 | wc -l | tr -d ' ')" = 1 ]
 
 rm -f "$HOME_DIR/state/.artifact-supervisor.heartbeat"
-mkdir "$HOME_DIR/state/artifact-supervisor.tsv"
-if run_once; then
+rm -f "$HOME_DIR/state/artifact-supervisor.tsv"
+if FM_TEST_FAIL_SNAPSHOT_MV=1 run_once; then
   exit 1
 fi
 [ ! -e "$HOME_DIR/state/.artifact-supervisor.heartbeat" ]
 grep -q 'snapshot-write-failed' "$HOME_DIR/state/.artifact-supervisor.error"
-rmdir "$HOME_DIR/state/artifact-supervisor.tsv"
 run_once
 [ -f "$HOME_DIR/state/.artifact-supervisor.heartbeat" ]
 [ ! -e "$HOME_DIR/state/.artifact-supervisor.error" ]

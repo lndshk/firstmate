@@ -94,6 +94,9 @@ state/               volatile runtime signals; gitignored
   .last-watcher-beat watcher liveness beacon, touched every poll; fm-guard.sh reads it
   .watch.keepalive.* keepalive sidecar lock, log, and stderr; never touch
   .subsuper-* .supervise-daemon.*   sub-supervisor internals (stale markers, escalation buffer, inject-wedged marker, seen-status dedup, log, lock, pid); never touch
+  artifact-supervisor.tsv  sorted artifact-supervisor task snapshot; generated, never hand-edit
+  .artifact-supervisor.*   main-home artifact-supervisor lock, pid, heartbeat, escalation, error, and log state; never touch
+  board/             generated Firstmate Board and its generator receipts; never hand-edit
 .no-mistakes/        local validation state and evidence; gitignored
 ```
 
@@ -107,6 +110,7 @@ Never install anything the captain has not approved in this session.
 
 Run `bin/fm-bootstrap.sh`.
 Bootstrap also refreshes the fleet via `bin/fm-fleet-sync.sh`: it fetches each remote-backed clone, clean-fast-forwards its local default branch when safe, and prunes local branches whose upstream is gone and that no worktree still needs, best-effort and non-fatal.
+When tmux is available, bootstrap also ensures the main home's artifact supervisor is running; secondmate homes do not start one.
 Set `FM_FLEET_PRUNE=0` to temporarily disable that branch pruning.
 Silence means all good: say nothing and move on.
 Otherwise it prints one line per problem or capability fact; handle each:
@@ -509,10 +513,10 @@ Empty polls, elapsed waiting time, and "still no change" are tool bookkeeping, n
 ```sh
 bin/fm-watch.sh   # run in background; exits with: signal|stale|check|heartbeat
 bin/fm-wake-drain.sh   # drain queued wake records at turn start
-bin/fm-artifact-supervisor.sh start  # always-on no-chat snapshot/board supervisor
+bin/fm-artifact-supervisor.sh start  # main-home no-chat snapshot/board supervisor
 ```
 
-**Artifact supervisor (always-on, no chat injection).** `bin/fm-artifact-supervisor.sh` is separate from the presence-gated AFK daemon: it never writes to a tmux/chat pane and therefore does not alter AFK batching semantics. Each cycle uses `fm_wake_peek` to read and deduplicate a locked copy of durable wakes without consuming their queue records, preserving AFK and normal-supervisor ownership. It observes each `state/*.meta` task's pane and optional `process-pid=`, receipt, artifact, and deadline contracts, and writes the sorted TSV snapshot `state/artifact-supervisor.tsv`. Its PID and heartbeat receipts are `state/.artifact-supervisor.pid` and `state/.artifact-supervisor.heartbeat`; `start`, `restart`, and `status` are the operator interface. Every task is exactly `active`, `active-unverified`, `stalled`, or `terminal`. A busy pane is always `active` rather than stale merely for lack of a receipt. `receipt-deadline=` (or `deadline=`) is an absolute Unix epoch; before it, a missing receipt is `active-unverified`, afterwards it is `stalled`. Optional `artifact=` and `artifact-max-age=` declare artifact freshness. Actual failures append deduplicated actionable rows to `state/.artifact-supervisor.escalations`, and every cycle refreshes the board through `bin/fm-board.sh --once`.
+**Artifact supervisor (main home, no chat injection).** `bin/fm-artifact-supervisor.sh` is separate from the presence-gated AFK daemon: it never writes to a tmux/chat pane and therefore does not alter AFK batching semantics. Each cycle uses `fm_wake_peek` to read and deduplicate a locked copy of durable wakes without consuming their queue records, preserving AFK and normal-supervisor ownership. It observes each `state/*.meta` task's pane and optional `process-pid=`, receipt, artifact, and deadline contracts, and writes the sorted TSV snapshot `state/artifact-supervisor.tsv`. Its PID and heartbeat receipts are `state/.artifact-supervisor.pid` and `state/.artifact-supervisor.heartbeat`; `start`, `restart`, and `status` are the operator interface. Every task is exactly `active`, `active-unverified`, `stalled`, or `terminal`. A busy pane is always `active` rather than stale merely for lack of a receipt. `receipt-deadline=` (or `deadline=`) is an absolute Unix epoch; before it, a missing receipt is `active-unverified`, afterwards it is `stalled`. Optional `artifact=` and `artifact-max-age=` declare artifact freshness. Actual failures append deduplicated actionable rows to `state/.artifact-supervisor.escalations`, and every cycle refreshes the board through `bin/fm-board.sh --once`.
 
 On wake, in order of cheapness:
 
