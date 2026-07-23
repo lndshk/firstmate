@@ -14,6 +14,7 @@ LOCK="$STATE/.artifact-supervisor.lock"; PIDFILE="$STATE/.artifact-supervisor.pi
 HEARTBEAT="$STATE/.artifact-supervisor.heartbeat"; SNAPSHOT="$STATE/artifact-supervisor.tsv"
 LOG="$STATE/.artifact-supervisor.log"; ERROR="$STATE/.artifact-supervisor.error"
 EVENTS="$STATE/.artifact-supervisor.events"; ACTIONS="$STATE/.artifact-supervisor.actions"
+ACTION_INDEX="$ACTIONS/.active"
 MACHINE="$STATE/.artifact-supervisor.state"
 
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -48,6 +49,20 @@ clean(){ LC_ALL=C tr '\t\r\n' '   '; }
 pid_alive(){ fm_pid_alive "$1"; }
 pane_exists(){ tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1; }
 predicate_supported(){ case "$1" in always-pass|always-fail|file-exists|file-content|file-hash|file-tail|file-fresh|command-receipt|process-health|transaction-state|scheduled-run|domain-tuple) return 0;; *) return 1;; esac; }
+sha256_digest(){
+  local output digest
+  if command -v shasum >/dev/null 2>&1; then
+    output=$(shasum -a 256) || return 1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    output=$(sha256sum) || return 1
+  else
+    return 1
+  fi
+  digest=$(printf '%s\n' "$output" | awk 'NR == 1 { print $1 }')
+  [ "${#digest}" -eq 64 ] || return 1
+  case "$digest" in *[!0-9A-Fa-f]*) return 1;; esac
+  printf '%s' "$digest" | LC_ALL=C tr 'A-F' 'a-f'
+}
 
 # Manifests are intentionally boring line-oriented records.  Atomic rename at
 # dispatch and strict required keys make them portable to bash 3.2 and easy to
@@ -117,7 +132,7 @@ predicate_eval(){ # <id> <predicate-id> <args>; stdout: state<TAB>code<TAB>evide
     always-fail) printf 'fail\tsemantic-failure\tdeterministic always-fail';;
     file-exists) path=$(absolute_path "$(arg "$a" path)"); [ -n "$(arg "$a" path)" ] && [ -e "$path" ] && printf 'pass\tok\t%s exists' "$path" || printf 'fail\tartifact-missing\t%s missing' "$path";;
     file-content) path=$(absolute_path "$(arg "$a" path)"); expected=$(arg "$a" expected); [ -f "$path" ] && grep -F -- "$expected" "$path" >/dev/null 2>&1 && printf 'pass\tok\tcontent matched' || printf 'fail\tcontent-mismatch\tcontent did not match';;
-    file-hash) path=$(absolute_path "$(arg "$a" path)"); expected=$(arg "$a" sha256); actual=$( (shasum -a 256 "$path" 2>/dev/null || sha256sum "$path" 2>/dev/null) | awk '{print $1}'); [ -n "$actual" ] && [ "$actual" = "$expected" ] && printf 'pass\tok\thash matched' || printf 'fail\thash-mismatch\thash did not match';;
+    file-hash) path=$(absolute_path "$(arg "$a" path)"); expected=$(printf '%s' "$(arg "$a" sha256)" | LC_ALL=C tr 'A-F' 'a-f'); actual=$([ -f "$path" ] && sha256_digest < "$path") || actual=; [ -n "$actual" ] && [ "$actual" = "$expected" ] && printf 'pass\tok\thash matched' || printf 'fail\thash-mismatch\thash did not match';;
     file-tail)
       path=$(absolute_path "$(arg "$a" path)"); expected=$(arg "$a" expected)
       if [ -f "$path" ] && [ -n "$expected" ]; then
@@ -145,12 +160,7 @@ write_machine(){ # id liveness predicate outcome route reason annotation
   { printf 'state-v1\n'; printf 'task-id=%s\nliveness=%s\npredicate=%s\noutcome=%s\nroute=%s\nreason=%s\nannotation=%s\nupdated-at=%s\n' "$id" "$2" "$3" "$4" "$5" "$(printf '%s' "$6"|clean)" "$(printf '%s' "$7"|clean)" "$(now_epoch)"; } > "$tmp" && mv -f "$tmp" "$MACHINE/$id.state"
 }
 event_id(){
-  local value="$1|$2|$3|$4"
-  if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$value" | shasum -a 256 | awk '{print $1}'
-  else
-    printf '%s' "$value" | sha256sum | awk '{print $1}'
-  fi
+  printf '%s' "$1|$2|$3|$4" | sha256_digest
 }
 action_identity_matches(){
   local action=$1 id=$2 key=$3 predicate=$4 code=$5
@@ -159,16 +169,46 @@ action_identity_matches(){
     && [ "$(field "$action" failed-predicate)" = "$predicate" ] \
     && [ "$(field "$action" failure-code)" = "$code" ]
 }
+action_index_id(){
+  event_id "$1" "$2" active-actions index
+}
+index_action(){
+  local id=$1 key=$2 eid=$3 dir
+  dir="$ACTION_INDEX/$(action_index_id "$id" "$key")" || return 1
+  mkdir -p "$dir" || return 1
+  : > "$dir/$eid"
+}
+ensure_action_index(){
+  local action state id key eid tmp
+  mkdir -p "$ACTION_INDEX" || return 1
+  [ -f "$ACTION_INDEX/.ready" ] && return 0
+  for action in "$ACTIONS"/*.action; do
+    [ -f "$action" ] || continue
+    state=$(field "$action" state)
+    case "$state" in queued|acknowledged) :;; *) continue;; esac
+    id=$(field "$action" task-id); key=$(field "$action" idempotency-key); eid=$(field "$action" event-id)
+    [ -n "$id" ] && [ -n "$key" ] && [ -n "$eid" ] || continue
+    index_action "$id" "$key" "$eid" || return 1
+  done
+  tmp="$ACTION_INDEX/.ready.tmp.$$"
+  : > "$tmp" && mv -f "$tmp" "$ACTION_INDEX/.ready"
+}
 route_failure(){ # id manifest predicate code evidence
   local id=$1 mf=$2 predicate=$3 code=$4 evidence=$5 eid action tmp retry classes cap attempts action_state key
   key=$(mf_field "$mf" idempotency-key); eid=$(event_id "$id" "$key" "$predicate" "$code") || return 1; action="$ACTIONS/$eid.action"; mkdir -p "$ACTIONS" || return 1
+  ensure_action_index || return 1
   if [ -f "$action" ]; then
     action_identity_matches "$action" "$id" "$key" "$predicate" "$code" || return 1
     action_state=$(field "$action" state)
-    case "$action_state" in queued|acknowledged|resolved) printf '%s' "$action_state"; return 0;; *) return 1;; esac
+    case "$action_state" in
+      queued|acknowledged) index_action "$id" "$key" "$eid" || return 1; printf '%s' "$action_state"; return 0;;
+      resolved) printf '%s' "$action_state"; return 0;;
+      *) return 1;;
+    esac
   fi
   classes=$(mf_field "$mf" retry-classes); cap=$(mf_field "$mf" retry-cap); attempts=0
   retry=none; case ",$classes," in *,"$(failure_class "$code")",*) [ "$attempts" -lt "$cap" ] && retry=bounded-idempotent;; esac
+  index_action "$id" "$key" "$eid" || return 1
   tmp="$action.tmp.$$"
   { printf 'action-v1\nevent-id=%s\ntask-id=%s\nowner=%s\nroute=%s\nstate=queued\nfailed-predicate=%s\nfailure-code=%s\nevidence=%s\nnext-command=%s\nretry=%s\nidempotency-key=%s\nacknowledgement-deadline=%s\ncreated-at=%s\n' "$eid" "$id" "$(mf_field "$mf" owner)" "$(mf_field "$mf" route)" "$predicate" "$code" "$(printf '%s' "$evidence"|clean)" "$(mf_field "$mf" escalation-action)" "$retry" "$key" "$(mf_field "$mf" acknowledgement-deadline)" "$(now_epoch)"; } > "$tmp" && mv -f "$tmp" "$action" || return 1
   printf '%s\t%s\t%s\t%s\t%s\n' "$(now_epoch)" "$eid" "$id" "$predicate" "$code" >> "$EVENTS"
@@ -176,12 +216,17 @@ route_failure(){ # id manifest predicate code evidence
 }
 
 resolve_actions(){
-  local id=$1 mf=$2 action state tmp key
+  local id=$1 mf=$2 action ref state tmp key index_dir eid
   key=$(mf_field "$mf" idempotency-key)
-  for action in "$ACTIONS"/*.action; do
-    [ -f "$action" ] || continue
-    [ "$(field "$action" task-id)" = "$id" ] || continue
-    [ "$(field "$action" idempotency-key)" = "$key" ] || continue
+  ensure_action_index || return 1
+  index_dir="$ACTION_INDEX/$(action_index_id "$id" "$key")" || return 1
+  [ -d "$index_dir" ] || return 0
+  for ref in "$index_dir"/*; do
+    [ -f "$ref" ] || continue
+    eid=$(basename "$ref"); action="$ACTIONS/$eid.action"
+    if [ ! -f "$action" ]; then rm -f "$ref"; continue; fi
+    [ "$(field "$action" task-id)" = "$id" ] || return 1
+    [ "$(field "$action" idempotency-key)" = "$key" ] || return 1
     state=$(field "$action" state)
     case "$state" in queued|acknowledged)
       tmp="$action.tmp.$$"
@@ -189,7 +234,9 @@ resolve_actions(){
         && printf 'resolved-at=%s\n' "$(now_epoch)" >> "$tmp" && mv -f "$tmp" "$action" || return 1
       ;;
     esac
+    rm -f "$ref" || return 1
   done
+  rmdir "$index_dir" 2>/dev/null || true
 }
 
 classify_meta(){ # preserves the first 7 snapshot columns expected by board

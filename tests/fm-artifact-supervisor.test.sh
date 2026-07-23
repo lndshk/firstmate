@@ -65,6 +65,7 @@ action=${actions[0]}
 event=$(sed -n 's/^event-id=//p' "$action")
 [ "${#event}" -eq 64 ]
 case "$event" in *[!0-9a-f]*) exit 1;; esac
+[ "$(find "$HOME_DIR/state/.artifact-supervisor.actions/.active" -type f ! -name .ready | wc -l | tr -d ' ')" = 1 ]
 grep -qx 'owner=repair-owner' "$action"
 grep -qx 'route=repair-queue' "$action"
 grep -qx 'failed-predicate=file-content' "$action"
@@ -86,6 +87,8 @@ run
 grep -F $'semantic\tactive-unverified\tpending' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
 grep -qx 'state=resolved' "$action"
 grep -qx 'route=unqueued' "$state"
+[ "$(find "$HOME_DIR/state/.artifact-supervisor.actions/.active" -type f ! -name .ready | wc -l | tr -d ' ')" = 0 ]
+[ -f "$action" ]
 
 manifest semantic file-content 'path=success;expected=accepted' file-content 'path=failure;expected=rejected' $(( $(date +%s) + 60 )) fixture-semantic-next
 printf 'rejected\n' >"$HOME_DIR/failure"
@@ -108,6 +111,17 @@ run
 grep -F $'prefix\tfailed\tsemantic-failure' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
 find "$HOME_DIR/state/.artifact-supervisor.actions" -name '*.action' -exec grep -l '^task-id=prefix$' {} + | grep -q .
 
+printf 'hash contract\n' > "$HOME_DIR/hash-artifact"
+if command -v shasum >/dev/null 2>&1; then
+  hash=$(shasum -a 256 "$HOME_DIR/hash-artifact" | awk '{print $1}' | tr 'a-f' 'A-F')
+else
+  hash=$(sha256sum "$HOME_DIR/hash-artifact" | awk '{print $1}' | tr 'a-f' 'A-F')
+fi
+printf 'window=never-used\nkind=ship\nprocess-pid=999999\n' >"$HOME_DIR/state/hash.meta"
+manifest hash file-hash "path=hash-artifact;sha256=$hash" always-fail '' $(( $(date +%s) + 60 ))
+run
+grep -F $'hash\tsuccess\tok' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
+
 # Busy is liveness evidence only: a dead declared PID and expired hard contract
 # stays failed/expired rather than being presented as active.
 printf 'window=never-used\nkind=ship\nprocess-pid=999999\n' >"$HOME_DIR/state/expired.meta"
@@ -125,4 +139,16 @@ printf 'window=never-used\nkind=ship\n' >"$HOME_DIR/state/malformed.meta"
 manifest malformed always-pass '' file-content 'path=failure;expected=' $(( $(date +%s) + 60 ))
 run
 grep -F $'malformed\tblocked\tmandatory manifest missing' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
+
+action_count=$(find "$HOME_DIR/state/.artifact-supervisor.actions" -name '*.action' | wc -l | tr -d ' ')
+cat > "$TMP/bin/shasum" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$TMP/bin/shasum"
+if run; then
+  exit 1
+fi
+[ "$(find "$HOME_DIR/state/.artifact-supervisor.actions" -name '*.action' | wc -l | tr -d ' ')" = "$action_count" ]
+grep -F 'snapshot-write-failed' "$HOME_DIR/state/.artifact-supervisor.error" >/dev/null
 printf 'ok - deterministic predicates route durable owned actions across restart\n'

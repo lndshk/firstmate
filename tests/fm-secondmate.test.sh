@@ -1231,6 +1231,26 @@ test_spawn_refuses_invalid_manifest_without_publishing_meta() {
   grep -F 'manifest predicate arguments do not match implemented predicate schemas' "$err" >/dev/null \
     || fail "spawn did not explain invalid predicate arguments"
   grep -F 'new-window' "$log" >/dev/null && fail "invalid predicate arguments created a tmux window"
+
+  : > "$log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/invalid-manifest-fake/pane.txt" \
+    FM_MANIFEST_DEADLINE_SECONDS=abc \
+    "$ROOT/bin/fm-spawn.sh" invalid-manifest "$subhome" codex --secondmate >/dev/null 2>"$err"; then
+    fail "spawn accepted a non-integer manifest deadline duration"
+  fi
+  grep -F 'manifest timing/retry settings must be unsigned integers' "$err" >/dev/null \
+    || fail "spawn did not explain an invalid manifest deadline duration"
+  grep -F 'new-window' "$log" >/dev/null && fail "invalid manifest deadline duration created a tmux window"
+
+  : > "$log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/invalid-manifest-fake/pane.txt" \
+    FM_MANIFEST_ACK_SECONDS='1+2' \
+    "$ROOT/bin/fm-spawn.sh" invalid-manifest "$subhome" codex --secondmate >/dev/null 2>"$err"; then
+    fail "spawn accepted a non-integer manifest acknowledgement duration"
+  fi
+  grep -F 'manifest timing/retry settings must be unsigned integers' "$err" >/dev/null \
+    || fail "spawn did not explain an invalid manifest acknowledgement duration"
+  grep -F 'new-window' "$log" >/dev/null && fail "invalid manifest acknowledgement duration created a tmux window"
   pass "invalid manifests are rejected before launch side effects"
 }
 

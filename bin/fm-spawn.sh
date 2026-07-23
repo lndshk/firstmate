@@ -129,15 +129,21 @@ atomic_publish() { # <destination>; content is read from stdin
 manifest_path_for() { printf '%s/%s.manifest' "$STATE" "$1"; }
 
 prepare_operation_manifest() { # <task-id> <kind> <harness> <route>
-  local task_id=$1 task_kind=$2 task_harness=$3 route=$4 value
+  local task_id=$1 task_kind=$2 task_harness=$3 route=$4 value deadline_seconds ack_seconds
   MANIFEST_TASK_ID=$task_id
   MANIFEST_KIND=$task_kind
   MANIFEST_HARNESS=$task_harness
   MANIFEST_ROUTE=$route
   MANIFEST_STARTED=$(now_epoch)
-  MANIFEST_DEADLINE=$((MANIFEST_STARTED + ${FM_MANIFEST_DEADLINE_SECONDS:-86400}))
+  deadline_seconds=${FM_MANIFEST_DEADLINE_SECONDS:-86400}
+  ack_seconds=${FM_MANIFEST_ACK_SECONDS:-900}
+  if ! manifest_uint "$deadline_seconds" || ! manifest_uint "$ack_seconds"; then
+    echo "error: manifest timing/retry settings must be unsigned integers" >&2
+    return 1
+  fi
+  MANIFEST_DEADLINE=$((MANIFEST_STARTED + 10#$deadline_seconds))
   MANIFEST_NO_PROGRESS=${FM_MANIFEST_NO_PROGRESS_SECONDS:-3600}
-  MANIFEST_ACK_DEADLINE=$((MANIFEST_STARTED + ${FM_MANIFEST_ACK_SECONDS:-900}))
+  MANIFEST_ACK_DEADLINE=$((MANIFEST_STARTED + 10#$ack_seconds))
   MANIFEST_MAX_ATTEMPTS=${FM_MANIFEST_RETRY_MAX_ATTEMPTS:-0}
   MANIFEST_OWNER=${FM_MANIFEST_OWNER:-firstmate}
   MANIFEST_COMMAND_ID=${FM_MANIFEST_COMMAND_ID:-$task_harness}
