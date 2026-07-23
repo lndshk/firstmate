@@ -145,6 +145,7 @@ write_snapshot() {
   tmp="$SNAPSHOT.tmp.$$"
   rows="$tmp.rows"
   rm -f "$rows"
+  : > "$rows" || return 1
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     classify_meta "$meta" >> "$rows" || { rm -f "$tmp" "$rows"; return 1; }

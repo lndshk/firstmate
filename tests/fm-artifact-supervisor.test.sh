@@ -94,6 +94,16 @@ run_once
 [ -f "$HOME_DIR/state/.artifact-supervisor.heartbeat" ]
 [ ! -e "$HOME_DIR/state/.artifact-supervisor.error" ]
 
+EMPTY_STATE="$TMP/empty-state"
+mkdir -p "$EMPTY_STATE"
+PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$EMPTY_STATE" FM_BOARD_DIR="$TMP/board" \
+  FM_BOARD_OUT="$TMP/board/empty.html" FM_BOARD_BODY="$TMP/no-body" \
+  "$ROOT/bin/fm-artifact-supervisor.sh" --once
+[ -f "$EMPTY_STATE/.artifact-supervisor.heartbeat" ]
+[ "$(sed -n '1p' "$EMPTY_STATE/artifact-supervisor.tsv")" = artifact-supervisor-v1 ]
+[ "$(wc -l < "$EMPTY_STATE/artifact-supervisor.tsv" | tr -d ' ')" = 2 ]
+grep -q 'No recorded Firstmate panes' "$TMP/board/empty.html"
+
 OVERRIDE_STATE="$TMP/override-state"
 mkdir -p "$OVERRIDE_STATE"
 printf 'window=fm-waiting\nkind=ship\n' >"$OVERRIDE_STATE/override.meta"

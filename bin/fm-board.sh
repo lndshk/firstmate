@@ -4,7 +4,9 @@
 # page also declares itself stale when this process no longer refreshes it.
 set -u
 
-FM_HOME="${FM_HOME:-/home/rob/firstmate}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 BOARD_DIR="${FM_BOARD_DIR:-$FM_HOME/state/board}"
 OUT="${FM_BOARD_OUT:-$BOARD_DIR/board.html}"
@@ -17,6 +19,9 @@ STALE_AFTER="${FM_BOARD_STALE_AFTER:-$((INTERVAL * 3))}"
 ARTIFACT_STALE_AFTER="${FM_ARTIFACT_STALE_AFTER:-$STALE_AFTER}"
 STALL_AFTER="${FM_BOARD_STALL_AFTER:-180}"
 SNAPSHOT="${FM_ARTIFACT_SNAPSHOT:-$STATE/artifact-supervisor.tsv}"
+
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$SCRIPT_DIR/fm-tmux-lib.sh"
 
 now_epoch() { date +%s; }
 mtime_epoch() {
@@ -32,12 +37,6 @@ age_text() {
   fi
 }
 escape_html() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'; }
-
-pane_busy() {
-  local capture
-  capture=$(tmux capture-pane -p -t "$1" 2>/dev/null | tail -8) || return 1
-  printf '%s\n' "$capture" | grep -qiE 'esc to interrupt|esc interrupt|Working \(|Working\.\.\.|thinking'
-}
 
 pane_exists() { tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1; }
 
@@ -58,6 +57,10 @@ snapshot_row() { # <task-id>
   awk -F '\t' -v wanted="$1" 'NR > 2 && $1 == wanted { print; exit }' "$SNAPSHOT"
 }
 
+snapshot_field() {
+  printf '%s\n' "$1" | awk -F '\t' -v field="$2" '{ print $field; exit }'
+}
+
 render_row() {
   local meta=$1 id win kind status_file receipt status_age meta_age age state reason class pr snap
   id=$(basename "$meta" .meta)
@@ -72,9 +75,10 @@ render_row() {
   age=$status_age; [ "$age" -gt "$meta_age" ] && age=$meta_age
   snap=$(snapshot_row "$id" || true)
   if [ -n "$snap" ]; then
-    IFS="$(printf '\t')" read -r _ state reason receipt status_age _ _ <<EOF
-$snap
-EOF
+    state=$(snapshot_field "$snap" 2)
+    reason=$(snapshot_field "$snap" 3)
+    receipt=$(snapshot_field "$snap" 4)
+    status_age=$(snapshot_field "$snap" 5)
     class=$state
     age=$status_age
   else
@@ -84,7 +88,7 @@ EOF
       state=terminal; class=terminal; reason='Terminal receipt recorded; pane presence does not imply work.'
     elif ! pane_exists "$win"; then
       state=stalled; class=stalled; reason='Recorded pane is gone without a terminal receipt; inspect or relaunch.'
-    elif pane_busy "$win"; then
+    elif fm_pane_is_busy "$win"; then
       state=active; class=active; reason='Busy footer observed in the pane.'
     elif [ "$age" -ge "$STALL_AFTER" ]; then
       state=stalled; class=stalled; reason="No durable update for $(age_text "$age"); inspect the idle pane."
