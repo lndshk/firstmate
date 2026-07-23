@@ -27,7 +27,22 @@ make_fake_tmux() {
 set -u
 printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 case "${1:-}" in
-  has-session|new-session|new-window|send-keys)
+  has-session|new-session|send-keys)
+    exit 0
+    ;;
+  new-window)
+    window=
+    owner=
+    kind=
+    args=("$@")
+    for ((i = 1; i < ${#args[@]}; i++)); do
+      case "${args[$i]}" in
+        -n) i=$((i + 1)); window=${args[$i]} ;;
+        @fm_home) i=$((i + 1)); owner=${args[$i]} ;;
+        @fm_kind) i=$((i + 1)); kind=${args[$i]} ;;
+      esac
+    done
+    printf 'firstmate:%s\t%s\t%s\n' "$window" "$owner" "$kind" >> "$FM_FAKE_TMUX_ACTIVE"
     exit 0
     ;;
   list-windows)
@@ -38,7 +53,7 @@ case "${1:-}" in
     if "$all"; then
       cat "$FM_FAKE_TMUX_ACTIVE"
     else
-      sed 's/^[^:]*://' "$FM_FAKE_TMUX_ACTIVE"
+      sed 's/^[^:]*://;s/	.*//' "$FM_FAKE_TMUX_ACTIVE"
     fi
     exit 0
     ;;
@@ -98,6 +113,11 @@ yolo=off
 EOF
 }
 
+write_live_window() {
+  local dir=$1 target=$2 owner=${3:-} kind=${4:-}
+  printf '%s\t%s\t%s\n' "$target" "$owner" "$kind" >> "$dir/active-windows"
+}
+
 run_spawn() {
   local dir=$1 fakebin=$2 id=$3
   shift 3
@@ -131,11 +151,9 @@ test_default_boundary_counts_meta_and_recoverable_window() {
   done
   write_meta "$dir" one
   write_meta "$dir" two
-  cat > "$dir/active-windows" <<'EOF'
-firstmate:fm-one
-firstmate:fm-two
-firstmate:fm-three
-EOF
+  write_live_window "$dir" firstmate:fm-one
+  write_live_window "$dir" firstmate:fm-two
+  write_live_window "$dir" firstmate:fm-three "$dir" ship
 
   out=$(run_spawn "$dir" "$fakebin" "$id")
   status=$?
@@ -187,17 +205,44 @@ test_secondmates_do_not_consume_capacity() {
   write_meta "$dir" second-meta secondmate
   printf '%s\n' "- second-reg - fixture (home: /tmp/second-reg; scope: fixture; projects: demo; added 2026-07-23)" \
     > "$dir/data/secondmates.md"
-  cat > "$dir/active-windows" <<'EOF'
-firstmate:fm-ordinary-one
-firstmate:fm-ordinary-two
-firstmate:fm-second-meta
-firstmate:fm-second-reg
-EOF
+  write_live_window "$dir" firstmate:fm-ordinary-one
+  write_live_window "$dir" firstmate:fm-ordinary-two
+  write_live_window "$dir" firstmate:fm-second-meta
+  write_live_window "$dir" firstmate:fm-second-reg
+  write_filled_brief "$dir" second-explicit
+  write_live_window "$dir" firstmate:fm-second-explicit "$dir" secondmate
 
   out=$(run_spawn "$dir" "$fakebin" "$id") || fail "secondmates consumed ordinary capacity: $out"
   [ -f "$dir/state/$id.meta" ] || fail "admitted task did not write metadata"
   grep -F 'new-window' "$dir/tmux.log" >/dev/null || fail "admitted task did not create its window"
   pass "persistent secondmates are excluded from ordinary direct-report capacity"
+}
+
+test_recovery_attribution_is_home_scoped() {
+  local fixture dir fakebin id out foreign
+  fixture=$(make_case home-scoped)
+  dir=${fixture%%|*}
+  fakebin=${fixture#*|}
+  foreign="$dir-foreign"
+  id=new-home-scoped
+  write_filled_brief "$dir" "$id"
+  write_meta "$dir" local-one
+  write_meta "$dir" local-two
+  write_meta "$dir" stale-collision ship firstmate:fm-stale-collision
+  write_live_window "$dir" firstmate:fm-local-one
+  write_live_window "$dir" firstmate:fm-local-two
+  write_live_window "$dir" firstmate:fm-stale-collision "$foreign" ship
+  write_live_window "$dir" firstmate:fm-foreign-one "$foreign" ship
+  write_live_window "$dir" firstmate:fm-foreign-two "$foreign" ship
+  write_live_window "$dir" firstmate:fm-explicit-secondmate "$dir" secondmate
+
+  out=$(run_spawn "$dir" "$fakebin" "$id") || fail "foreign or secondmate windows consumed this home's capacity: $out"
+  [ -f "$dir/state/$id.meta" ] || fail "home-scoped admission did not complete"
+  grep -F "@fm_home $dir" "$dir/tmux.log" >/dev/null \
+    || fail "spawned window omitted durable home ownership"
+  grep -F '@fm_kind ship' "$dir/tmux.log" >/dev/null \
+    || fail "spawned window omitted durable report kind"
+  pass "recovery attribution accepts only matching home ownership and honors window kind"
 }
 
 test_dead_meta_does_not_hold_capacity() {
@@ -253,9 +298,79 @@ test_scaffolds_name_the_required_contract() {
   pass "ship and scout scaffolds name objective, evidence, trigger, and status honesty"
 }
 
+test_secondmate_charter_requires_owned_acknowledgement() {
+  local fixture dir fakebin charter
+  fixture=$(make_case secondmate-ownership)
+  dir=${fixture%%|*}
+  fakebin=${fixture#*|}
+  : "$fakebin"
+  FM_HOME="$dir" \
+    FM_SECONDMATE_CHARTER='Own fixture work.' \
+    FM_SECONDMATE_SCOPE='Fixture work.' \
+    "$BRIEF" fixture-advisor --secondmate demo >/dev/null
+  charter="$dir/data/fixture-advisor/brief.md"
+
+  grep -F "durable record has already been transferred into this home's \`data/backlog.md\`" "$charter" >/dev/null \
+    || fail "secondmate charter omitted durable ownership transfer"
+  grep -F 'working: accepted {task-id}' "$charter" >/dev/null \
+    || fail "secondmate charter omitted durable acceptance acknowledgement"
+  grep -F 'normal Queued -> spawn -> In flight lifecycle' "$charter" >/dev/null \
+    || fail "secondmate charter omitted the backlog transition order"
+  pass "secondmate charter requires transferred ownership and acknowledgement"
+}
+
+test_concurrent_admission_is_atomic() {
+  local fixture dir fakebin first_pid second_pid first_status second_status successes failures meta_count new_windows
+  fixture=$(make_case concurrent-admission)
+  dir=${fixture%%|*}
+  fakebin=${fixture#*|}
+  for id in local-one local-two; do
+    write_meta "$dir" "$id"
+    write_live_window "$dir" "firstmate:fm-$id"
+  done
+  write_filled_brief "$dir" concurrent-one
+  write_filled_brief "$dir" concurrent-two
+
+  (run_spawn "$dir" "$fakebin" concurrent-one > "$dir/concurrent-one.out"; printf '%s\n' "$?" > "$dir/concurrent-one.status") &
+  first_pid=$!
+  (run_spawn "$dir" "$fakebin" concurrent-two > "$dir/concurrent-two.out"; printf '%s\n' "$?" > "$dir/concurrent-two.status") &
+  second_pid=$!
+  wait "$first_pid"
+  wait "$second_pid"
+
+  first_status=$(cat "$dir/concurrent-one.status")
+  second_status=$(cat "$dir/concurrent-two.status")
+  successes=0
+  failures=0
+  [ "$first_status" -eq 0 ] && successes=$((successes + 1)) || failures=$((failures + 1))
+  [ "$second_status" -eq 0 ] && successes=$((successes + 1)) || failures=$((failures + 1))
+  [ "$successes" -eq 1 ] && [ "$failures" -eq 1 ] \
+    || fail "concurrent final-slot admission was not one success and one refusal"
+  meta_count=$(find "$dir/state" -maxdepth 1 -type f -name 'concurrent-*.meta' | wc -l | tr -d '[:space:]')
+  [ "$meta_count" -eq 1 ] || fail "concurrent admission wrote $meta_count new metadata files"
+  new_windows=$(grep -c '^new-window' "$dir/tmux.log")
+  [ "$new_windows" -eq 1 ] || fail "concurrent admission created $new_windows new windows"
+  [ ! -d "$dir/state/.spawn-admission.lock" ] || fail "admission lock remained after both spawns exited"
+  pass "per-home admission lock makes final-slot allocation atomic"
+}
+
+test_documented_backlog_transition_is_consistent() {
+  grep -F 'The sequence is always Queued -> spawn -> In flight' "$ROOT/AGENTS.md" >/dev/null \
+    || fail "lifecycle omitted the canonical backlog transition"
+  grep -F 'Do not use `--start`.' "$ROOT/AGENTS.md" >/dev/null \
+    || fail "tasks-axi intake still permits add-and-start"
+  grep -F 'run `tasks-axi start <id>` only after spawn succeeds' "$ROOT/AGENTS.md" >/dev/null \
+    || fail "tasks-axi start is not ordered after successful spawn"
+  pass "documented backlog commands preserve Queued until spawn succeeds"
+}
+
 test_default_boundary_counts_meta_and_recoverable_window
 test_explicit_override_changes_boundary
 test_secondmates_do_not_consume_capacity
+test_recovery_attribution_is_home_scoped
 test_dead_meta_does_not_hold_capacity
 test_unfilled_generated_brief_is_rejected
 test_scaffolds_name_the_required_contract
+test_secondmate_charter_requires_owned_acknowledgement
+test_concurrent_admission_is_atomic
+test_documented_backlog_transition_is_consistent

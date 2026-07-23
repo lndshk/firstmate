@@ -125,7 +125,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 - **Worktrees, not branches in your checkout** - crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
 - **Two task shapes** - ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
 - **Bounded direct work** - each firstmate home admits at most three active ship/scout reports by default, while persistent secondmates remain outside that limit.
-  `FM_DIRECT_REPORT_LIMIT` overrides the cap; when full, `fm-spawn.sh` leaves existing work untouched and keeps the new request queued.
+  `FM_DIRECT_REPORT_LIMIT` overrides the cap; per-home admission is serialized, windows carry durable home/kind identity, and a full home leaves existing work untouched while the new request stays queued.
 - **Optional secondmates** - `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
   `fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same tmux and status-file path as any direct report.
   When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and is not recycled by later `treehouse get` or pruning.
@@ -194,6 +194,7 @@ Teardown of a leased home fails closed if `treehouse return` cannot release the 
 Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` projects remain main-firstmate work.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 After creating a secondmate, move existing main-backlog items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it is idempotent and refuses in-flight items or non-secondmate homes.
+New routed work follows the same ownership path: record it Queued in the main home, hand it off, then send its id and wait for the secondmate's durable acceptance acknowledgement.
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
 `FM_HOME` selects the operational home for one firstmate instance.
 When it is unset, the repo root is the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.

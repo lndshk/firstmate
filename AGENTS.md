@@ -361,7 +361,7 @@ Read `data/secondmates.md` before dispatching and compare the work request to ea
 Route by the nature of the task, not just the project name.
 A project may appear in several `projects:` clone lists, so choose the secondmate whose natural-language scope actually fits the work, such as triage versus feature development.
 If the resolved project is `local-only`, keep the work with the main firstmate even when a secondmate scope sounds relevant.
-If a secondmate's scope fits, steer that secondmate with one concise instruction via `bin/fm-send.sh fm-<id> '<work request>'` and let it run the normal lifecycle inside its own home.
+If a secondmate's scope fits, select it as the destination but do not steer it yet.
 The bare `fm-<id>` target resolves through this home's `state/<id>.meta`; pass `session:window` only when intentionally targeting a window outside this firstmate home.
 Do not spawn a direct crewmate for work that belongs to a secondmate scope unless the secondmate is blocked or the captain explicitly redirects it.
 If no secondmate scope fits, proceed in the main firstmate or create a new secondmate with the captain when that domain should become persistent.
@@ -382,7 +382,12 @@ Keep dependency judgment coarse: same repo plus overlapping area means serialize
 For `no-mistakes` projects, the pipeline rebase step absorbs mild overlaps; for other modes, have the crewmate rebase before review or merge if needed.
 
 Every incoming work request becomes a durable `data/backlog.md` record before it is dispatched or left queued.
-Record first, then scaffold and spawn; after a successful spawn, move the record to In flight.
+The sequence is always Queued -> spawn -> In flight: record the request under Queued, scaffold and spawn it, and only after spawn succeeds move that existing record to In flight.
+A refused or failed spawn therefore leaves the request durably Queued, while recovery moves a Queued record to In flight when its live metadata proves that spawn succeeded before the backlog transition.
+Never use an add-and-start operation for new work and never mark a queued item In flight before spawn.
+For secondmate-routed work, first record it under Queued in the main home, atomically transfer that queued record with `bin/fm-backlog-handoff.sh <secondmate-id> <task-id>`, and only after the helper confirms the destination owns it send `bin/fm-send.sh fm-<secondmate-id> '<task-id>: <work request>'`.
+The secondmate verifies the item is in its own backlog before acting and acknowledges receipt by appending `working: accepted <task-id>` to its main-firstmate status file.
+Until that acknowledgement is present, retry delivery rather than creating another record; an interruption before transfer leaves ownership in the main queue, and an interruption after transfer leaves ownership in the secondmate queue for its recovery.
 A later urgent request may change priority or interrupt which queued task goes next, but it never erases, replaces, or silently abandons the earlier task.
 Firstmate owns every accepted request through a verified terminal outcome, including follow-up after later captain messages, context switches, and restarts.
 
@@ -406,7 +411,9 @@ The script resolves the harness (`fm-harness.sh crew`), owns the verified launch
 Before creating a tmux window or worktree, it also enforces ordinary direct-report admission.
 The default limit is three active ship/scout reports per firstmate home; set `FM_DIRECT_REPORT_LIMIT` to an explicit non-negative integer to override it.
 Persistent secondmates do not consume this capacity.
-Admission counts this home's live ordinary meta targets plus live `fm-*` windows recoverable from this home's durable briefs; dead meta records are ignored, so stale state cannot hold capacity forever.
+Admission counts this home's live ordinary meta targets plus live `fm-*` windows carrying this home's ownership option; dead meta records are ignored, so stale state cannot hold capacity forever.
+Each spawned window carries its owning firstmate home and report kind as tmux window options, and admission accepts recovery attribution only from this home's metadata or a matching home option.
+The per-home count and window admission are serialized through a portable state-directory lock, so concurrent spawns cannot both claim the same final slot.
 If the home is already at or above its limit, spawn leaves every existing report untouched, refuses the new side effects, lists what is active, and says the new task remains or should remain queued.
 For `kind=secondmate`, the same script resolves the registered or explicit persistent home, chooses the first registered project (or `FM_SECONDMATE_PROJECT_NATIVE` override), and refreshes that clone through `fm-fleet-sync.sh` with fetch plus fast-forward-only safety before launch.
 It records `home=` and `projects=` and uses the charter brief as the launch prompt; a selected existing clone that is dirty, diverged, offline, off-default, or otherwise not provably current blocks spawn instead of exposing stale project docs.
@@ -417,7 +424,7 @@ The cwd change is project context only: launch `FM_HOME`, meta `home=`, and ever
 Codex secondmates also receive a per-launch trusted-project override for that cwd, so a first project-native launch cannot park on the directory-trust dialog.
 Project worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
 After spawning, peek the pane to confirm the crewmate is processing the brief (and handle any trust dialog per section 4).
-Add the task to `data/backlog.md` under In flight.
+Move the already-queued task to `data/backlog.md` under In flight.
 
 ### Supervise
 
@@ -698,8 +705,8 @@ Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1
 The `## In flight` / `## Queued` / `## Done` format above stays the contract: the verbs edit `data/backlog.md` in place, byte-exact, preserving whatever item forms the file already uses - the bold in-flight `- **<id>**` form, the `- [ ]`/`- [x]` queued and done forms, and `blocked-by: <id> - <reason>` - rather than reformatting them.
 Map firstmate's real backlog operations to the approved commands:
 
-- File an item: `tasks-axi add <id> "<one line>" --kind <ship|scout> --repo <name>`, plus `--start` for immediate dispatch (In flight) or the default queue placement, and `--blocked-by <id>` (repeatable) when it waits on another task.
-- Start an existing queued item: `tasks-axi start <id>` before dispatching work from Queued, after checking that blockers are gone and any time/date gate has arrived.
+- File every new item under Queued: `tasks-axi add <id> "<one line>" --kind <ship|scout> --repo <name>`, plus `--blocked-by <id>` (repeatable) when it waits on another task. Do not use `--start`.
+- Start an existing queued item: after checking that blockers are gone and any time/date gate has arrived, spawn it first and run `tasks-axi start <id>` only after spawn succeeds. If spawn refuses or fails, leave it Queued.
 - Move a finished task to Done: `tasks-axi done <id> --pr <url>` for a PR-based ship, `--report <path>` for a scout, or `--note "local main"` for a local-only merge.
 - Append a status note: `tasks-axi update <id> --append "<note>"`; replace fields with `--title`, `--body`, or `--body-file <path>`.
 - Manage dependencies: `tasks-axi block <id> --by <other>` and `tasks-axi unblock <id> --by <other>`, then `tasks-axi ready` to list queued work with no unresolved blockers.

@@ -40,6 +40,16 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+ACTIVE_HOME="$(cd "$FM_HOME" && pwd -P)"
+ADMISSION_LOCK=
+release_spawn_admission() {
+  [ -n "$ADMISSION_LOCK" ] || return 0
+  fm_lock_release "$ADMISSION_LOCK"
+  ADMISSION_LOCK=
+}
+trap release_spawn_admission EXIT
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -239,17 +249,17 @@ registered_secondmate() {
 }
 
 live_firstmate_windows() {
-  tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null \
+  tmux list-windows -a -F $'#{session_name}:#{window_name}\t#{@fm_home}\t#{@fm_kind}' 2>/dev/null \
     | sed -n '/:fm-/p' || true
 }
 
 # Print one "id<TAB>window" row per active ordinary direct report owned by this
 # firstmate home. A meta record counts only while its recorded window is live, so
 # a dead/stale record cannot hold capacity forever. A live fm-* window whose meta
-# write was interrupted still counts when this home's durable brief identifies it.
-# Registered/meta-identified secondmates are excluded.
+# write was interrupted still counts when its window option names this home.
+# Window-, registry-, and meta-identified secondmates are excluded.
 active_ordinary_reports() {
-  local live claimed meta window kind id target
+  local live claimed meta window kind id row target rest owner window_kind
   live=$(live_firstmate_windows)
   claimed=
 
@@ -257,19 +267,39 @@ active_ordinary_reports() {
     [ -f "$meta" ] || continue
     window=$(sed -n 's/^window=//p' "$meta" | tail -1)
     [ -n "$window" ] || continue
-    line_in_set "$window" "$live" || continue
+    row=$(printf '%s\n' "$live" | awk -F '\t' -v target="$window" '$1 == target { print; exit }')
+    [ -n "$row" ] || continue
+    rest=${row#*$'\t'}
+    if [ "$rest" = "$row" ]; then
+      owner=
+      window_kind=
+    else
+      owner=${rest%%$'\t'*}
+      window_kind=${rest#*$'\t'}
+      [ "$window_kind" != "$rest" ] || window_kind=
+    fi
+    [ -z "$owner" ] || [ "$owner" = "$ACTIVE_HOME" ] || continue
     claimed="${claimed}${claimed:+$'\n'}$window"
     kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
-    [ "$kind" = secondmate ] && continue
+    if [ "$kind" = secondmate ] || [ "$window_kind" = secondmate ]; then
+      continue
+    fi
     id=$(basename "$meta" .meta)
     printf '%s\t%s\n' "$id" "$window"
   done
 
-  while IFS= read -r target; do
-    [ -n "$target" ] || continue
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    target=${row%%$'\t'*}
+    rest=${row#*$'\t'}
+    [ "$rest" != "$row" ] || continue
+    owner=${rest%%$'\t'*}
+    window_kind=${rest#*$'\t'}
+    [ "$window_kind" != "$rest" ] || window_kind=
     line_in_set "$target" "$claimed" && continue
+    [ "$owner" = "$ACTIVE_HOME" ] || continue
+    [ "$window_kind" = secondmate ] && continue
     id=${target##*:fm-}
-    [ -f "$DATA/$id/brief.md" ] || continue
     registered_secondmate "$id" && continue
     printf '%s\t%s\n' "$id" "$target"
   done <<EOF
@@ -303,6 +333,12 @@ enforce_ordinary_admission() {
     echo "error: direct-report admission refused for $ID: $count active (limit $limit): $summary; task $ID remains or should remain queued" >&2
     return 1
   fi
+}
+
+acquire_ordinary_admission() {
+  ADMISSION_LOCK="$STATE/.spawn-admission.lock"
+  fm_lock_acquire_wait "$ADMISSION_LOCK"
+  enforce_ordinary_admission
 }
 
 validate_firstmate_home_for_spawn() {
@@ -474,7 +510,7 @@ if tmux has-session -t "$SES" 2>/dev/null \
 fi
 
 if [ "$KIND" != secondmate ]; then
-  enforce_ordinary_admission || exit 1
+  acquire_ordinary_admission || exit 1
 fi
 
 if [ "$KIND" = secondmate ] && [ -n "$PROJECT_NATIVE_ABS" ]; then
@@ -498,7 +534,9 @@ if tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
   exit 1
 fi
 
-tmux new-window -d -t "$SES" -n "$W" -c "$WINDOW_CWD"
+tmux new-window -d -t "$SES" -n "$W" -c "$WINDOW_CWD" \
+  \; set-option -w -t "$T" @fm_home "$ACTIVE_HOME" \
+  \; set-option -w -t "$T" @fm_kind "$KIND"
 if [ "$KIND" != secondmate ]; then
   tmux send-keys -t "$T" 'treehouse get' Enter
 
@@ -610,6 +648,7 @@ mkdir -p "$STATE"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
+release_spawn_admission
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
