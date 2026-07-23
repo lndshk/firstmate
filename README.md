@@ -124,6 +124,8 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
   Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 - **Worktrees, not branches in your checkout** - crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
 - **Two task shapes** - ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
+- **Bounded direct work** - each firstmate home admits at most three active ship/scout reports by default, while persistent secondmates remain outside that limit.
+  `FM_DIRECT_REPORT_LIMIT` overrides the cap; when full, `fm-spawn.sh` leaves existing work untouched and keeps the new request queued.
 - **Optional secondmates** - `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
   `fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same tmux and status-file path as any direct report.
   When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and is not recycled by later `treehouse get` or pruning.
@@ -155,12 +157,12 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-fleet-sync.sh`       | Fetch clones, clean-fast-forward their checked-out default branches, and safely prune branches whose remote is gone |
 | `fm-update.sh`           | Self-update the running firstmate repo and registered secondmate homes with fast-forward-only pulls from origin     |
 | `fm-backlog-handoff.sh`  | Move already-judged in-scope queued backlog items from the main home into a seeded secondmate home                 |
-| `fm-brief.sh`            | Scaffold a ship brief, a report-only scout brief with `--scout`, or a secondmate charter with `--secondmate`      |
+| `fm-brief.sh`            | Scaffold an evidence-bearing ship brief, a report-only scout brief with `--scout`, or a secondmate charter with `--secondmate` |
 | `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
 | `fm-guard.sh`            | Warn when tasks are in flight but queued wakes are pending, the stall detector has findings, or the watcher liveness beacon is stale or missing |
 | `fm-stall-check.sh`      | Read-only pull-based sweep that flags finished-but-not-advanced tasks, unblocked or date-gated queued items, in-flight crews with committed-but-unpushed work, idle in-flight stalls, and idle domain advisors that finished routed work; `--fast` skips the pane peeks |
 | `fm-home-seed.sh`        | Lease/provision a secondmate home transactionally, clone projects, initialize gates, and maintain `data/secondmates.md` |
-| `fm-spawn.sh`            | Spawn one task, several `id=repo` pairs, or a persistent secondmate with `--secondmate`                            |
+| `fm-spawn.sh`            | Admit and spawn one task, several `id=repo` pairs, or a persistent secondmate with `--secondmate`                 |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval                                           |
 | `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
@@ -211,6 +213,7 @@ FM_GUARD_STALL_CHECK=1  # set to 0 to stop fm-guard running the fast stall sweep
 FM_STALL_IDLE_SECS=600  # idle seconds before fm-stall-check flags an in-flight pane as a possible stall
 FM_ADVISOR_IDLE_STALL_SECS=1800  # idle seconds before fm-stall-check flags a live secondmate advisor that finished its routed work
 FM_WATCH_KEEPALIVE=1    # set to 0 to disable the watcher keepalive sidecar
+FM_DIRECT_REPORT_LIMIT=3 # active ship/scout reports per firstmate home; secondmates excluded
 FM_WATCH_KEEPALIVE_INTERVAL=30  # seconds between keepalive stale-beacon checks
 FM_WATCH_KEEPALIVE_CRASH_THRESHOLD=5  # consecutive failed re-arms before backoff
 FM_WATCH_KEEPALIVE_CRASH_BACKOFF=300  # seconds to pause re-arm attempts after a crash loop

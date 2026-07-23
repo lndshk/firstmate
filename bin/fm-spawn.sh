@@ -29,6 +29,8 @@
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<session:window> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
+# Ordinary ship/scout admission is capped by FM_DIRECT_REPORT_LIMIT (default 3).
+# Persistent secondmates do not consume that capacity.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -219,6 +221,90 @@ trim_space() {
   printf '%s\n' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
+brief_has_unfilled_contract() {
+  local brief=$1
+  grep -Eq '\{(TASK|OBJECTIVE|SUCCESS_EVIDENCE|REVIEW_OR_DEADLINE_TRIGGER)\}' "$brief"
+}
+
+line_in_set() {
+  local needle=$1 set=$2
+  [ -n "$set" ] || return 1
+  printf '%s\n' "$set" | grep -qxF "$needle"
+}
+
+registered_secondmate() {
+  local id=$1 reg="$DATA/secondmates.md"
+  [ -f "$reg" ] || return 1
+  awk -v id="$id" '$1 == "-" && $2 == id { found = 1 } END { exit !found }' "$reg"
+}
+
+live_firstmate_windows() {
+  tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null \
+    | sed -n '/:fm-/p' || true
+}
+
+# Print one "id<TAB>window" row per active ordinary direct report owned by this
+# firstmate home. A meta record counts only while its recorded window is live, so
+# a dead/stale record cannot hold capacity forever. A live fm-* window whose meta
+# write was interrupted still counts when this home's durable brief identifies it.
+# Registered/meta-identified secondmates are excluded.
+active_ordinary_reports() {
+  local live claimed meta window kind id target
+  live=$(live_firstmate_windows)
+  claimed=
+
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    window=$(sed -n 's/^window=//p' "$meta" | tail -1)
+    [ -n "$window" ] || continue
+    line_in_set "$window" "$live" || continue
+    claimed="${claimed}${claimed:+$'\n'}$window"
+    kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
+    [ "$kind" = secondmate ] && continue
+    id=$(basename "$meta" .meta)
+    printf '%s\t%s\n' "$id" "$window"
+  done
+
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    line_in_set "$target" "$claimed" && continue
+    id=${target##*:fm-}
+    [ -f "$DATA/$id/brief.md" ] || continue
+    registered_secondmate "$id" && continue
+    printf '%s\t%s\n' "$id" "$target"
+  done <<EOF
+$live
+EOF
+}
+
+enforce_ordinary_admission() {
+  local limit active count summary
+  limit=${FM_DIRECT_REPORT_LIMIT:-3}
+  case "$limit" in
+    ''|*[!0-9]*)
+      echo "error: FM_DIRECT_REPORT_LIMIT must be a non-negative integer (got '$limit')" >&2
+      return 1
+      ;;
+  esac
+
+  active=$(active_ordinary_reports | sort -u)
+  if [ -n "$active" ]; then
+    count=$(printf '%s\n' "$active" | wc -l | tr -d '[:space:]')
+    summary=$(printf '%s\n' "$active" | awk -F '\t' '
+      { item = $1 " (" $2 ")"; out = out (out ? ", " : "") item }
+      END { print out }
+    ')
+  else
+    count=0
+    summary=none
+  fi
+
+  if [ "$count" -ge "$limit" ]; then
+    echo "error: direct-report admission refused for $ID: $count active (limit $limit): $summary; task $ID remains or should remain queued" >&2
+    return 1
+  fi
+}
+
 validate_firstmate_home_for_spawn() {
   local id=$1 home=$2 abs_home abs_active_home abs_root marker_id
   abs_home=$(resolved_existing_dir "$home") || return 1
@@ -366,6 +452,10 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+if brief_has_unfilled_contract "$BRIEF"; then
+  echo "error: brief at $BRIEF contains an unfilled generated contract placeholder; fill the objective, success evidence, and review/deadline trigger before spawning" >&2
+  exit 1
+fi
 
 # Resolve and reject an already-live target before a project-native refresh can
 # mutate the clone beneath that advisor. Outside tmux, do not create the fallback
@@ -381,6 +471,10 @@ if tmux has-session -t "$SES" 2>/dev/null \
   && tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
   echo "error: window $T already exists" >&2
   exit 1
+fi
+
+if [ "$KIND" != secondmate ]; then
+  enforce_ordinary_admission || exit 1
 fi
 
 if [ "$KIND" = secondmate ] && [ -n "$PROJECT_NATIVE_ABS" ]; then

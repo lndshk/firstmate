@@ -374,11 +374,17 @@ Then classify the shape:
 
 Then classify readiness:
 
-- **Dispatchable:** no overlap with in-flight tasks. Dispatch immediately. There is no concurrency cap.
+- **Dispatchable:** no overlap with in-flight tasks and ordinary direct-report capacity is available. Record it durably, then dispatch it.
 - **Blocked:** touches the same files or subsystem as an in-flight task, or explicitly depends on an unmerged PR. Record it in `data/backlog.md` with `blocked-by: <id>` and tell the captain what work is waiting and why. Scout tasks are read-mostly and almost never block on anything.
+- **Capacity-queued:** otherwise dispatchable, but the ordinary direct-report limit is full. Leave it queued and dispatch it when a slot opens.
 
 Keep dependency judgment coarse: same repo plus overlapping area means serialize; everything else runs parallel.
 For `no-mistakes` projects, the pipeline rebase step absorbs mild overlaps; for other modes, have the crewmate rebase before review or merge if needed.
+
+Every incoming work request becomes a durable `data/backlog.md` record before it is dispatched or left queued.
+Record first, then scaffold and spawn; after a successful spawn, move the record to In flight.
+A later urgent request may change priority or interrupt which queued task goes next, but it never erases, replaces, or silently abandons the earlier task.
+Firstmate owns every accepted request through a verified terminal outcome, including follow-up after later captain messages, context switches, and restarts.
 
 Write the brief per section 11.
 
@@ -397,6 +403,11 @@ Dispatch several tasks in one call by passing `id=repo` pairs instead of a singl
 If one pair fails, the rest still run and the batch exits non-zero.
 
 The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
+Before creating a tmux window or worktree, it also enforces ordinary direct-report admission.
+The default limit is three active ship/scout reports per firstmate home; set `FM_DIRECT_REPORT_LIMIT` to an explicit non-negative integer to override it.
+Persistent secondmates do not consume this capacity.
+Admission counts this home's live ordinary meta targets plus live `fm-*` windows recoverable from this home's durable briefs; dead meta records are ignored, so stale state cannot hold capacity forever.
+If the home is already at or above its limit, spawn leaves every existing report untouched, refuses the new side effects, lists what is active, and says the new task remains or should remain queued.
 For `kind=secondmate`, the same script resolves the registered or explicit persistent home, chooses the first registered project (or `FM_SECONDMATE_PROJECT_NATIVE` override), and refreshes that clone through `fm-fleet-sync.sh` with fetch plus fast-forward-only safety before launch.
 It records `home=` and `projects=` and uses the charter brief as the launch prompt; a selected existing clone that is dirty, diverged, offline, off-default, or otherwise not provably current blocks spawn instead of exposing stale project docs.
 
@@ -494,6 +505,8 @@ From there the task is an ordinary ship task through its mode-specific validatio
 The watcher is the backbone.
 Whenever at least one task is in flight, `bin/fm-watch.sh` must be running as a background task.
 It costs zero tokens while running and exits with one reason line when something needs you.
+It is a mechanical exception alarm, not another manager and not an interpreter of task semantics.
+It wakes on objective state changes and deadlines already encoded in status, tmux, checks, and heartbeat timing; Firstmate reads the brief and decides what those signals mean.
 It also writes each detected wake to the durable queue at `state/.wake-queue` before advancing suppression markers such as `.seen-*`, `.stale-*`, `.last-check`, or `.last-heartbeat`.
 At the start of every wake-handling turn and every recovery turn, run `bin/fm-wake-drain.sh` before peeking panes, reading status files beyond the reason line, or starting new work.
 The printed one-shot reason line is still useful, but the drained queue is the lossless backlog.
@@ -555,6 +568,9 @@ Background that work so watcher wakes can interleave with it and the supervision
 Token discipline: status files before panes; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
 The context-% shown in a peek is not actionable as crew health; ignore it and intervene only on real signals (`signal`, `stale`, `needs-decision`, `blocked`), looping or confusion in the pane, or a question the brief already answers.
 Silence is the correct state while a healthy background watcher is waiting.
+Status is evidence only to the degree it is independently observable: `working` is a crewmate report, never proof that progress occurred or that work completed.
+Treat `done` as a completion claim.
+Before delivery, validation, merge, or teardown, reconcile that claim against the brief's named success evidence and the actual report, diff, tests, PR, or other artifact.
 
 ### Sub-supervisor (presence-gated via `/afk`)
 
@@ -698,7 +714,7 @@ Secondmates inherit this automatically: each secondmate home carries the same `A
 
 ## 11. Crewmate briefs
 
-Scaffold with `bin/fm-brief.sh <id> <repo-name>` - it writes `data/<id>/brief.md` with the standard contract (branch setup, status-reporting protocol, push/merge rules, definition of done) and all paths filled in.
+Scaffold with `bin/fm-brief.sh <id> <repo-name>` - it writes `data/<id>/brief.md` with the standard contract (objective, observable success evidence, review/deadline trigger, branch setup, status-reporting protocol, push/merge rules, definition of done) and all paths filled in.
 For a ship task the definition of done is shaped by the project's delivery mode (section 6): `no-mistakes` ends in the harness-appropriate no-mistakes validation pipeline, `direct-PR` has the crewmate push and open the PR itself, `local-only` has it stop at "ready in branch" for firstmate to review and merge locally.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
@@ -714,7 +730,10 @@ The scaffold's definition of done encodes the idle-by-default contract (section 
 After seeding, hand the new secondmate's in-scope queued items off from the main backlog with `bin/fm-backlog-handoff.sh` (section 6).
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
 The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
-For any generated brief that still contains `{TASK}`, replace it with a clear task description, acceptance criteria, and any constraints or context the crewmate needs before spawning or seeding.
+For an ordinary generated brief, replace `{OBJECTIVE}`, `{SUCCESS_EVIDENCE}`, and `{REVIEW_OR_DEADLINE_TRIGGER}` with a clear objective, evidence that Firstmate can observe to verify success, and the condition or time that requires review, escalation, or follow-up.
+`bin/fm-spawn.sh` refuses an ordinary generated brief while any of those placeholders (or the legacy `{TASK}` placeholder) remains.
+This is deliberately a reserved-placeholder check, not a brief schema: a custom or deviating brief remains valid when it states the contract in another shape and contains no unfilled generated placeholders.
+For a generated secondmate charter that still contains `{TASK}`, replace it with the persistent responsibility and routing scope before seeding.
 Adjust the other sections only when the task genuinely deviates from the standard ship-a-new-PR shape (e.g. fixing an existing external PR); the scaffold is the contract, not a suggestion.
 
 ## 12. Self-update
