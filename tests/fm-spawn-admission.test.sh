@@ -58,6 +58,13 @@ case "${1:-}" in
     exit 0
     ;;
   display-message)
+    if [ -n "${FM_FAKE_DISPLAY_GATE:-}" ] && [ -n "${FM_FAKE_BLOCK_TARGET:-}" ]; then
+      case " $* " in
+        *" -t $FM_FAKE_BLOCK_TARGET "*)
+          while [ ! -e "$FM_FAKE_DISPLAY_GATE" ]; do sleep 0.02; done
+          ;;
+      esac
+    fi
     printf '%s\n' "$FM_FAKE_WORKTREE"
     exit 0
     ;;
@@ -354,6 +361,71 @@ test_concurrent_admission_is_atomic() {
   pass "per-home admission lock makes final-slot allocation atomic"
 }
 
+test_admission_reclaims_reused_pid_lock() {
+  local fixture dir fakebin id out
+  fixture=$(make_case reused-pid-lock)
+  dir=${fixture%%|*}
+  fakebin=${fixture#*|}
+  id=after-reused-pid
+  write_filled_brief "$dir" "$id"
+  mkdir "$dir/state/.spawn-admission.lock"
+  printf '%s\n' "$$" > "$dir/state/.spawn-admission.lock/pid"
+  printf '%s\n' 'stale-process-start' > "$dir/state/.spawn-admission.lock/identity"
+
+  out=$(run_spawn "$dir" "$fakebin" "$id") || fail "reused-PID admission lock was not reclaimed: $out"
+  [ -f "$dir/state/$id.meta" ] || fail "spawn after reused-PID lock did not complete"
+  [ ! -d "$dir/state/.spawn-admission.lock" ] || fail "reused-PID admission lock remained after spawn"
+  pass "admission reclaims a lock whose PID has a different process identity"
+}
+
+test_tagged_window_releases_admission_lock() {
+  local fixture dir fakebin slow_pid fast_pid gate seen id
+  fixture=$(make_case tagged-release)
+  dir=${fixture%%|*}
+  fakebin=${fixture#*|}
+  gate="$dir/display-gate"
+  write_filled_brief "$dir" slow-setup
+  write_filled_brief "$dir" fast-setup
+
+  (FM_DIRECT_REPORT_LIMIT=2 \
+    FM_FAKE_BLOCK_TARGET=firstmate:fm-slow-setup \
+    FM_FAKE_DISPLAY_GATE="$gate" \
+    run_spawn "$dir" "$fakebin" slow-setup > "$dir/slow-setup.out"; printf '%s\n' "$?" > "$dir/slow-setup.status") &
+  slow_pid=$!
+  seen=0
+  for _ in $(seq 1 100); do
+    if grep -F 'firstmate:fm-slow-setup' "$dir/active-windows" >/dev/null; then
+      seen=1
+      break
+    fi
+    sleep 0.02
+  done
+  if [ "$seen" -ne 1 ]; then
+    : > "$gate"
+    wait "$slow_pid"
+    fail "slow spawn did not create its tagged reservation"
+  fi
+
+  (FM_DIRECT_REPORT_LIMIT=2 run_spawn "$dir" "$fakebin" fast-setup > "$dir/fast-setup.out"; printf '%s\n' "$?" > "$dir/fast-setup.status") &
+  fast_pid=$!
+  seen=0
+  for _ in $(seq 1 100); do
+    if [ -f "$dir/state/fast-setup.meta" ]; then
+      seen=1
+      break
+    fi
+    sleep 0.02
+  done
+  : > "$gate"
+  wait "$slow_pid"
+  wait "$fast_pid"
+  [ "$seen" -eq 1 ] || fail "tagged slow setup retained the admission lock"
+  for id in slow-setup fast-setup; do
+    [ "$(cat "$dir/$id.status")" -eq 0 ] || fail "$id spawn failed during lock-release regression"
+  done
+  pass "tagged window releases admission before worktree setup completes"
+}
+
 test_documented_backlog_transition_is_consistent() {
   grep -F 'The sequence is always Queued -> spawn -> In flight' "$ROOT/AGENTS.md" >/dev/null \
     || fail "lifecycle omitted the canonical backlog transition"
@@ -373,4 +445,6 @@ test_unfilled_generated_brief_is_rejected
 test_scaffolds_name_the_required_contract
 test_secondmate_charter_requires_owned_acknowledgement
 test_concurrent_admission_is_atomic
+test_admission_reclaims_reused_pid_lock
+test_tagged_window_releases_admission_lock
 test_documented_backlog_transition_is_consistent

@@ -46,6 +46,7 @@ ACTIVE_HOME="$(cd "$FM_HOME" && pwd -P)"
 ADMISSION_LOCK=
 release_spawn_admission() {
   [ -n "$ADMISSION_LOCK" ] || return 0
+  rm -f "$ADMISSION_LOCK/identity" 2>/dev/null || true
   fm_lock_release "$ADMISSION_LOCK"
   ADMISSION_LOCK=
 }
@@ -336,9 +337,48 @@ enforce_ordinary_admission() {
 }
 
 acquire_ordinary_admission() {
+  local owner identity
   ADMISSION_LOCK="$STATE/.spawn-admission.lock"
-  fm_lock_acquire_wait "$ADMISSION_LOCK"
+  while ! fm_lock_try_acquire "$ADMISSION_LOCK"; do
+    reclaim_stale_admission_lock || sleep 0.1
+  done
+  owner=$(cat "$ADMISSION_LOCK/pid" 2>/dev/null || true)
+  identity=$(admission_process_identity "$owner")
+  if [ -z "$identity" ] || ! printf '%s\n' "$identity" > "$ADMISSION_LOCK/identity"; then
+    echo "error: could not record admission lock identity" >&2
+    return 1
+  fi
   enforce_ordinary_admission
+}
+
+admission_process_identity() {
+  local pid=$1
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if [ -r "/proc/$pid/stat" ] && [ -r /proc/sys/kernel/random/boot_id ]; then
+    printf '%s:' "$(sed -n '1p' /proc/sys/kernel/random/boot_id)"
+    awk '{ print $22 }' "/proc/$pid/stat"
+  else
+    LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  fi
+}
+
+reclaim_stale_admission_lock() {
+  local pid stored current age
+  pid=$(cat "$ADMISSION_LOCK/pid" 2>/dev/null || true)
+  stored=$(cat "$ADMISSION_LOCK/identity" 2>/dev/null || true)
+  if [ -n "$stored" ]; then
+    current=$(admission_process_identity "$pid" || true)
+    [ "$current" != "$stored" ] || return 1
+  else
+    age=$(fm_path_age "$ADMISSION_LOCK")
+    [ "$age" -ge 10 ] || return 1
+  fi
+  [ "$(cat "$ADMISSION_LOCK/pid" 2>/dev/null || true)" = "$pid" ] || return 1
+  [ "$(cat "$ADMISSION_LOCK/identity" 2>/dev/null || true)" = "$stored" ] || return 1
+  rm -f "$ADMISSION_LOCK/identity" "$ADMISSION_LOCK/pid" 2>/dev/null || return 1
+  rmdir "$ADMISSION_LOCK" 2>/dev/null
 }
 
 validate_firstmate_home_for_spawn() {
@@ -537,6 +577,7 @@ fi
 tmux new-window -d -t "$SES" -n "$W" -c "$WINDOW_CWD" \
   \; set-option -w -t "$T" @fm_home "$ACTIVE_HOME" \
   \; set-option -w -t "$T" @fm_kind "$KIND"
+release_spawn_admission
 if [ "$KIND" != secondmate ]; then
   tmux send-keys -t "$T" 'treehouse get' Enter
 
@@ -648,7 +689,6 @@ mkdir -p "$STATE"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
-release_spawn_admission
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
