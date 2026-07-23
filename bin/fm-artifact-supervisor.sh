@@ -62,12 +62,53 @@ manifest_valid(){ # <file> <id>
   done
   grep -q '^retry-classes=' "$f" 2>/dev/null || return 1
   predicate_supported "$(mf_field "$f" success-predicate)" && predicate_supported "$(mf_field "$f" failure-predicate)" \
+    && predicate_args_valid "$(mf_field "$f" success-predicate)" "$(mf_field "$f" success-args)" \
+    && predicate_args_valid "$(mf_field "$f" failure-predicate)" "$(mf_field "$f" failure-args)" \
     && is_uint "$(mf_field "$f" start)" && is_uint "$(mf_field "$f" deadline)" && is_uint "$(mf_field "$f" no-progress)" \
     && is_uint "$(mf_field "$f" retry-cap)" && is_uint "$(mf_field "$f" acknowledgement-deadline)"
 }
 
 arg(){ # args are deterministic key=value pairs separated by ;
   printf '%s\n' "$1" | tr ';' '\n' | sed -n "s/^$2=//p" | tail -1
+}
+predicate_args_valid(){
+  local p=$1 a=$2 path expected value
+  case "$p" in
+    always-pass|always-fail) return 0;;
+    file-exists) [ -n "$(arg "$a" path)" ];;
+    file-content|file-tail)
+      path=$(arg "$a" path); expected=$(arg "$a" expected)
+      [ -n "$path" ] && [ -n "$expected" ]
+      ;;
+    file-hash)
+      path=$(arg "$a" path); value=$(arg "$a" sha256)
+      [ -n "$path" ] && [ "${#value}" -eq 64 ] || return 1
+      case "$value" in *[!0-9A-Fa-f]*) return 1;; esac
+      ;;
+    file-fresh)
+      path=$(arg "$a" path); value=$(arg "$a" max-age)
+      [ -n "$path" ] && is_uint "$value"
+      ;;
+    command-receipt)
+      path=$(arg "$a" path); value=$(arg "$a" exit)
+      [ -n "$path" ] && is_uint "$value"
+      ;;
+    process-health)
+      value=$(arg "$a" pid)
+      is_uint "$value" && [ "$value" -gt 0 ]
+      ;;
+    transaction-state)
+      [ -n "$(arg "$a" path)" ] && [ -n "$(arg "$a" state)" ]
+      ;;
+    scheduled-run)
+      [ -n "$(arg "$a" path)" ] && [ -n "$(arg "$a" run-id)" ] \
+        && [ -n "$(arg "$a" result)" ] && [ -n "$(arg "$a" alarm)" ]
+      ;;
+    domain-tuple)
+      [ -n "$(arg "$a" path)" ] && [ -n "$(arg "$a" expected)" ]
+      ;;
+    *) return 1;;
+  esac
 }
 predicate_eval(){ # <id> <predicate-id> <args>; stdout: state<TAB>code<TAB>evidence
   local id=$1 p=$2 a=$3 path expected actual max pid revision state run result alarm tuple
@@ -77,7 +118,15 @@ predicate_eval(){ # <id> <predicate-id> <args>; stdout: state<TAB>code<TAB>evide
     file-exists) path=$(absolute_path "$(arg "$a" path)"); [ -n "$(arg "$a" path)" ] && [ -e "$path" ] && printf 'pass\tok\t%s exists' "$path" || printf 'fail\tartifact-missing\t%s missing' "$path";;
     file-content) path=$(absolute_path "$(arg "$a" path)"); expected=$(arg "$a" expected); [ -f "$path" ] && grep -F -- "$expected" "$path" >/dev/null 2>&1 && printf 'pass\tok\tcontent matched' || printf 'fail\tcontent-mismatch\tcontent did not match';;
     file-hash) path=$(absolute_path "$(arg "$a" path)"); expected=$(arg "$a" sha256); actual=$( (shasum -a 256 "$path" 2>/dev/null || sha256sum "$path" 2>/dev/null) | awk '{print $1}'); [ -n "$actual" ] && [ "$actual" = "$expected" ] && printf 'pass\tok\thash matched' || printf 'fail\thash-mismatch\thash did not match';;
-    file-tail) path=$(absolute_path "$(arg "$a" path)"); expected=$(arg "$a" expected); [ -f "$path" ] && tail -1 "$path" | grep -F -- "$expected" >/dev/null 2>&1 && printf 'pass\tok\ttail matched' || printf 'fail\ttail-mismatch\ttail did not match';;
+    file-tail)
+      path=$(absolute_path "$(arg "$a" path)"); expected=$(arg "$a" expected)
+      if [ -f "$path" ] && [ -n "$expected" ]; then
+        actual=$(tail -1 "$path")
+        case "$actual" in "$expected"*) printf 'pass\tok\ttail matched';; *) printf 'fail\ttail-mismatch\ttail did not match';; esac
+      else
+        printf 'fail\ttail-mismatch\ttail did not match'
+      fi
+      ;;
     file-fresh) path=$(absolute_path "$(arg "$a" path)"); max=$(arg "$a" max-age); [ -f "$path" ] && is_uint "$max" && [ "$(age_of "$path")" -le "$max" ] && printf 'pass\tok\tfresh' || printf 'fail\tartifact-stale\tfreshness bound exceeded';;
     command-receipt) path=$(absolute_path "$(arg "$a" path)"); expected=$(arg "$a" exit); [ -f "$path" ] && grep -qxF "exit=${expected:-0}" "$path" && printf 'pass\tok\tterminal command receipt matched' || printf 'fail\tcommand-receipt-missing\tterminal command receipt absent or mismatched';;
     process-health) pid=$(arg "$a" pid); revision=$(arg "$a" revision); [ -n "$pid" ] && pid_alive "$pid" && { [ -z "$revision" ] || ps -p "$pid" -o command= 2>/dev/null | grep -F -- "$revision" >/dev/null; } && printf 'pass\tok\tprocess identity healthy' || printf 'fail\tprocess-unhealthy\tprocess identity or revision failed';;
@@ -95,11 +144,26 @@ write_machine(){ # id liveness predicate outcome route reason annotation
   mkdir -p "$MACHINE" || return 1
   { printf 'state-v1\n'; printf 'task-id=%s\nliveness=%s\npredicate=%s\noutcome=%s\nroute=%s\nreason=%s\nannotation=%s\nupdated-at=%s\n' "$id" "$2" "$3" "$4" "$5" "$(printf '%s' "$6"|clean)" "$(printf '%s' "$7"|clean)" "$(now_epoch)"; } > "$tmp" && mv -f "$tmp" "$MACHINE/$id.state"
 }
-event_id(){ printf '%s' "$1|$2|$3|$4" | cksum | awk '{print $1}'; }
+event_id(){
+  local value="$1|$2|$3|$4"
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$value" | shasum -a 256 | awk '{print $1}'
+  else
+    printf '%s' "$value" | sha256sum | awk '{print $1}'
+  fi
+}
+action_identity_matches(){
+  local action=$1 id=$2 key=$3 predicate=$4 code=$5
+  [ "$(field "$action" task-id)" = "$id" ] \
+    && [ "$(field "$action" idempotency-key)" = "$key" ] \
+    && [ "$(field "$action" failed-predicate)" = "$predicate" ] \
+    && [ "$(field "$action" failure-code)" = "$code" ]
+}
 route_failure(){ # id manifest predicate code evidence
   local id=$1 mf=$2 predicate=$3 code=$4 evidence=$5 eid action tmp retry classes cap attempts action_state key
-  key=$(mf_field "$mf" idempotency-key); eid=$(event_id "$id" "$key" "$predicate" "$code"); action="$ACTIONS/$eid.action"; mkdir -p "$ACTIONS" || return 1
+  key=$(mf_field "$mf" idempotency-key); eid=$(event_id "$id" "$key" "$predicate" "$code") || return 1; action="$ACTIONS/$eid.action"; mkdir -p "$ACTIONS" || return 1
   if [ -f "$action" ]; then
+    action_identity_matches "$action" "$id" "$key" "$predicate" "$code" || return 1
     action_state=$(field "$action" state)
     case "$action_state" in queued|acknowledged|resolved) printf '%s' "$action_state"; return 0;; *) return 1;; esac
   fi

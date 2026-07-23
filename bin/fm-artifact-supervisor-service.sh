@@ -11,6 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+SERVICE="$SCRIPT_DIR/fm-artifact-supervisor-service.sh"
 SUPERVISOR="$SCRIPT_DIR/fm-artifact-supervisor.sh"
 INTERVAL="${FM_ARTIFACT_SERVICE_INTERVAL:-2}"
 SUPERVISOR_INTERVAL="${FM_ARTIFACT_SUPERVISOR_INTERVAL:-15}"
@@ -188,7 +189,7 @@ start() {
     printf 'artifact supervisor service already running: pid %s\n' "$pid"
     return 0
   fi
-  nohup "$0" --loop >> "$LOG" 2>&1 &
+  nohup "$SERVICE" --loop >> "$LOG" 2>&1 &
   printf 'artifact supervisor service starting: pid %s\n' "$!"
 }
 

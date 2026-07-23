@@ -63,6 +63,8 @@ actions=("$HOME_DIR/state/.artifact-supervisor.actions/"*.action)
 [ "${#actions[@]}" -eq 1 ]
 action=${actions[0]}
 event=$(sed -n 's/^event-id=//p' "$action")
+[ "${#event}" -eq 64 ]
+case "$event" in *[!0-9a-f]*) exit 1;; esac
 grep -qx 'owner=repair-owner' "$action"
 grep -qx 'route=repair-queue' "$action"
 grep -qx 'failed-predicate=file-content' "$action"
@@ -95,6 +97,17 @@ manifest precedence always-pass '' always-pass '' $(( $(date +%s) + 60 ))
 run
 grep -F $'precedence\tfailed\tsemantic-failure' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
 
+printf 'window=never-used\nkind=ship\nprocess-pid=999999\n' >"$HOME_DIR/state/prefix.meta"
+manifest prefix file-tail 'path=prefix-status;expected=done:' file-tail 'path=prefix-status;expected=failed:' $(( $(date +%s) + 60 ))
+printf 'working: prior command failed: retrying\n' >"$HOME_DIR/prefix-status"
+run
+grep -F $'prefix\tactive-unverified\tpending' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
+! find "$HOME_DIR/state/.artifact-supervisor.actions" -name '*.action' -exec grep -l '^task-id=prefix$' {} + | grep -q .
+printf 'failed: terminal\n' >"$HOME_DIR/prefix-status"
+run
+grep -F $'prefix\tfailed\tsemantic-failure' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
+find "$HOME_DIR/state/.artifact-supervisor.actions" -name '*.action' -exec grep -l '^task-id=prefix$' {} + | grep -q .
+
 # Busy is liveness evidence only: a dead declared PID and expired hard contract
 # stays failed/expired rather than being presented as active.
 printf 'window=never-used\nkind=ship\nprocess-pid=999999\n' >"$HOME_DIR/state/expired.meta"
@@ -107,4 +120,9 @@ grep -F $'expired\tfailed\tdeadline-expired' "$HOME_DIR/state/artifact-superviso
 printf 'window=never-used\nkind=ship\n' >"$HOME_DIR/state/legacy.meta"
 run
 grep -F $'legacy\tblocked\tmandatory manifest missing' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
+
+printf 'window=never-used\nkind=ship\n' >"$HOME_DIR/state/malformed.meta"
+manifest malformed always-pass '' file-content 'path=failure;expected=' $(( $(date +%s) + 60 ))
+run
+grep -F $'malformed\tblocked\tmandatory manifest missing' "$HOME_DIR/state/artifact-supervisor.tsv" >/dev/null
 printf 'ok - deterministic predicates route durable owned actions across restart\n'

@@ -28,12 +28,22 @@ run_service() {
     FM_ARTIFACT_WORKER_STOP_TIMEOUT=2 "$SERVICE" "$@"
 }
 
+run_service_relative() {
+  (
+    cd "$ROOT"
+    PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" \
+      FM_BOARD_BODY="$TMP/no-body" FM_ARTIFACT_SERVICE_INTERVAL=1 FM_ARTIFACT_SUPERVISOR_INTERVAL=1 \
+      FM_ARTIFACT_WORKER_STALE_AFTER=2 FM_ARTIFACT_WORKER_STARTUP_GRACE=2 \
+      FM_ARTIFACT_WORKER_STOP_TIMEOUT=2 bin/fm-artifact-supervisor-service.sh "$@"
+  )
+}
+
 # The service adopts a pre-existing verified observer and records ownership.
 PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" \
   FM_BOARD_BODY="$TMP/no-body" FM_ARTIFACT_SUPERVISOR_INTERVAL=1 "$ROOT/bin/fm-artifact-supervisor.sh" --loop &
 for _ in 1 2 3 4 5; do [ -s "$HOME_DIR/state/.artifact-supervisor.pid" ] && [ -f "$HOME_DIR/state/.artifact-supervisor.heartbeat" ] && break; sleep 1; done
 adopted_pid=$(cat "$HOME_DIR/state/.artifact-supervisor.pid")
-run_service start >/dev/null
+run_service_relative start >/dev/null
 for _ in 1 2 3 4 5; do [ -s "$HOME_DIR/state/.artifact-supervisor.service.pid" ] && [ "$(awk 'NR == 1 { print $1 }' "$HOME_DIR/state/.artifact-supervisor.service.worker" 2>/dev/null || true)" = "$adopted_pid" ] && [ -f "$HOME_DIR/state/.artifact-supervisor.service.heartbeat" ] && break; sleep 1; done
 service_pid=$(cat "$HOME_DIR/state/.artifact-supervisor.service.pid")
 worker_pid=$(cat "$HOME_DIR/state/.artifact-supervisor.pid")

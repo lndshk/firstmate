@@ -1221,6 +1221,16 @@ test_spawn_refuses_invalid_manifest_without_publishing_meta() {
   fi
   grep -F 'manifest predicates must name implemented predicate ids' "$err" >/dev/null || fail "spawn did not explain unsupported manifest predicate refusal"
   grep -F 'new-window' "$log" >/dev/null && fail "unsupported manifest predicate created a tmux window"
+
+  : > "$log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/invalid-manifest-fake/pane.txt" \
+    FM_MANIFEST_FAILURE_PREDICATE=file-content FM_MANIFEST_FAILURE_ARGS='path=state/invalid-manifest.status;expected=' \
+    "$ROOT/bin/fm-spawn.sh" invalid-manifest "$subhome" codex --secondmate >/dev/null 2>"$err"; then
+    fail "spawn accepted invalid manifest predicate arguments"
+  fi
+  grep -F 'manifest predicate arguments do not match implemented predicate schemas' "$err" >/dev/null \
+    || fail "spawn did not explain invalid predicate arguments"
+  grep -F 'new-window' "$log" >/dev/null && fail "invalid predicate arguments created a tmux window"
   pass "invalid manifests are rejected before launch side effects"
 }
 

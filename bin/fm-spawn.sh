@@ -69,6 +69,54 @@ manifest_predicate_supported() {
   esac
 }
 
+manifest_arg() {
+  printf '%s\n' "$1" | tr ';' '\n' | sed -n "s/^$2=//p" | tail -1
+}
+
+manifest_predicate_args_valid() {
+  local predicate=$1 args=$2 path expected value
+  case "$predicate" in
+    always-pass|always-fail) return 0 ;;
+    file-exists) [ -n "$(manifest_arg "$args" path)" ] ;;
+    file-content|file-tail)
+      path=$(manifest_arg "$args" path)
+      expected=$(manifest_arg "$args" expected)
+      [ -n "$path" ] && [ -n "$expected" ]
+      ;;
+    file-hash)
+      path=$(manifest_arg "$args" path)
+      value=$(manifest_arg "$args" sha256)
+      [ -n "$path" ] && [ "${#value}" -eq 64 ] || return 1
+      case "$value" in *[!0-9A-Fa-f]*) return 1 ;; esac
+      ;;
+    file-fresh)
+      path=$(manifest_arg "$args" path)
+      value=$(manifest_arg "$args" max-age)
+      [ -n "$path" ] && manifest_uint "$value"
+      ;;
+    command-receipt)
+      path=$(manifest_arg "$args" path)
+      value=$(manifest_arg "$args" exit)
+      [ -n "$path" ] && manifest_uint "$value"
+      ;;
+    process-health)
+      value=$(manifest_arg "$args" pid)
+      manifest_uint "$value" && [ "$value" -gt 0 ]
+      ;;
+    transaction-state)
+      [ -n "$(manifest_arg "$args" path)" ] && [ -n "$(manifest_arg "$args" state)" ]
+      ;;
+    scheduled-run)
+      [ -n "$(manifest_arg "$args" path)" ] && [ -n "$(manifest_arg "$args" run-id)" ] \
+        && [ -n "$(manifest_arg "$args" result)" ] && [ -n "$(manifest_arg "$args" alarm)" ]
+      ;;
+    domain-tuple)
+      [ -n "$(manifest_arg "$args" path)" ] && [ -n "$(manifest_arg "$args" expected)" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 atomic_publish() { # <destination>; content is read from stdin
   local dest=$1 tmp
   mkdir -p "$(dirname "$dest")"
@@ -123,6 +171,11 @@ prepare_operation_manifest() { # <task-id> <kind> <harness> <route>
   if ! manifest_predicate_supported "$MANIFEST_SUCCESS_PREDICATE" \
     || ! manifest_predicate_supported "$MANIFEST_FAILURE_PREDICATE"; then
     echo "error: manifest predicates must name implemented predicate ids" >&2
+    return 1
+  fi
+  if ! manifest_predicate_args_valid "$MANIFEST_SUCCESS_PREDICATE" "$MANIFEST_SUCCESS_ARGS" \
+    || ! manifest_predicate_args_valid "$MANIFEST_FAILURE_PREDICATE" "$MANIFEST_FAILURE_ARGS"; then
+    echo "error: manifest predicate arguments do not match implemented predicate schemas" >&2
     return 1
   fi
 }
