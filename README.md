@@ -238,7 +238,7 @@ FM_HOUSEKEEPING_TICK=15            # seconds between batch-flush, stale-recheck,
 
 ### Artifact supervisor runbook
 
-Run `bin/fm-artifact-supervisor.sh start` after bootstrap; use `restart` when its PID or heartbeat receipt is stale, and `status` to inspect both receipts. It is deliberately presence-neutral: it drains queued wakes, writes `state/artifact-supervisor.tsv`, appends actionable failures to `state/.artifact-supervisor.escalations`, and refreshes `fm-board.sh --once`; it never types into a chat pane.
+Run `bin/fm-artifact-supervisor.sh start` after bootstrap; use `restart` when its PID or heartbeat receipt is stale, and `status` to inspect both receipts. It is deliberately presence-neutral: it reads and deduplicates a locked copy of queued wakes without consuming them, writes `state/artifact-supervisor.tsv`, appends actionable failures to `state/.artifact-supervisor.escalations`, and refreshes `fm-board.sh --once`; it never types into a chat pane.
 
 Every recorded task is classified as exactly one of `active`, `active-unverified`, `stalled`, or `terminal`. A busy pane (or declared live `process-pid=`) is `active`, even when it has no receipt. An idle task with no receipt is `active-unverified` until its optional absolute Unix `receipt-deadline=` (the legacy `deadline=` spelling also works), then `stalled`. Optional `artifact=` (relative to `FM_HOME` unless absolute) plus `artifact-max-age=` declares a freshness contract. Failed/blocked/needs-decision receipts, missing windows or declared processes, expired receipt deadlines, and stale/missing declared artifacts receive a durable, deduplicated escalation record.
 

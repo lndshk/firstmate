@@ -111,7 +111,7 @@ classify_meta() { # <meta>; prints snapshot row
     if [ -n "$pid" ] && ! pid_alive "$pid"; then
       process_reason=process-gone; process_action="inspect or relaunch task process"
     fi
-    if is_uint "$deadline" && [ "$deadline" -le "$now" ]; then
+    if [ -z "$receipt" ] && is_uint "$deadline" && [ "$deadline" -le "$now" ]; then
       deadline_reason=receipt-deadline; deadline_action="obtain a durable receipt or investigate task"
     fi
 
@@ -171,7 +171,7 @@ start() {
   mkdir -p "$STATE"
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
   if supervisor_pid_is_ours "$pid"; then printf 'artifact supervisor already running: pid %s\n' "$pid"; return 0; fi
-  nohup "$0" --loop >> "$LOG" 2>&1 &
+  nohup "$SCRIPT_DIR/fm-artifact-supervisor.sh" --loop >> "$LOG" 2>&1 &
   printf 'artifact supervisor starting: pid %s\n' "$!"
 }
 
