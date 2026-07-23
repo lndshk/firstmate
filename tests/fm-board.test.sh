@@ -20,6 +20,7 @@ SH
 chmod +x "$TMP/bin/tmux"
 
 meta() { printf 'window=%s\nkind=ship\n' "$2" >"$STATE_HOME/state/$1.meta"; }
+stale() { touch -d '2000-01-01 00:00:00' "$@" 2>/dev/null || touch -t 200001010000 "$@"; }
 meta working fm-working
 meta idle fm-idle
 meta terminal fm-terminal
@@ -67,12 +68,12 @@ grep -q 'working: snapshot authority' "$TMP/board/board.html"
 grep -q 'result: snapshot result' "$TMP/board/board.html"
 grep -q '>windowless<' "$TMP/board/board.html"
 grep -q 'recorded pane is gone' "$TMP/board/board.html"
-touch -d '2 minutes ago' "$STATE_HOME/state/.artifact-supervisor.heartbeat"
+stale "$STATE_HOME/state/.artifact-supervisor.heartbeat"
 PATH="$TMP/bin:$PATH" FM_HOME="$STATE_HOME" FM_ARTIFACT_STALE_AFTER=1 FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" FM_BOARD_BODY="$TMP/none" "$ROOT/bin/fm-board.sh" --once
 grep -q 'working: active shell task' "$TMP/board/board.html"
 ! grep -q 'working: snapshot authority' "$TMP/board/board.html"
 touch "$STATE_HOME/state/.artifact-supervisor.heartbeat"
-touch -d '2 minutes ago' "$STATE_HOME/state/artifact-supervisor.tsv"
+stale "$STATE_HOME/state/artifact-supervisor.tsv"
 PATH="$TMP/bin:$PATH" FM_HOME="$STATE_HOME" FM_ARTIFACT_STALE_AFTER=1 FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" FM_BOARD_BODY="$TMP/none" "$ROOT/bin/fm-board.sh" --once
 grep -q 'working: active shell task' "$TMP/board/board.html"
 ! grep -q 'working: snapshot authority' "$TMP/board/board.html"
