@@ -1,0 +1,4 @@
+interface:
+  display_name: "Operations Execution"
+  short_description: "Run known operations with durable proof"
+  default_prompt: "Use $ops-execution to execute this documented operation with durable evidence."
