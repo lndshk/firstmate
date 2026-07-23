@@ -32,6 +32,9 @@ printf 'working: lost pane receipt\n' >"$STATE_HOME/state/stalled.status"
 touch "$STATE_HOME/state/.last-watcher-beat"
 touch "$STATE_HOME/state/.artifact-supervisor.heartbeat"
 
+PATH="$TMP/bin:$PATH" FM_HOME="$STATE_HOME" FM_BOARD_BODY="$TMP/none" "$ROOT/bin/fm-board.sh" --once
+[ -f "$STATE_HOME/state/board/board.html" ]
+
 PATH="$TMP/bin:$PATH" FM_HOME="$STATE_HOME" FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" FM_BOARD_BODY="$TMP/none" "$ROOT/bin/fm-board.sh" --once
 first=$(sed -n 's/.*data-epoch="\([0-9]*\)".*/\1/p' "$TMP/board/board.html")
 grep -q '>working<' "$TMP/board/board.html"

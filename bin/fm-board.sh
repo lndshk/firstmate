@@ -5,7 +5,7 @@ set -u
 
 FM_HOME="${FM_HOME:-/home/rob/firstmate}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-BOARD_DIR="${FM_BOARD_DIR:-/mnt/e/Quant/state/firstmate}"
+BOARD_DIR="${FM_BOARD_DIR:-$FM_HOME/state/board}"
 OUT="${FM_BOARD_OUT:-$BOARD_DIR/board.html}"
 BODY="${FM_BOARD_BODY:-$BOARD_DIR/board-body.html}"
 PIDFILE="${FM_BOARD_PIDFILE:-$BOARD_DIR/.board-generator.pid}"
