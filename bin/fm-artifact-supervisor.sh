@@ -74,7 +74,9 @@ clear_escalation() { # <id> <reason>
 
 classify_meta() { # <meta>; prints snapshot row
   local meta=$1 id window pid receipt_file receipt deadline artifact artifact_max artifact_path
-  local class reason receipt_age artifact_age now fail_reason="" fail_action=""
+  local class reason receipt_age artifact_age now artifact_reason="" artifact_action=""
+  local receipt_reason="" receipt_action="" process_reason="" process_action=""
+  local window_reason="" window_action="" deadline_reason="" deadline_action=""
   id=$(basename "$meta" .meta)
   window=$(meta_field "$meta" window)
   pid=$(meta_field "$meta" process-pid); [ -n "$pid" ] || pid=$(meta_field "$meta" pid)
@@ -91,41 +93,48 @@ classify_meta() { # <meta>; prints snapshot row
     artifact_path=$(absolute_path "$artifact")
     artifact_age=$(age_of "$artifact_path")
     if [ ! -e "$artifact_path" ]; then
-      fail_reason=artifact-missing; fail_action="restore declared artifact $artifact"
+      artifact_reason=artifact-missing; artifact_action="restore declared artifact $artifact"
     elif is_uint "$artifact_max" && [ "$artifact_age" -gt "$artifact_max" ]; then
-      fail_reason=artifact-stale; fail_action="refresh declared artifact $artifact"
+      artifact_reason=artifact-stale; artifact_action="refresh declared artifact $artifact"
     fi
   fi
 
   if terminal_receipt "$receipt"; then
     class=terminal; reason="terminal receipt"
     if receipt_failure "$receipt"; then
-      fail_reason=receipt-failure; fail_action="act on terminal receipt: $receipt"
+      receipt_reason=receipt-failure; receipt_action="act on terminal receipt: $receipt"
     fi
-  elif [ -n "$window" ] && ! pane_exists "$window"; then
-    class=stalled; reason="recorded pane is gone"; fail_reason=window-gone; fail_action="inspect or relaunch recorded pane"
-  elif [ -n "$window" ] && fm_pane_is_busy "$window"; then
-    class=active; reason="busy pane observed"
-    if [ -n "$pid" ] && ! pid_alive "$pid"; then
-      fail_reason=process-gone; fail_action="inspect or relaunch task process"
-    fi
-  elif [ -n "$pid" ] && ! pid_alive "$pid"; then
-    class=stalled; reason="declared process $pid is gone"; fail_reason=process-gone; fail_action="inspect or relaunch task process"
-  elif [ -n "$pid" ] && pid_alive "$pid"; then
-    class=active; reason="declared process is alive"
-  elif is_uint "$deadline" && [ "$deadline" -le "$now" ]; then
-    class=stalled; reason="receipt deadline passed"; fail_reason=receipt-deadline; fail_action="obtain a durable receipt or investigate task"
   else
-    class=active-unverified; reason="awaiting durable receipt"
+    if [ -n "$window" ] && ! pane_exists "$window"; then
+      window_reason=window-gone; window_action="inspect or relaunch recorded pane"
+    fi
+    if [ -n "$pid" ] && ! pid_alive "$pid"; then
+      process_reason=process-gone; process_action="inspect or relaunch task process"
+    fi
+    if is_uint "$deadline" && [ "$deadline" -le "$now" ]; then
+      deadline_reason=receipt-deadline; deadline_action="obtain a durable receipt or investigate task"
+    fi
+
+    if [ -n "$window_reason" ]; then
+      class=stalled; reason="recorded pane is gone"
+    elif [ -n "$window" ] && fm_pane_is_busy "$window"; then
+      class=active; reason="busy pane observed"
+    elif [ -n "$process_reason" ]; then
+      class=stalled; reason="declared process $pid is gone"
+    elif [ -n "$pid" ] && pid_alive "$pid"; then
+      class=active; reason="declared process is alive"
+    elif [ -n "$deadline_reason" ]; then
+      class=stalled; reason="receipt deadline passed"
+    else
+      class=active-unverified; reason="awaiting durable receipt"
+    fi
   fi
 
-  # Artifact failure is a real contract failure. It is never mistaken for a
-  # missing-receipt stall on an otherwise busy task, but it is escalated.
-  if [ -n "$fail_reason" ]; then escalate_once "$id" "$fail_reason" "$fail_action"; else
-    clear_escalation "$id" artifact-missing; clear_escalation "$id" artifact-stale
-    clear_escalation "$id" receipt-failure; clear_escalation "$id" process-gone
-    clear_escalation "$id" window-gone; clear_escalation "$id" receipt-deadline
-  fi
+  if [ -n "$artifact_reason" ]; then escalate_once "$id" "$artifact_reason" "$artifact_action"; else clear_escalation "$id" artifact-missing; clear_escalation "$id" artifact-stale; fi
+  if [ -n "$receipt_reason" ]; then escalate_once "$id" "$receipt_reason" "$receipt_action"; else clear_escalation "$id" receipt-failure; fi
+  if [ -n "$process_reason" ]; then escalate_once "$id" "$process_reason" "$process_action"; else clear_escalation "$id" process-gone; fi
+  if [ -n "$window_reason" ]; then escalate_once "$id" "$window_reason" "$window_action"; else clear_escalation "$id" window-gone; fi
+  if [ -n "$deadline_reason" ]; then escalate_once "$id" "$deadline_reason" "$deadline_action"; else clear_escalation "$id" receipt-deadline; fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$class" "$reason" "$(printf '%s' "$receipt" | clean_field)" "$receipt_age" "${deadline:-}" "$artifact_age"
 }
 
@@ -142,7 +151,7 @@ write_snapshot() {
 cycle() {
   fm_wake_peek >/dev/null 2>&1 || true
   write_snapshot
-  [ -x "$SCRIPT_DIR/fm-board.sh" ] && "$SCRIPT_DIR/fm-board.sh" --once >/dev/null 2>&1 || true
+  [ -x "$SCRIPT_DIR/fm-board.sh" ] && FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-board.sh" --once >/dev/null 2>&1 || true
   : > "$HEARTBEAT"
 }
 
@@ -162,7 +171,6 @@ start() {
   mkdir -p "$STATE"
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
   if supervisor_pid_is_ours "$pid"; then printf 'artifact supervisor already running: pid %s\n' "$pid"; return 0; fi
-  rm -f "$PIDFILE"
   nohup "$0" --loop >> "$LOG" 2>&1 &
   printf 'artifact supervisor starting: pid %s\n' "$!"
 }

@@ -32,6 +32,9 @@ meta waiting fm-waiting "receipt-deadline=$(( $(date +%s) + 60 ))
 "
 meta overdue fm-waiting 'receipt-deadline=1
 '
+meta combined fm-gone 'artifact=missing-artifact
+receipt-deadline=1
+'
 printf 'working: busy without receipt\n' >"$HOME_DIR/state/busy.status"
 touch "$HOME_DIR/state/.last-watcher-beat"
 
@@ -50,6 +53,10 @@ grep -q '>active<' "$TMP/board/board.html"
 grep -q '>active-unverified<' "$TMP/board/board.html"
 grep -q '>stalled<' "$TMP/board/board.html"
 grep -q 'receipt-deadline' "$HOME_DIR/state/.artifact-supervisor.escalations"
+grep -F $'busy\treceipt-deadline\t' "$HOME_DIR/state/.artifact-supervisor.escalations" >/dev/null
+grep -F $'combined\tartifact-missing\t' "$HOME_DIR/state/.artifact-supervisor.escalations" >/dev/null
+grep -F $'combined\twindow-gone\t' "$HOME_DIR/state/.artifact-supervisor.escalations" >/dev/null
+grep -F $'combined\treceipt-deadline\t' "$HOME_DIR/state/.artifact-supervisor.escalations" >/dev/null
 
 printf '%s\t1\theartbeat\theartbeat\tcontrolled wake\n' "$(date +%s)" >"$HOME_DIR/state/.wake-queue"
 peek=$(FM_HOME="$HOME_DIR" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_wake_peek' -- "$ROOT")
