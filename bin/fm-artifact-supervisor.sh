@@ -140,9 +140,7 @@ write_snapshot() {
 }
 
 cycle() {
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  [ -s "$FM_WAKE_QUEUE" ] && cat "$FM_WAKE_QUEUE" >/dev/null 2>&1 || true
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  fm_wake_peek >/dev/null 2>&1 || true
   write_snapshot
   [ -x "$SCRIPT_DIR/fm-board.sh" ] && "$SCRIPT_DIR/fm-board.sh" --once >/dev/null 2>&1 || true
   : > "$HEARTBEAT"

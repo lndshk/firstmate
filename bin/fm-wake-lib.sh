@@ -173,3 +173,21 @@ fm_wake_print_deduped() {
     }
   ' "$file"
 }
+
+fm_wake_peek() {
+  local peek status
+  peek="$STATE/.wake-queue.peek.$(fm_current_pid)"
+  status=0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  if [ -s "$FM_WAKE_QUEUE" ]; then
+    cat "$FM_WAKE_QUEUE" > "$peek" || status=$?
+  else
+    : > "$peek" || status=$?
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  if [ "$status" -eq 0 ]; then
+    fm_wake_print_deduped "$peek" || status=$?
+  fi
+  rm -f "$peek"
+  return "$status"
+}

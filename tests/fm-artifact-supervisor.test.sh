@@ -52,6 +52,9 @@ grep -q '>stalled<' "$TMP/board/board.html"
 grep -q 'receipt-deadline' "$HOME_DIR/state/.artifact-supervisor.escalations"
 
 printf '%s\t1\theartbeat\theartbeat\tcontrolled wake\n' "$(date +%s)" >"$HOME_DIR/state/.wake-queue"
+peek=$(FM_HOME="$HOME_DIR" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_wake_peek' -- "$ROOT")
+printf '%s\n' "$peek" | grep -F $'\theartbeat\theartbeat\tcontrolled wake' >/dev/null
+[ -s "$HOME_DIR/state/.wake-queue" ]
 sleep 1
 run_once
 second=$(sed -n 's/.*data-epoch="\([0-9]*\)".*/\1/p' "$TMP/board/board.html")
