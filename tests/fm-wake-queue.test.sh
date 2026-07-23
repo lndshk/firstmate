@@ -538,6 +538,19 @@ test_stale_terminal_escalates() {
   pass "stale + terminal status escalates immediately"
 }
 
+test_interrupted_escalation_has_actionable_receipt() {
+  local dir state out
+  dir=$(make_supercase interrupted)
+  state="$dir/state"
+  printf 'working: ran focused tests\n' > "$state/lost-p8.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_interrupted "sess:fm-lost-p8" "$state")
+  case "$out" in
+    escalate\|*'task lost-p8 interrupted'*'last useful action: working: ran focused tests'*'required next action: recover or relaunch the task'*) ;;
+    *) fail "interrupted escalation was not actionable: $out" ;;
+  esac
+  pass "interrupted pane escalation includes task, last action, and recovery"
+}
+
 test_housekeeping_persistent_stale_escalates() {
   local dir state fakebin win pane key
   dir=$(make_supercase stale-persistent)
@@ -1353,6 +1366,7 @@ test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
+test_interrupted_escalation_has_actionable_receipt
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_escalate_batches_into_one_digest

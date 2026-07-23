@@ -261,6 +261,29 @@ last_status_line() {
   grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
 }
 
+previous_status_line() {
+  local f=$1
+  [ -e "$f" ] || return 0
+  grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -2 | head -1
+}
+
+status_escalation() {  # <status-file>
+  local f=$1 task last previous
+  task=$(basename "$f"); task="${task%.status}"
+  last=$(last_status_line "$f")
+  previous=$(previous_status_line "$f")
+  case "$last" in
+    failed:*)
+      printf 'task %s failed: %s; last useful action: %s; required next action: inspect the failure and repair, retry, or escalate the needed decision' "$task" "$last" "${previous:-none recorded}" ;;
+    blocked:*|needs-decision:*)
+      printf 'task %s needs attention: %s; last useful action: %s; required next action: resolve or relay the stated blocker' "$task" "$last" "${previous:-none recorded}" ;;
+    done:*|result:*)
+      printf 'task %s terminal: %s; required next action: advance its delivery path and close it without a pane inspection' "$task" "$last" ;;
+    *)
+      printf 'task %s status: %s; required next action: inspect and route' "$task" "${last:-no status recorded}" ;;
+  esac
+}
+
 # 0 if the given (last) status line matches a captain-relevant verb.
 status_is_captain_relevant() {
   local line=$1
@@ -285,7 +308,7 @@ classify_signal() {  # <reason-after-colon> <state>
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
-    distilled="${distilled}$(basename "$f"): ${last} | "
+    distilled="${distilled}$(status_escalation "$f") | "
     status_is_captain_relevant "$last" || continue
     rel=1
     # Dedupe against the catch-all scan: if this status was already escalated
@@ -324,12 +347,19 @@ classify_stale() {  # <window> <state>
       printf 'self|stale + terminal (already escalated by signal): %s' "$last"
       return
     fi
-    printf 'escalate|stale + terminal status: %s' "$last"
+    printf 'escalate|%s' "$(status_escalation "$state/$task.status")"
     return
   fi
   # Non-terminal (or no status): defer to the persistence recheck. The caller
   # records/refreshes the stale marker so housekeeping can age it.
   printf 'self|transient stale (%s): %s' "$win" "${last:-no status}"
+}
+
+classify_interrupted() {  # <window> <state>
+  local win=$1 state=$2 task last
+  task=$(window_to_task "$win")
+  last=$(last_status_line "$state/$task.status")
+  printf 'escalate|task %s interrupted: pane disappeared; last useful action: %s; required next action: recover or relaunch the task' "$task" "${last:-no status recorded}"
 }
 
 classify_check() {  # <full reason>  — check scripts print only when firstmate should wake
@@ -532,7 +562,9 @@ housekeeping() {  # <state>
     if pane_is_busy "$win"; then
       rm -f "$marker"   # crewmate resumed: benign
     else
-      escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+      task=$(window_to_task "$win")
+      last=$(last_status_line "$state/$task.status")
+      escalate_add "$state" "task $task stalled ${age}s; last useful action: ${last:-no status recorded}; required next action: inspect the pane and recover or relaunch"
       stale_marker_remove "$win" "$state"
     fi
   done
@@ -668,6 +700,8 @@ handle_wake() {  # <reason> <state>
               decision=$(classify_signal "$arg" "$state") ;;
     stale:*)  kind=stale; arg="${reason#stale: }"
               decision=$(classify_stale "$arg" "$state") ;;
+    interrupted:*) kind=interrupted; arg="${reason#interrupted: }"
+              decision=$(classify_interrupted "$arg" "$state") ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
     *)        decision=$(classify_unknown "$reason") ;;

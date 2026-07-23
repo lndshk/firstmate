@@ -154,7 +154,7 @@ terminal_status_ids() {
     id=$(basename "$f" .status)
     last=$(awk 'NF { line = $0 } END { print line }' "$f" 2>/dev/null || true)
     case "$last" in
-      done:*|failed:*) printf '%s\n' "$id" ;;
+      done:*|result:*|failed:*) printf '%s\n' "$id" ;;
     esac
   done
 }
@@ -263,7 +263,7 @@ check_finished_not_advanced() {
     [ -n "$id" ] || continue
     meta_has_pr "$id" && continue
     if is_in_set "$id" "$inflight"; then
-      printf 'advance: %s - done but still in-flight; next leg not triggered\n' "$id"
+      printf 'advance: %s - terminal status but still in-flight; advance and close through its delivery path without a pane peek\n' "$id"
     fi
   done <<EOF
 $terminal
@@ -305,6 +305,9 @@ check_idle_stalls() {
     meta_has_pr "$id" && continue
     status="$STATE/$id.status"
     [ -f "$status" ] || continue
+    # A terminal receipt is enough to advance a task.  Do not relabel a pane
+    # that the harness left open as a stall and make completed work look blocked.
+    terminal_status_line "$(last_status_line "$status")" && continue
     m=$(stat_mtime "$status") || continue
     age=$(( $(now_epoch) - m ))
     [ "$age" -ge "$IDLE_SECS" ] || continue

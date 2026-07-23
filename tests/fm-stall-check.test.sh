@@ -86,9 +86,37 @@ EOF
   printf '%s\n' 'working: tests' 'done: ready for validation' > "$dir/state/ship-fix-a1.status"
 
   out=$(run_check "$dir") || fail "finished check exited non-zero"
-  printf '%s\n' "$out" | grep -F 'advance: ship-fix-a1 - done but still in-flight; next leg not triggered' >/dev/null \
+  printf '%s\n' "$out" | grep -F 'advance: ship-fix-a1 - terminal status but still in-flight; advance and close through its delivery path without a pane peek' >/dev/null \
     || fail "finished-but-not-advanced finding missing: $out"
   pass "detects terminal status still listed in In flight"
+}
+
+test_result_receipt_is_terminal_not_stalled() {
+  local dir out capture
+  dir=$(make_case result_receipt)
+  capture="$dir/capture.txt"
+  cat > "$dir/data/backlog.md" <<'EOF'
+## In flight
+- [ ] result-r1 - completed task (repo: firstmate)
+
+## Queued
+
+## Done
+EOF
+  cat > "$dir/state/result-r1.meta" <<'EOF'
+window=fm-result-r1
+kind=ship
+EOF
+  printf '%s\n' 'working: wrote report' 'result: report complete' > "$dir/state/result-r1.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/result-r1.status" 2>/dev/null || touch -t 200001010000 "$dir/state/result-r1.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "result receipt check exited non-zero"
+  printf '%s\n' "$out" | grep -F 'advance: result-r1 - terminal status but still in-flight' >/dev/null \
+    || fail "terminal result advance missing: $out"
+  ! printf '%s\n' "$out" | grep -F 'stall?: result-r1' >/dev/null \
+    || fail "terminal result was mislabeled stalled: $out"
+  pass "treats result receipt as terminal instead of an idle stall"
 }
 
 test_unblocked_parked_item() {
@@ -236,6 +264,30 @@ EOF
   FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "pr-ready check exited non-zero"
   [ -z "$out" ] || fail "expected silence for PR-ready parked task, got: $out"
   pass "does not flag a task parked awaiting captain merge (pr= in meta)"
+}
+
+test_pr_without_ci_gets_terminal_receipt() {
+  local dir out
+  dir=$(make_case pr_no_ci)
+  cat > "$dir/state/no-ci-p2.meta" <<'EOF'
+window=fm-no-ci-p2
+kind=ship
+EOF
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
+  printf '0\n'
+fi
+SH
+  chmod +x "$dir/fakebin/gh"
+
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" "$ROOT/bin/fm-pr-check.sh" no-ci-p2 https://github.com/lndshk/firstmate/pull/2) \
+    || fail "no-CI PR receipt command exited non-zero"
+  grep -Fx 'pr-state=pr-ready/no-ci' "$dir/state/no-ci-p2.meta" >/dev/null \
+    || fail "no-CI PR did not receive pr-ready/no-ci receipt"
+  printf '%s\n' "$out" | grep -F '(pr-ready/no-ci)' >/dev/null \
+    || fail "no-CI PR receipt was not surfaced: $out"
+  pass "classifies a PR without GitHub checks as pr-ready/no-ci"
 }
 
 test_advisor_idle_terminal_no_children_flagged() {
@@ -518,12 +570,14 @@ EOF
 }
 
 test_finished_but_not_advanced
+test_result_receipt_is_terminal_not_stalled
 test_unblocked_parked_item
 test_unblocked_item_blocker_in_archive
 test_date_gate_ready
 test_idle_stall_candidate
 test_silent_when_clear_and_secondmate_skip
 test_pr_ready_task_not_flagged
+test_pr_without_ci_gets_terminal_receipt
 test_advisor_idle_terminal_no_children_flagged
 test_advisor_needs_decision_not_flagged
 test_advisor_with_child_work_not_flagged

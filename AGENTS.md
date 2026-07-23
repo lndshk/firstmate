@@ -446,7 +446,7 @@ Use chat for yes/no decisions; use lavish-axi when there are multiple findings o
 ### PR ready
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
-Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` in the task's meta and arms the watcher's merge poll.
+Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` plus an explicit `pr-state=` receipt in the task meta and arms the watcher's merge poll. A PR with no configured GitHub check contexts is `pr-ready/no-ci`, a terminal review-ready state, never `running` or an idle in-flight task. Leave it open for the captain's explicit merge decision.
 Tell the captain: the PR's full URL (always the complete `https://...` link, never a bare `#number` - the captain's terminal makes a full URL clickable), a one-paragraph summary, and, for `no-mistakes`, the risk level it emitted.
 (The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise, and finish before `FM_CHECK_TIMEOUT`.)
 
@@ -522,7 +522,7 @@ On wake, in order of cheapness:
 
 Run `bin/fm-stall-check.sh` at every heartbeat and every wake-handling turn, immediately after draining queued wakes and before deciding the fleet is quiet.
 It is a read-only, pull-based sweep over the same backlog/state/tmux surfaces firstmate already consumes, and prints nothing when all clear.
-Act on every emitted line: advance finished-but-still-in-flight tasks into validation/PR/teardown/next-task handling, dispatch queued items whose blockers or date gates have cleared, and investigate `stall?:` idle candidates by peeking the pane and applying the stuck-crewmate playbook if needed.
+Act on every emitted line: advance finished-but-still-in-flight tasks into validation/PR/teardown/next-task handling and close their pane through that delivery path without inspecting it, dispatch queued items whose blockers or date gates have cleared, and investigate `stall?:` idle candidates by peeking the pane and applying the stuck-crewmate playbook if needed. A terminal status receipt (`done:`, `result:`, or `failed:`) is authoritative even if the pane remains open; it must not be relabeled as a stall or blocked task.
 It also emits `advisor-idle?:` when a live `kind=secondmate` pane has been idle past `FM_ADVISOR_IDLE_STALL_SECS` (default 1800s), has no genuinely active child work in its own home, and its last status is terminal rather than captain-gated; route its next program step or confirm it is intentionally parked.
 It also emits `unlanded?:` when an in-flight push-based crew's worktree holds commits reachable from no remote-tracking branch - committed work living only in a disposable worktree that teardown would discard; push the branch, or, if it is a squash-merged branch whose remote copy was deleted, confirm it already landed. Like `stall?:`, this is a verify-candidate, not an assertion. Secondmate, scout, and `local-only` tasks are exempt (a scout ships a report, `local-only` has no remote by design), and PR-parked tasks are skipped because the merge poll already tracks them.
 `bin/fm-guard.sh` also warns when the stall detector has any finding, so the next supervision script invocation surfaces dormant work mechanically.
@@ -530,7 +530,7 @@ It also emits `unlanded?:` when an in-flight push-based crew's worktree holds co
 Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
 
-Never rely on hooks or status files alone; the heartbeat review of every window is mandatory and unconditional.
+Never rely on hooks or status files alone; the heartbeat review of every window is mandatory and unconditional. The exception is a terminal receipt: status is sufficient to advance and close that task, so do not peek merely because its pane remains present.
 tmux is the ground truth.
 For `kind=secondmate`, an idle pane is healthy.
 A secondmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
@@ -585,9 +585,9 @@ The marker travels with the message text; it does not rely on harness-level type
 **Orthogonal to yolo.** afk changes how aggressively firstmate surfaces things, not who approves what. "Away" never means "approves more" — a PR, a needs-decision finding, or anything destructive still waits for the captain's explicit word.
 
 **Classification policy (per wake):**
-- `signal` whose status content has no captain-relevant verb (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`) → **self-handle**. Captain-relevant verb → escalate.
+- `signal` whose status content has no captain-relevant verb (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`) → **self-handle**. Captain-relevant verb → escalate. The latest non-blank status line is the sole current receipt; do not append contradictory recovery instructions after a terminal receipt. Route the next delivery phase yourself, or create its explicit PR receipt, so stale historical lines cannot make completed work appear blocked.
 - `check` → always escalate (check scripts print only when firstmate should wake).
-- `stale` with a terminal status → escalate. Non-terminal stale is transient: the daemon records a marker and self-handles; if the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge. This bounds wedge-detection latency to the threshold plus a tick - a delay, never a loss, and healthy crewmates (which are autonomous and do not wait on firstmate mid-task) are unaffected.
+- `interrupted` (a recorded pane disappeared), `failed`, and a stale pane that persists past `FM_STALE_ESCALATE_SECS` (default 240s) → escalate immediately with the task, last useful action, and required next action. A stale pane with a terminal status also escalates immediately. Transient non-terminal stale is briefly rechecked to avoid false alarms; it is never silently parked.
 - `heartbeat` → self-handle; the daemon runs its own cheap bash fleet scan every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a captain-relevant status line the per-wake classifier might miss.
 - Unknown reason, or any uncertainty → **escalate (fail-safe)**.
 
