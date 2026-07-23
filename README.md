@@ -115,6 +115,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 ```
 
 - **Event-driven supervision** - a zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet and wakes the first mate only when a crewmate reports, stalls, a PR merges, or an internal heartbeat review is due.
+  `bin/fm-artifact-supervisor.sh` is the complementary always-on, presence-neutral path: it writes a machine-readable task snapshot and refreshes the board without sending chat messages.
   Detected wakes are also written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed one-shot process exit can be recovered by draining the queue.
   Each normal watcher start also ensures one singleton keepalive sidecar is running; the sidecar judges liveness by `state/.last-watcher-beat` age and silently re-arms the one-shot watcher when the beacon goes stale and no live watcher owns the watch lock.
   The sidecar is bound to in-flight work: it only spawns while a task exists (`state/*.meta`), and it stops cleanly and stops re-arming once the fleet empties, so a torn-down or ended session never leaves a task-less watcher enqueueing heartbeats with no consumer.
@@ -166,6 +167,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
 | `fm-watch.sh`            | Singleton-safe one-shot watcher; blocks until supervision work is due, queues it durably, then exits with one reason line; `--keepalive` silently re-arms stale/missed one-shot watchers |
 | `fm-supervise-daemon.sh` | Presence-gated sub-supervisor for walk-away (`/afk`) supervision: wraps `fm-watch.sh`, self-handles routine wakes in bash, and escalates only captain-relevant events as one verified, batched, single-line digest prefixed with a sentinel marker |
+| `fm-artifact-supervisor.sh` | Always-on, no-chat artifact supervisor: drains wakes, writes `state/artifact-supervisor.tsv`, records actionable failures, and refreshes the board |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes before handling supervision work                                              |
 | `fm-send.sh`             | Send one verified literal line (or `--key Escape`) to a crewmate window; exits non-zero when Enter is positively swallowed |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, dim-ghost-aware and border-aware composer detection, Codex safety-prompt clearing, and verified submit retry |
@@ -233,6 +235,12 @@ FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks
 FM_HEARTBEAT_SCAN_SECS=300         # cadence of the catch-all status scan for missed captain verbs
 FM_HOUSEKEEPING_TICK=15            # seconds between batch-flush, stale-recheck, and scan passes
 ```
+
+### Artifact supervisor runbook
+
+Run `bin/fm-artifact-supervisor.sh start` after bootstrap; use `restart` when its PID or heartbeat receipt is stale, and `status` to inspect both receipts. It is deliberately presence-neutral: it drains queued wakes, writes `state/artifact-supervisor.tsv`, appends actionable failures to `state/.artifact-supervisor.escalations`, and refreshes `fm-board.sh --once`; it never types into a chat pane.
+
+Every recorded task is classified as exactly one of `active`, `active-unverified`, `stalled`, or `terminal`. A busy pane (or declared live `process-pid=`) is `active`, even when it has no receipt. An idle task with no receipt is `active-unverified` until its optional absolute Unix `receipt-deadline=` (the legacy `deadline=` spelling also works), then `stalled`. Optional `artifact=` (relative to `FM_HOME` unless absolute) plus `artifact-max-age=` declares a freshness contract. Failed/blocked/needs-decision receipts, missing windows or declared processes, expired receipt deadlines, and stale/missing declared artifacts receive a durable, deduplicated escalation record.
 
 ## Development
 
