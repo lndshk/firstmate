@@ -4,6 +4,7 @@
 set -u
 
 FM_HOME="${FM_HOME:-/home/rob/firstmate}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 BOARD_DIR="${FM_BOARD_DIR:-/mnt/e/Quant/state/firstmate}"
 OUT="${FM_BOARD_OUT:-$BOARD_DIR/board.html}"
 BODY="${FM_BOARD_BODY:-$BOARD_DIR/board-body.html}"
@@ -13,7 +14,7 @@ SESSION="${FM_BOARD_SESSION:-fm-board-generator}"
 INTERVAL="${FM_BOARD_INTERVAL:-8}"
 STALE_AFTER="${FM_BOARD_STALE_AFTER:-$((INTERVAL * 3))}"
 STALL_AFTER="${FM_BOARD_STALL_AFTER:-180}"
-SNAPSHOT="${FM_ARTIFACT_SNAPSHOT:-$FM_HOME/state/artifact-supervisor.tsv}"
+SNAPSHOT="${FM_ARTIFACT_SNAPSHOT:-$STATE/artifact-supervisor.tsv}"
 
 now_epoch() { date +%s; }
 mtime_epoch() {
@@ -59,7 +60,7 @@ render_row() {
   win=$(sed -n 's/^window=//p' "$meta" | head -1)
   kind=$(sed -n 's/^kind=//p' "$meta" | head -1)
   [ -n "$win" ] || return 0
-  status_file="$FM_HOME/state/$id.status"
+  status_file="$STATE/$id.status"
   receipt=$(tail -1 "$status_file" 2>/dev/null || true)
   pr=$(sed -n 's/^pr=//p' "$meta" | head -1)
   [ -n "$receipt" ] || receipt='no durable status receipt'
@@ -94,15 +95,15 @@ EOF
 
 supervisor_card() {
   local artifact_age watcher_age watcher_state daemon_pid daemon_state activity activity_age
-  artifact_age=$(age_of "$FM_HOME/state/.artifact-supervisor.heartbeat")
-  watcher_age=$(age_of "$FM_HOME/state/.last-watcher-beat")
+  artifact_age=$(age_of "$STATE/.artifact-supervisor.heartbeat")
+  watcher_age=$(age_of "$STATE/.last-watcher-beat")
   watcher_state=stale/off
   [ "$watcher_age" -lt "$STALE_AFTER" ] && watcher_state=healthy
-  daemon_pid=$(cat "$FM_HOME/state/.supervise-daemon.pid" 2>/dev/null || true)
+  daemon_pid=$(cat "$STATE/.supervise-daemon.pid" 2>/dev/null || true)
   daemon_state=off
   [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null && daemon_state=running
-  activity=$(cat "$FM_HOME/state/.fm-activity" 2>/dev/null || echo 'no activity receipt')
-  activity_age=$(age_of "$FM_HOME/state/.fm-activity")
+  activity=$(cat "$STATE/.fm-activity" 2>/dev/null || echo 'no activity receipt')
+  activity_age=$(age_of "$STATE/.fm-activity")
   if [ "$artifact_age" -ge "$STALE_AFTER" ]; then
     printf '<div class="supervisor bad"><b>Artifact supervisor: stale</b><span>No artifact heartbeat for %s; restart artifact supervision before trusting task state.</span><small>watcher %s (%s ago) · daemon %s · %s (%s ago)</small></div>' "$(age_text "$artifact_age")" "$watcher_state" "$(age_text "$watcher_age")" "$daemon_state" "$(printf '%s' "$activity" | escape_html)" "$(age_text "$activity_age")"
   else
@@ -116,7 +117,7 @@ render_once() {
   tmp="$OUT.tmp.$$"
   now=$(TZ=America/New_York date '+%Y-%m-%d %H:%M:%S ET')
   rows=''
-  for meta in "$FM_HOME"/state/*.meta; do [ -f "$meta" ] && rows="${rows}$(render_row "$meta")"; done
+  for meta in "$STATE"/*.meta; do [ -f "$meta" ] && rows="${rows}$(render_row "$meta")"; done
   [ -n "$rows" ] || rows='<tr><td colspan="5" class="empty">No recorded Firstmate panes.</td></tr>'
   body=''; [ -f "$BODY" ] && body=$(cat "$BODY")
   cat >"$tmp" <<HTML

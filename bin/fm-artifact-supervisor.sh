@@ -156,7 +156,7 @@ cycle() {
     printf '%s\tsnapshot-write-failed\n' "$(now_epoch)" > "$ERROR" 2>/dev/null || true
     return 1
   fi
-  if ! [ -x "$SCRIPT_DIR/fm-board.sh" ] || ! FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-board.sh" --once >/dev/null 2>&1; then
+  if ! [ -x "$SCRIPT_DIR/fm-board.sh" ] || ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_ARTIFACT_SNAPSHOT="$SNAPSHOT" "$SCRIPT_DIR/fm-board.sh" --once >/dev/null 2>&1; then
     printf '%s\tboard-refresh-failed\n' "$(now_epoch)" >> "$LOG" 2>/dev/null || true
     printf '%s\tboard-refresh-failed\n' "$(now_epoch)" > "$ERROR" 2>/dev/null || true
     return 1

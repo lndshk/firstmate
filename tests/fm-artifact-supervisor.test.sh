@@ -86,6 +86,15 @@ run_once
 [ -f "$HOME_DIR/state/.artifact-supervisor.heartbeat" ]
 [ ! -e "$HOME_DIR/state/.artifact-supervisor.error" ]
 
+OVERRIDE_STATE="$TMP/override-state"
+mkdir -p "$OVERRIDE_STATE"
+printf 'window=fm-waiting\nkind=ship\n' >"$OVERRIDE_STATE/override.meta"
+PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$OVERRIDE_STATE" FM_BOARD_DIR="$TMP/board" \
+  FM_BOARD_OUT="$TMP/board/board.html" FM_BOARD_BODY="$TMP/no-body" \
+  "$ROOT/bin/fm-artifact-supervisor.sh" --once
+grep -F $'override\tactive-unverified\tawaiting durable receipt' "$OVERRIDE_STATE/artifact-supervisor.tsv" >/dev/null
+grep -q '>override<' "$TMP/board/board.html"
+
 rm -f "$HOME_DIR/state/.artifact-supervisor.heartbeat"
 if PATH="$TMP/bin:$PATH" FM_HOME="$HOME_DIR" FM_BOARD_DIR="$TMP/board" \
   FM_BOARD_OUT="$TMP/missing/board.html" FM_BOARD_BODY="$TMP/no-body" \
