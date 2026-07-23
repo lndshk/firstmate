@@ -24,6 +24,7 @@ meta working fm-working
 meta idle fm-idle
 meta terminal fm-terminal
 meta stalled fm-gone
+printf 'kind=ship\n' >"$STATE_HOME/state/windowless.meta"
 printf 'working: active shell task\n' >"$STATE_HOME/state/working.status"
 printf 'working: waiting for another event\n' >"$STATE_HOME/state/idle.status"
 printf 'done: https://example.test/pr/7\n' >"$STATE_HOME/state/terminal.status"
@@ -53,10 +54,13 @@ artifact-supervisor-v1
 generated-at	1
 working	active	busy pane observed	working: snapshot authority	0		0
 idle	terminal	terminal receipt	result: snapshot result	0		0
+windowless	stalled	recorded pane is gone	no durable status receipt	0		0
 TSV
 PATH="$TMP/bin:$PATH" FM_HOME="$STATE_HOME" FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" FM_BOARD_BODY="$TMP/none" "$ROOT/bin/fm-board.sh" --once
 grep -q 'working: snapshot authority' "$TMP/board/board.html"
 grep -q 'result: snapshot result' "$TMP/board/board.html"
+grep -q '>windowless<' "$TMP/board/board.html"
+grep -q 'recorded pane is gone' "$TMP/board/board.html"
 rm -f "$STATE_HOME/state/artifact-supervisor.tsv"
 
 sleep 1

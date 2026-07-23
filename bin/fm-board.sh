@@ -60,7 +60,6 @@ render_row() {
   id=$(basename "$meta" .meta)
   win=$(sed -n 's/^window=//p' "$meta" | head -1)
   kind=$(sed -n 's/^kind=//p' "$meta" | head -1)
-  [ -n "$win" ] || return 0
   status_file="$STATE/$id.status"
   receipt=$(tail -1 "$status_file" 2>/dev/null || true)
   pr=$(sed -n 's/^pr=//p' "$meta" | head -1)
