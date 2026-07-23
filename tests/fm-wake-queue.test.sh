@@ -51,6 +51,7 @@ if [ "${1:-}" = "list-windows" ]; then
   exit 0
 fi
 if [ "${1:-}" = "capture-pane" ]; then
+  [ "${FM_FAKE_TMUX_CAPTURE_FAIL:-0}" = "1" ] && exit 1
   if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
     cat "$FM_FAKE_TMUX_CAPTURE"
   fi
@@ -282,6 +283,24 @@ test_stale_enqueue_before_suppressor() {
   pass "stale wake is queued before suppressor state is advanced"
 }
 
+test_interrupted_enqueue_before_stale_classification() {
+  local dir state fakebin out drain_out window
+  dir=$(make_case interrupted)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  drain_out="$dir/drain.out"
+  window="test:fm-interrupted"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/interrupted.meta"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE_FAIL=1 FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wait_for_exit "$!" 40 || fail "watcher did not exit for interrupted pane"
+  grep -Fx "interrupted: $window" "$out" >/dev/null || fail "watcher did not print interrupted wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after interrupted wake failed"
+  grep "$(printf '\tinterrupted\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "interrupted wake was not queued"
+  ! grep -F "stale: $window" "$out" >/dev/null || fail "interrupted pane was also classified stale"
+  pass "interrupted pane is queued distinctly before stale classification"
+}
+
 test_check_output_is_queued() {
   local dir state fakebin out drain_out check_file
   dir=$(make_case check)
@@ -494,7 +513,7 @@ test_classify_terminal_signal_escalates() {
   local dir state kw out
   dir=$(make_supercase classify-terminal)
   state="$dir/state"
-  for kw in "done: PR https://x/y/pull/1" "needs-decision: pick A" "blocked: no perms" \
+  for kw in "done: PR https://x/y/pull/1" "result: report complete" "needs-decision: pick A" "blocked: no perms" \
             "failed: rc 2" "PR ready https://x/y/pull/2" "checks green" \
             "ready in branch fm/t1" "merged"; do
     printf 'working\n%s\n' "$kw" > "$state/t.status"
@@ -549,6 +568,22 @@ test_interrupted_escalation_has_actionable_receipt() {
     *) fail "interrupted escalation was not actionable: $out" ;;
   esac
   pass "interrupted pane escalation includes task, last action, and recovery"
+}
+
+test_interrupted_terminal_receipts_advance_delivery() {
+  local dir state receipt out
+  dir=$(make_supercase interrupted-terminal)
+  state="$dir/state"
+  for receipt in 'done: PR ready' 'result: report complete' 'failed: focused test failed'; do
+    printf '%s\n' "$receipt" > "$state/lost-terminal.status"
+    out=$(FM_STATE_OVERRIDE="$state" classify_interrupted "sess:fm-lost-terminal" "$state")
+    case "$out" in
+      escalate\|*'task lost-terminal'*'required next action:'*) ;;
+      *) fail "interrupted terminal receipt did not escalate through its delivery path ($receipt): $out" ;;
+    esac
+    case "$out" in *'recover or relaunch'*) fail "interrupted terminal receipt was misclassified as recovery ($receipt): $out" ;; esac
+  done
+  pass "interrupted terminal receipts advance through their delivery paths"
 }
 
 test_housekeeping_persistent_stale_escalates() {
@@ -715,6 +750,18 @@ test_signal_escalate_marks_seen_no_catchall_refire() {
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ ! -s "$state/.subsuper-escalations" ] || fail "catch-all scan re-fired an already-escalated signal"
   pass "captain signal escalate marks seen so the catch-all scan does not re-fire"
+}
+
+test_terminal_signal_clears_stale_marker() {
+  local dir state key
+  dir=$(make_supercase terminal-clears-stale)
+  state="$dir/state"
+  key=$(printf '%s' 'terminal-u9' | tr ':/. ' '____')
+  printf 'working: awaiting delivery\nresult: report complete\n' > "$state/terminal-u9.status"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/terminal-u9.status" "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "terminal signal did not clear stale marker"
+  pass "terminal signal clears stale marker before stale recheck"
 }
 
 # ============================================================================
@@ -1350,6 +1397,7 @@ test_daemon_state_root_uses_fm_home
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
+test_interrupted_enqueue_before_stale_classification
 test_check_output_is_queued
 test_singleton_start
 test_atomic_double_drain
@@ -1367,6 +1415,7 @@ test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_interrupted_escalation_has_actionable_receipt
+test_interrupted_terminal_receipts_advance_delivery
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_escalate_batches_into_one_digest
@@ -1377,6 +1426,7 @@ test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker
 test_signal_escalate_marks_seen_no_catchall_refire
+test_terminal_signal_clears_stale_marker
 # /afk presence-gating + injection hardening.
 test_collapse_newlines_pure
 test_afk_absent_daemon_does_not_inject

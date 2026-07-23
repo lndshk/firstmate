@@ -361,8 +361,9 @@ EOF
       # A recorded pane disappearing is an interruption, not an idle task.
       # Preserve it in the durable wake queue and escalate immediately instead
       # of letting the task silently remain in flight forever.
-      fm_wake_append stale "$w" "interrupted: $w" || exit 1
+      fm_wake_append interrupted "$w" "interrupted: $w" || exit 1
       wake "interrupted: $w"
+      continue
     }
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"

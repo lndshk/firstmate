@@ -119,7 +119,7 @@ HOUSEKEEPING_TICK_DEFAULT=15
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
 MAX_DEFER_SECS_DEFAULT=300
-CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+CAPTAIN_RE_DEFAULT='done:|result:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 # Busy footers + composer-empty detection now live in bin/fm-tmux-lib.sh
 # (FM_TMUX_BUSY_REGEX_DEFAULT / fm_tmux_composer_state); FM_BUSY_REGEX still
 # overrides the busy set here, as before.
@@ -291,6 +291,13 @@ status_is_captain_relevant() {
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$CAPTAIN_RE_DEFAULT}"
 }
 
+status_is_terminal_receipt() {
+  case "$1" in
+    done:*|result:*|failed:*) return 0 ;;
+  esac
+  return 1
+}
+
 # task id from a tmux window name "<session>:fm-<id>" -> "<id>"
 window_to_task() {
   local w=$1 t
@@ -359,6 +366,10 @@ classify_interrupted() {  # <window> <state>
   local win=$1 state=$2 task last
   task=$(window_to_task "$win")
   last=$(last_status_line "$state/$task.status")
+  if status_is_terminal_receipt "$last"; then
+    printf 'escalate|%s' "$(status_escalation "$state/$task.status")"
+    return
+  fi
   printf 'escalate|task %s interrupted: pane disappeared; last useful action: %s; required next action: recover or relaunch the task' "$task" "${last:-no status recorded}"
 }
 
@@ -393,9 +404,12 @@ stale_marker_record() {  # <window> <state>  — create if absent
 }
 
 stale_marker_remove() {  # <window> <state>
-  local win=$1 state=$2 key
-  key=$(_stale_key "$(window_to_task "$win")")
-  rm -f "$state/.subsuper-stale-$key"
+  stale_marker_remove_task "$(window_to_task "$1")" "$2"
+}
+
+stale_marker_remove_task() {  # <task> <state>
+  local task=$1 state=$2
+  rm -f "$state/.subsuper-stale-$(_stale_key "$task")"
 }
 
 # Record the seen-status marker for a captain-relevant status line so the
@@ -405,6 +419,7 @@ stale_marker_remove() {  # <window> <state>
 mark_status_seen() {  # <state> <task> <last-line>
   local state=$1 task=$2 line=$3
   printf '%s' "$line" > "$state/.subsuper-seen-status-$(_stale_key "$task")"
+  status_is_terminal_receipt "$line" && stale_marker_remove_task "$task" "$state"
 }
 
 # Mark every captain-relevant status line a per-wake classification escalated as
@@ -423,6 +438,11 @@ mark_escalated_seen() {  # <kind> <arg> <state>
         mark_status_seen "$state" "$task" "$last"
       done ;;
     stale)
+      task=$(window_to_task "$arg")
+      last=$(last_status_line "$state/$task.status")
+      [ -n "$last" ] && status_is_captain_relevant "$last" \
+        && mark_status_seen "$state" "$task" "$last" ;;
+    interrupted)
       task=$(window_to_task "$arg")
       last=$(last_status_line "$state/$task.status")
       [ -n "$last" ] && status_is_captain_relevant "$last" \
@@ -681,7 +701,7 @@ should_force_self() {  # <reason>
 is_wake_reason() {  # <reason>
   local reason=$1
   case "$reason" in
-    signal:*|stale:*|check:*|heartbeat|heartbeat:*) return 0 ;;
+    signal:*|stale:*|interrupted:*|check:*|heartbeat|heartbeat:*) return 0 ;;
   esac
   return 1
 }
