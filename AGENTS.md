@@ -95,7 +95,9 @@ state/               volatile runtime signals; gitignored
   .watch.keepalive.* keepalive sidecar lock, log, and stderr; never touch
   .subsuper-* .supervise-daemon.*   sub-supervisor internals (stale markers, escalation buffer, inject-wedged marker, seen-status dedup, log, lock, pid); never touch
   artifact-supervisor.tsv  sorted artifact-supervisor task snapshot; generated, never hand-edit
-  .artifact-supervisor.*   main-home artifact-supervisor lock, pid, heartbeat, escalation, error, and log state; never touch
+  <id>.manifest       mandatory verified operation contract written before task metadata becomes visible
+  .artifact-supervisor.service.*   main-home singleton service ownership, heartbeat, worker, event, error, and log state; never touch
+  .artifact-supervisor.{lock,pid,heartbeat,actions,events,state,error,log}   worker receipts and durable action state; never hand-edit
   board/             generated Firstmate Board and its generator receipts; never hand-edit
 .no-mistakes/        local validation state and evidence; gitignored
 ```
@@ -513,10 +515,10 @@ Empty polls, elapsed waiting time, and "still no change" are tool bookkeeping, n
 ```sh
 bin/fm-watch.sh   # run in background; exits with: signal|stale|check|heartbeat
 bin/fm-wake-drain.sh   # drain queued wake records at turn start
-bin/fm-artifact-supervisor.sh start  # main-home no-chat snapshot/board supervisor
+bin/fm-artifact-supervisor-service.sh start  # main-home singleton trust-kernel service
 ```
 
-**Artifact supervisor (main home, no chat injection).** `bin/fm-artifact-supervisor.sh` is separate from the presence-gated AFK daemon: it never writes to a tmux/chat pane and therefore does not alter AFK batching semantics. Each cycle uses `fm_wake_peek` to read and deduplicate a locked copy of durable wakes without consuming their queue records, preserving AFK and normal-supervisor ownership. It observes each `state/*.meta` task's pane and optional `process-pid=`, receipt, artifact, and deadline contracts, and writes the sorted TSV snapshot `state/artifact-supervisor.tsv`. Its PID and heartbeat receipts are `state/.artifact-supervisor.pid` and `state/.artifact-supervisor.heartbeat`; `start`, `restart`, and `status` are the operator interface. Every task is exactly `active`, `active-unverified`, `stalled`, or `terminal`. A busy pane is always `active` rather than stale merely for lack of a receipt. `receipt-deadline=` (or `deadline=`) is an absolute Unix epoch; before it, a missing receipt is `active-unverified`, afterwards it is `stalled`. Optional `artifact=` and `artifact-max-age=` declare artifact freshness. Actual failures append deduplicated actionable rows to `state/.artifact-supervisor.escalations`, and every cycle refreshes the board through `bin/fm-board.sh --once`.
+**Artifact supervisor (main home, no chat injection).** `bin/fm-artifact-supervisor-service.sh` owns one recoverable worker and is separate from the presence-gated AFK daemon. Neither service nor worker reads or drains the durable wake queue or writes to a tmux/chat pane, so normal and AFK wake ownership is unchanged. Every new task has a verified `state/<id>.manifest` before its metadata becomes visible. The worker evaluates the manifest deadline and declared failure predicate before its success predicate, treats unmatched success as pending, writes the sorted snapshot `state/artifact-supervisor.tsv`, and refreshes the board through `bin/fm-board.sh --once`. Failures create one durable owned action under `state/.artifact-supervisor.actions/`, keyed by the manifest idempotency identity; queued actions replay after restart until acknowledged, and recovered predicates resolve them. The service monitors both process identity and worker-heartbeat freshness, adopts verified pre-existing workers durably, and restarts unhealthy workers after a bounded startup grace. Use the service's `start`, `stop`, `restart`, and `status` commands; the worker's direct lifecycle commands are internal.
 
 On wake, in order of cheapness:
 

@@ -47,6 +47,7 @@ absolute_path(){ case "$1" in /*) printf '%s' "$1";; *) printf '%s' "$FM_HOME/$1
 clean(){ LC_ALL=C tr '\t\r\n' '   '; }
 pid_alive(){ fm_pid_alive "$1"; }
 pane_exists(){ tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1; }
+predicate_supported(){ case "$1" in always-pass|always-fail|file-exists|file-content|file-hash|file-tail|file-fresh|command-receipt|process-health|transaction-state|scheduled-run|domain-tuple) return 0;; *) return 1;; esac; }
 
 # Manifests are intentionally boring line-oriented records.  Atomic rename at
 # dispatch and strict required keys make them portable to bash 3.2 and easy to
@@ -56,10 +57,13 @@ manifest_valid(){ # <file> <id>
   [ -f "$f" ] || return 1
   case "$(head -1 "$f" 2>/dev/null)" in manifest-v1) :;; schema=firstmate.operation-manifest/v1) [ "$(field "$f" verification)" = verified ] || return 1;; *) return 1;; esac
   [ "$(field "$f" task-id)" = "$id" ] || return 1
-  for k in owner route identity start deadline no-progress success-predicate failure-predicate retry-classes retry-cap idempotency-key escalation-action acknowledgement-deadline; do
+  for k in owner route identity start deadline no-progress success-predicate failure-predicate retry-cap idempotency-key escalation-action acknowledgement-deadline; do
     v=$(mf_field "$f" "$k"); [ -n "$v" ] || return 1
   done
-  is_uint "$(mf_field "$f" start)" && is_uint "$(mf_field "$f" deadline)" && is_uint "$(mf_field "$f" no-progress)" && is_uint "$(mf_field "$f" retry-cap)" && is_uint "$(mf_field "$f" acknowledgement-deadline)"
+  grep -q '^retry-classes=' "$f" 2>/dev/null || return 1
+  predicate_supported "$(mf_field "$f" success-predicate)" && predicate_supported "$(mf_field "$f" failure-predicate)" \
+    && is_uint "$(mf_field "$f" start)" && is_uint "$(mf_field "$f" deadline)" && is_uint "$(mf_field "$f" no-progress)" \
+    && is_uint "$(mf_field "$f" retry-cap)" && is_uint "$(mf_field "$f" acknowledgement-deadline)"
 }
 
 arg(){ # args are deterministic key=value pairs separated by ;
@@ -91,20 +95,41 @@ write_machine(){ # id liveness predicate outcome route reason annotation
   mkdir -p "$MACHINE" || return 1
   { printf 'state-v1\n'; printf 'task-id=%s\nliveness=%s\npredicate=%s\noutcome=%s\nroute=%s\nreason=%s\nannotation=%s\nupdated-at=%s\n' "$id" "$2" "$3" "$4" "$5" "$(printf '%s' "$6"|clean)" "$(printf '%s' "$7"|clean)" "$(now_epoch)"; } > "$tmp" && mv -f "$tmp" "$MACHINE/$id.state"
 }
-event_id(){ printf '%s' "$1|$2|$3" | cksum | awk '{print $1}'; }
+event_id(){ printf '%s' "$1|$2|$3|$4" | cksum | awk '{print $1}'; }
 route_failure(){ # id manifest predicate code evidence
-  local id=$1 mf=$2 predicate=$3 code=$4 evidence=$5 eid action tmp retry classes cap attempts
-  eid=$(event_id "$id" "$predicate" "$code"); action="$ACTIONS/$eid.action"; mkdir -p "$ACTIONS" || return 1
-  [ -f "$action" ] && return 0
+  local id=$1 mf=$2 predicate=$3 code=$4 evidence=$5 eid action tmp retry classes cap attempts action_state key
+  key=$(mf_field "$mf" idempotency-key); eid=$(event_id "$id" "$key" "$predicate" "$code"); action="$ACTIONS/$eid.action"; mkdir -p "$ACTIONS" || return 1
+  if [ -f "$action" ]; then
+    action_state=$(field "$action" state)
+    case "$action_state" in queued|acknowledged|resolved) printf '%s' "$action_state"; return 0;; *) return 1;; esac
+  fi
   classes=$(mf_field "$mf" retry-classes); cap=$(mf_field "$mf" retry-cap); attempts=0
   retry=none; case ",$classes," in *,"$(failure_class "$code")",*) [ "$attempts" -lt "$cap" ] && retry=bounded-idempotent;; esac
   tmp="$action.tmp.$$"
-  { printf 'action-v1\nevent-id=%s\ntask-id=%s\nowner=%s\nroute=%s\nstate=queued\nfailed-predicate=%s\nfailure-code=%s\nevidence=%s\nnext-command=%s\nretry=%s\nidempotency-key=%s\nacknowledgement-deadline=%s\ncreated-at=%s\n' "$eid" "$id" "$(mf_field "$mf" owner)" "$(mf_field "$mf" route)" "$predicate" "$code" "$(printf '%s' "$evidence"|clean)" "$(mf_field "$mf" escalation-action)" "$retry" "$(mf_field "$mf" idempotency-key)" "$(mf_field "$mf" acknowledgement-deadline)" "$(now_epoch)"; } > "$tmp" && mv -f "$tmp" "$action" || return 1
+  { printf 'action-v1\nevent-id=%s\ntask-id=%s\nowner=%s\nroute=%s\nstate=queued\nfailed-predicate=%s\nfailure-code=%s\nevidence=%s\nnext-command=%s\nretry=%s\nidempotency-key=%s\nacknowledgement-deadline=%s\ncreated-at=%s\n' "$eid" "$id" "$(mf_field "$mf" owner)" "$(mf_field "$mf" route)" "$predicate" "$code" "$(printf '%s' "$evidence"|clean)" "$(mf_field "$mf" escalation-action)" "$retry" "$key" "$(mf_field "$mf" acknowledgement-deadline)" "$(now_epoch)"; } > "$tmp" && mv -f "$tmp" "$action" || return 1
   printf '%s\t%s\t%s\t%s\t%s\n' "$(now_epoch)" "$eid" "$id" "$predicate" "$code" >> "$EVENTS"
+  printf queued
+}
+
+resolve_actions(){
+  local id=$1 mf=$2 action state tmp key
+  key=$(mf_field "$mf" idempotency-key)
+  for action in "$ACTIONS"/*.action; do
+    [ -f "$action" ] || continue
+    [ "$(field "$action" task-id)" = "$id" ] || continue
+    [ "$(field "$action" idempotency-key)" = "$key" ] || continue
+    state=$(field "$action" state)
+    case "$state" in queued|acknowledged)
+      tmp="$action.tmp.$$"
+      sed 's/^state=.*/state=resolved/; /^resolved-at=/d' "$action" > "$tmp" \
+        && printf 'resolved-at=%s\n' "$(now_epoch)" >> "$tmp" && mv -f "$tmp" "$action" || return 1
+      ;;
+    esac
+  done
 }
 
 classify_meta(){ # preserves the first 7 snapshot columns expected by board
-  local meta=$1 id mf window pid live=unknown pred=pending outcome=none route=unqueued reason annotation="" deadline now p pa code evidence state class receipt
+  local meta=$1 id mf window pid live=unknown pred=pending outcome=none route=unqueued annotation="" deadline now p fp code=pending evidence="" state class receipt fstate fcode fevidence sstate scode sevidence failed_predicate
   id=$(basename "$meta" .meta); mf="$STATE/$id.manifest"; window=$(field "$meta" window); pid=$(field "$meta" process-pid); [ -n "$pid" ] || pid=$(field "$meta" pid)
   if ! manifest_valid "$mf" "$id"; then
     write_machine "$id" unknown pending blocked unqueued manifest-missing 'legacy record requires explicit fm-manifest-migrate' || return 1
@@ -114,15 +139,37 @@ classify_meta(){ # preserves the first 7 snapshot columns expected by board
   if [ -n "$pid" ]; then if pid_alive "$pid"; then live=alive; else live=gone; fi
   elif [ -n "$window" ] && pane_exists "$window" && fm_pane_is_busy "$window"; then live=alive
   elif [ -n "$window" ] && ! pane_exists "$window"; then live=gone; fi
-  deadline=$(mf_field "$mf" deadline); now=$(now_epoch); p=$(mf_field "$mf" success-predicate)
-  if [ "$now" -gt "$deadline" ]; then pred=expired; code=deadline-expired; evidence="deadline $deadline passed"
-  else IFS=$'\t' read -r pred code evidence <<EOF
+  deadline=$(mf_field "$mf" deadline); now=$(now_epoch); p=$(mf_field "$mf" success-predicate); fp=$(mf_field "$mf" failure-predicate)
+  if [ "$now" -gt "$deadline" ]; then
+    pred=expired; code=deadline-expired; evidence="deadline $deadline passed"; failed_predicate=deadline
+  else
+    IFS=$'\t' read -r fstate fcode fevidence <<EOF
+$(predicate_eval "$id" "$fp" "$(mf_field "$mf" failure-args)")
+EOF
+    if [ "$fcode" = predicate-schema ]; then
+      pred=fail; code=$fcode; evidence=$fevidence; failed_predicate=$fp
+    elif [ "$fstate" = pass ]; then
+      pred=fail; code=semantic-failure; evidence="failure predicate $fp matched: $fevidence"; failed_predicate=$fp
+    else
+      IFS=$'\t' read -r sstate scode sevidence <<EOF
 $(predicate_eval "$id" "$p" "$(mf_field "$mf" success-args)")
 EOF
+      if [ "$scode" = predicate-schema ]; then
+        pred=fail; code=$scode; evidence=$sevidence; failed_predicate=$p
+      elif [ "$sstate" = pass ]; then
+        pred=pass; code=$scode; evidence=$sevidence
+      else
+        pred=pending; code=pending; evidence=$sevidence
+      fi
+    fi
   fi
   if [ "$pred" = pass ]; then outcome=success
-  elif [ "$pred" = fail ] || [ "$pred" = expired ]; then outcome=failed; route_failure "$id" "$mf" "$p" "$code" "$evidence" || return 1; route=queued
-  else case "$annotation" in blocked:*) outcome=blocked;; needs-decision:*) outcome=needs-decision;; failed:*) outcome=failed;; esac; fi
+  elif [ "$pred" = fail ] || [ "$pred" = expired ]; then
+    outcome=failed; route=$(route_failure "$id" "$mf" "$failed_predicate" "$code" "$evidence") || return 1
+  else
+    case "$annotation" in blocked:*) outcome=blocked;; needs-decision:*) outcome=needs-decision;; failed:*) outcome=failed;; esac
+  fi
+  if [ "$pred" != fail ] && [ "$pred" != expired ]; then resolve_actions "$id" "$mf" || return 1; fi
   # Hard evidence always wins presentation.  Busy is liveness only, never success.
   case "$pred/$outcome" in fail/*|expired/*) class=failed;; pass/success) class=success;; */blocked) class=blocked;; */needs-decision) class=needs-decision;; *) class=active-unverified;; esac
   write_machine "$id" "$live" "$pred" "$outcome" "$route" "$code" "$annotation" || return 1
@@ -135,5 +182,5 @@ supervisor_pid_is_ours(){ local pid=$1 cmd lockpid; pid_alive "$pid" || return 1
 loop(){ mkdir -p "$STATE"; fm_lock_try_acquire "$LOCK" || return 1; printf '%s\n' "$$" > "$PIDFILE"; trap 'rm -f "$PIDFILE"; fm_lock_release "$LOCK"; exit 0' INT TERM EXIT; while :; do cycle || true; sleep "$INTERVAL"; done; }
 start(){ mkdir -p "$STATE"; local pid; pid=$(cat "$PIDFILE" 2>/dev/null||true); supervisor_pid_is_ours "$pid" && { echo "artifact supervisor already running: pid $pid"; return; }; nohup "$SCRIPT_DIR/fm-artifact-supervisor.sh" --loop >> "$LOG" 2>&1 & echo "artifact supervisor starting: pid $!"; }
 restart(){ local pid; pid=$(cat "$PIDFILE" 2>/dev/null||true); supervisor_pid_is_ours "$pid" && kill -TERM "$pid" 2>/dev/null || true; start; }
-ack(){ local f="$ACTIONS/$1.action" tmp; [ -f "$f" ] || { echo "unknown action: $1" >&2; return 2; }; tmp="$f.tmp.$$"; sed 's/^state=.*/state=acknowledged/; /^acknowledged-at=/d' "$f" > "$tmp" && printf 'acknowledged-at=%s\n' "$(now_epoch)" >> "$tmp" && mv -f "$tmp" "$f"; }
+ack(){ local f="$ACTIONS/$1.action" tmp state; [ -f "$f" ] || { echo "unknown action: $1" >&2; return 2; }; state=$(field "$f" state); [ "$state" = acknowledged ] && return 0; [ "$state" = queued ] || { echo "action is not queued: $1" >&2; return 2; }; tmp="$f.tmp.$$"; sed 's/^state=.*/state=acknowledged/; /^acknowledged-at=/d' "$f" > "$tmp" && printf 'acknowledged-at=%s\n' "$(now_epoch)" >> "$tmp" && mv -f "$tmp" "$f"; }
 case "${1:-start}" in start) start;; restart) restart;; --loop) loop;; --once) mkdir -p "$STATE"; cycle;; status) printf 'pid=%s heartbeat-age=%s snapshot=%s events=%s\n' "$(cat "$PIDFILE" 2>/dev/null||echo off)" "$(age_of "$HEARTBEAT")" "$SNAPSHOT" "$EVENTS";; ack) ack "${2:?action id required}";; *) echo "usage: $0 [start|restart|status|ack ACTION|--once]" >&2; exit 2;; esac

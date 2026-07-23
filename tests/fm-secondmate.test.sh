@@ -1150,8 +1150,13 @@ test_secondmate_spawn_records_home_meta() {
   grep -Fx 'task-id=spawn-sub' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest task id is missing"
   grep -Fx 'owner=firstmate' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest owner is missing"
   grep -Fx 'route=normal' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest route is missing"
-  grep -Fx 'success-predicate-id=receipt-json-schema' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest success predicate is missing"
-  grep -Fx 'failure-predicate-id=deadline-expired' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest failure predicate is missing"
+  grep -Fx 'expected-receipt-id=task-status' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest receipt id is not backed by task status"
+  grep -Fx 'expected-receipt-path=state/spawn-sub.status' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest receipt path is not backed by task status"
+  grep -Fx 'success-predicate-id=file-tail' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest success predicate is missing"
+  grep -Fx 'success-predicate-args=path=state/spawn-sub.status;expected=done:' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest success predicate does not bind task status"
+  grep -Fx 'failure-predicate-id=file-tail' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest failure predicate is missing"
+  grep -Fx 'failure-predicate-args=path=state/spawn-sub.status;expected=failed:' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest failure predicate does not bind task status"
+  grep -Fx 'retry-classes=' "$home/state/spawn-sub.manifest" >/dev/null || fail "empty retry classes did not encode no retries"
   grep -Fx 'escalation-action=create-owned-action' "$home/state/spawn-sub.manifest" >/dev/null || fail "manifest escalation action is missing"
   grep -F 'treehouse get' "$log" >/dev/null && fail "secondmate spawn should not run project treehouse get"
   grep -F "FM_HOME='$subhome_abs'" "$log" >/dev/null || fail "secondmate launch did not set FM_HOME to subhome"
@@ -1207,7 +1212,16 @@ test_spawn_refuses_invalid_manifest_without_publishing_meta() {
   grep -F 'manifest values may not contain newline' "$err" >/dev/null || fail "spawn did not explain invalid manifest refusal: $(tr '\n' ' ' < "$err")"
   [ ! -e "$home/state/invalid-manifest.meta" ] || fail "invalid manifest spawn published task metadata"
   [ ! -e "$home/state/invalid-manifest.manifest" ] || fail "invalid manifest spawn published partial manifest"
-  pass "invalid manifest overrides publish neither a contract nor task metadata"
+  grep -F 'new-window' "$log" >/dev/null && fail "invalid manifest spawn created a tmux window"
+
+  : > "$log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/invalid-manifest-fake/pane.txt" FM_MANIFEST_SUCCESS_PREDICATE=unknown-predicate \
+    "$ROOT/bin/fm-spawn.sh" invalid-manifest "$subhome" codex --secondmate >/dev/null 2>"$err"; then
+    fail "spawn accepted an unimplemented manifest predicate"
+  fi
+  grep -F 'manifest predicates must name implemented predicate ids' "$err" >/dev/null || fail "spawn did not explain unsupported manifest predicate refusal"
+  grep -F 'new-window' "$log" >/dev/null && fail "unsupported manifest predicate created a tmux window"
+  pass "invalid manifests are rejected before launch side effects"
 }
 
 test_secondmate_spawn_without_primary_project_falls_back_home() {

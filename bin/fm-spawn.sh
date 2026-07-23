@@ -62,6 +62,13 @@ manifest_uint() {
   case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
 }
 
+manifest_predicate_supported() {
+  case "$1" in
+    always-pass|always-fail|file-exists|file-content|file-hash|file-tail|file-fresh|command-receipt|process-health|transaction-state|scheduled-run|domain-tuple) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 atomic_publish() { # <destination>; content is read from stdin
   local dest=$1 tmp
   mkdir -p "$(dirname "$dest")"
@@ -73,57 +80,83 @@ atomic_publish() { # <destination>; content is read from stdin
 
 manifest_path_for() { printf '%s/%s.manifest' "$STATE" "$1"; }
 
-publish_operation_manifest() { # <task-id> <kind> <harness> <worktree> <route>
-  local task_id=$1 task_kind=$2 task_harness=$3 task_worktree=$4 route=$5
-  local started deadline no_progress ack_deadline max_attempts manifest_path value
-  started=$(now_epoch)
-  deadline=$((started + ${FM_MANIFEST_DEADLINE_SECONDS:-86400}))
-  no_progress=${FM_MANIFEST_NO_PROGRESS_SECONDS:-3600}
-  ack_deadline=$((started + ${FM_MANIFEST_ACK_SECONDS:-900}))
-  max_attempts=${FM_MANIFEST_RETRY_MAX_ATTEMPTS:-0}
-  if ! manifest_uint "$deadline" || ! manifest_uint "$no_progress" || ! manifest_uint "$ack_deadline" || ! manifest_uint "$max_attempts"; then
+prepare_operation_manifest() { # <task-id> <kind> <harness> <route>
+  local task_id=$1 task_kind=$2 task_harness=$3 route=$4 value
+  MANIFEST_TASK_ID=$task_id
+  MANIFEST_KIND=$task_kind
+  MANIFEST_HARNESS=$task_harness
+  MANIFEST_ROUTE=$route
+  MANIFEST_STARTED=$(now_epoch)
+  MANIFEST_DEADLINE=$((MANIFEST_STARTED + ${FM_MANIFEST_DEADLINE_SECONDS:-86400}))
+  MANIFEST_NO_PROGRESS=${FM_MANIFEST_NO_PROGRESS_SECONDS:-3600}
+  MANIFEST_ACK_DEADLINE=$((MANIFEST_STARTED + ${FM_MANIFEST_ACK_SECONDS:-900}))
+  MANIFEST_MAX_ATTEMPTS=${FM_MANIFEST_RETRY_MAX_ATTEMPTS:-0}
+  MANIFEST_OWNER=${FM_MANIFEST_OWNER:-firstmate}
+  MANIFEST_COMMAND_ID=${FM_MANIFEST_COMMAND_ID:-$task_harness}
+  MANIFEST_RECEIPT_ID=${FM_MANIFEST_RECEIPT_ID:-task-status}
+  MANIFEST_RECEIPT_PATH=${FM_MANIFEST_RECEIPT_PATH:-state/$task_id.status}
+  MANIFEST_ARTIFACTS=${FM_MANIFEST_ARTIFACTS:-}
+  MANIFEST_SUCCESS_PREDICATE=${FM_MANIFEST_SUCCESS_PREDICATE:-file-tail}
+  MANIFEST_SUCCESS_ARGS=${FM_MANIFEST_SUCCESS_ARGS:-path=state/$task_id.status;expected=done:}
+  MANIFEST_FAILURE_PREDICATE=${FM_MANIFEST_FAILURE_PREDICATE:-file-tail}
+  MANIFEST_FAILURE_ARGS=${FM_MANIFEST_FAILURE_ARGS:-path=state/$task_id.status;expected=failed:}
+  MANIFEST_RETRY_CLASSES=${FM_MANIFEST_RETRY_CLASSES:-}
+  MANIFEST_IDEMPOTENCY_KEY=${FM_MANIFEST_IDEMPOTENCY_KEY:-$task_id:$MANIFEST_STARTED}
+  MANIFEST_ESCALATION_ACTION=${FM_MANIFEST_ESCALATION_ACTION:-create-owned-action}
+  if ! manifest_uint "$MANIFEST_DEADLINE" || ! manifest_uint "$MANIFEST_NO_PROGRESS" \
+    || ! manifest_uint "$MANIFEST_ACK_DEADLINE" || ! manifest_uint "$MANIFEST_MAX_ATTEMPTS"; then
     echo "error: manifest timing/retry settings must be unsigned integers" >&2
     return 1
   fi
-  # Validate before opening the temporary file.  Do not rely on a command
-  # substitution's exit status in the writer below: bash otherwise permits a
-  # malformed environment override to degrade into an empty, apparently valid
-  # field.
-  for value in "$task_id" "${FM_MANIFEST_OWNER:-firstmate}" "$route" "$task_kind" "$task_harness" \
-    "${FM_MANIFEST_COMMAND_ID:-$task_harness}" "$task_worktree" "${FM_MANIFEST_RECEIPT_ID:-task-receipt-json}" \
-    "${FM_MANIFEST_RECEIPT_PATH:-state/$task_id.receipt.json}" "${FM_MANIFEST_ARTIFACTS:-}" \
-    "${FM_MANIFEST_SUCCESS_PREDICATE:-receipt-json-schema}" "${FM_MANIFEST_SUCCESS_ARGS:-schema=firstmate-receipt/v1}" \
-    "${FM_MANIFEST_FAILURE_PREDICATE:-deadline-expired}" "${FM_MANIFEST_FAILURE_ARGS:-deadline=$deadline}" \
-    "${FM_MANIFEST_RETRY_CLASSES:-}" "${FM_MANIFEST_IDEMPOTENCY_KEY:-$task_id:$started}" \
-    "${FM_MANIFEST_ESCALATION_ACTION:-create-owned-action}"; do
+  for value in "$MANIFEST_TASK_ID" "$MANIFEST_OWNER" "$MANIFEST_ROUTE" "$MANIFEST_KIND" "$MANIFEST_HARNESS" \
+    "$MANIFEST_COMMAND_ID" "$MANIFEST_RECEIPT_ID" "$MANIFEST_RECEIPT_PATH" "$MANIFEST_ARTIFACTS" \
+    "$MANIFEST_SUCCESS_PREDICATE" "$MANIFEST_SUCCESS_ARGS" "$MANIFEST_FAILURE_PREDICATE" \
+    "$MANIFEST_FAILURE_ARGS" "$MANIFEST_RETRY_CLASSES" "$MANIFEST_IDEMPOTENCY_KEY" \
+    "$MANIFEST_ESCALATION_ACTION"; do
     manifest_value "$value" >/dev/null || return 1
   done
-  manifest_path=$(manifest_path_for "$task_id")
+  for value in "$MANIFEST_TASK_ID" "$MANIFEST_OWNER" "$MANIFEST_ROUTE" "$MANIFEST_KIND" "$MANIFEST_HARNESS" \
+    "$MANIFEST_COMMAND_ID" "$MANIFEST_RECEIPT_ID" "$MANIFEST_RECEIPT_PATH" "$MANIFEST_SUCCESS_PREDICATE" \
+    "$MANIFEST_FAILURE_PREDICATE" "$MANIFEST_IDEMPOTENCY_KEY" "$MANIFEST_ESCALATION_ACTION"; do
+    [ -n "$value" ] || { echo "error: mandatory manifest values may not be empty" >&2; return 1; }
+  done
+  if ! manifest_predicate_supported "$MANIFEST_SUCCESS_PREDICATE" \
+    || ! manifest_predicate_supported "$MANIFEST_FAILURE_PREDICATE"; then
+    echo "error: manifest predicates must name implemented predicate ids" >&2
+    return 1
+  fi
+}
+
+publish_operation_manifest() { # <worktree>
+  local task_worktree=$1 manifest_path
+  [ -n "$task_worktree" ] || return 1
+  manifest_value "$task_worktree" >/dev/null || return 1
+  manifest_path=$(manifest_path_for "$MANIFEST_TASK_ID")
   {
     printf 'schema=%s\n' "$MANIFEST_SCHEMA"
     printf 'verification=verified\n'
-    printf 'task-id=%s\n' "$(manifest_value "$task_id")"
-    printf 'owner=%s\n' "$(manifest_value "${FM_MANIFEST_OWNER:-firstmate}")"
-    printf 'route=%s\n' "$(manifest_value "$route")"
-    printf 'worker-kind=%s\n' "$(manifest_value "$task_kind")"
-    printf 'worker-identity=%s\n' "$(manifest_value "$task_harness")"
-    printf 'command-identity=%s\n' "$(manifest_value "${FM_MANIFEST_COMMAND_ID:-$task_harness}")"
+    printf 'task-id=%s\n' "$(manifest_value "$MANIFEST_TASK_ID")"
+    printf 'owner=%s\n' "$(manifest_value "$MANIFEST_OWNER")"
+    printf 'route=%s\n' "$(manifest_value "$MANIFEST_ROUTE")"
+    printf 'worker-kind=%s\n' "$(manifest_value "$MANIFEST_KIND")"
+    printf 'worker-identity=%s\n' "$(manifest_value "$MANIFEST_HARNESS")"
+    printf 'command-identity=%s\n' "$(manifest_value "$MANIFEST_COMMAND_ID")"
     printf 'worktree=%s\n' "$(manifest_value "$task_worktree")"
-    printf 'started-at=%s\n' "$started"
-    printf 'deadline=%s\n' "$deadline"
-    printf 'no-progress-seconds=%s\n' "$no_progress"
-    printf 'expected-receipt-id=%s\n' "$(manifest_value "${FM_MANIFEST_RECEIPT_ID:-task-receipt-json}")"
-    printf 'expected-receipt-path=%s\n' "$(manifest_value "${FM_MANIFEST_RECEIPT_PATH:-state/$task_id.receipt.json}")"
-    printf 'expected-artifacts=%s\n' "$(manifest_value "${FM_MANIFEST_ARTIFACTS:-}")"
-    printf 'success-predicate-id=%s\n' "$(manifest_value "${FM_MANIFEST_SUCCESS_PREDICATE:-receipt-json-schema}")"
-    printf 'success-predicate-args=%s\n' "$(manifest_value "${FM_MANIFEST_SUCCESS_ARGS:-schema=firstmate-receipt/v1}")"
-    printf 'failure-predicate-id=%s\n' "$(manifest_value "${FM_MANIFEST_FAILURE_PREDICATE:-deadline-expired}")"
-    printf 'failure-predicate-args=%s\n' "$(manifest_value "${FM_MANIFEST_FAILURE_ARGS:-deadline=$deadline}")"
-    printf 'retry-classes=%s\n' "$(manifest_value "${FM_MANIFEST_RETRY_CLASSES:-}")"
-    printf 'retry-max-attempts=%s\n' "$max_attempts"
-    printf 'idempotency-key=%s\n' "$(manifest_value "${FM_MANIFEST_IDEMPOTENCY_KEY:-$task_id:$started}")"
-    printf 'escalation-action=%s\n' "$(manifest_value "${FM_MANIFEST_ESCALATION_ACTION:-create-owned-action}")"
-    printf 'acknowledgement-deadline=%s\n' "$ack_deadline"
+    printf 'started-at=%s\n' "$MANIFEST_STARTED"
+    printf 'deadline=%s\n' "$MANIFEST_DEADLINE"
+    printf 'no-progress-seconds=%s\n' "$MANIFEST_NO_PROGRESS"
+    printf 'expected-receipt-id=%s\n' "$(manifest_value "$MANIFEST_RECEIPT_ID")"
+    printf 'expected-receipt-path=%s\n' "$(manifest_value "$MANIFEST_RECEIPT_PATH")"
+    printf 'expected-artifacts=%s\n' "$(manifest_value "$MANIFEST_ARTIFACTS")"
+    printf 'success-predicate-id=%s\n' "$(manifest_value "$MANIFEST_SUCCESS_PREDICATE")"
+    printf 'success-predicate-args=%s\n' "$(manifest_value "$MANIFEST_SUCCESS_ARGS")"
+    printf 'failure-predicate-id=%s\n' "$(manifest_value "$MANIFEST_FAILURE_PREDICATE")"
+    printf 'failure-predicate-args=%s\n' "$(manifest_value "$MANIFEST_FAILURE_ARGS")"
+    printf 'retry-classes=%s\n' "$(manifest_value "$MANIFEST_RETRY_CLASSES")"
+    printf 'retry-max-attempts=%s\n' "$MANIFEST_MAX_ATTEMPTS"
+    printf 'idempotency-key=%s\n' "$(manifest_value "$MANIFEST_IDEMPOTENCY_KEY")"
+    printf 'escalation-action=%s\n' "$(manifest_value "$MANIFEST_ESCALATION_ACTION")"
+    printf 'acknowledgement-deadline=%s\n' "$MANIFEST_ACK_DEADLINE"
   } | atomic_publish "$manifest_path"
 }
 
@@ -485,6 +518,12 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+MANIFEST_ROUTE=${FM_MANIFEST_ROUTE:-normal}
+prepare_operation_manifest "$ID" "$KIND" "${HARNESS:-raw-command}" "$MANIFEST_ROUTE" || {
+  echo "error: invalid mandatory operation manifest for $ID" >&2
+  exit 1
+}
+
 # Resolve and reject an already-live target before a project-native refresh can
 # mutate the clone beneath that advisor. Outside tmux, do not create the fallback
 # session yet: unsafe sync failures must remain free of tmux launch side effects.
@@ -620,9 +659,20 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
 fi
 
-mkdir -p "$STATE"
-MANIFEST_ROUTE=${FM_MANIFEST_ROUTE:-normal}
-publish_operation_manifest "$ID" "$KIND" "${HARNESS:-raw-command}" "$WT" "$MANIFEST_ROUTE" || {
+rollback_spawn() {
+  tmux kill-window -t "$T" >/dev/null 2>&1 || true
+  if [ "$KIND" != secondmate ] && [ -n "$WT" ]; then
+    ( cd "$PROJ_ABS" && treehouse return --force "$WT" >/dev/null 2>&1 ) || return 1
+  fi
+  rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.pi-ext.ts"
+}
+mkdir -p "$STATE" || {
+  rollback_spawn || echo "error: failed to roll back launch resources for $ID" >&2
+  echo "error: failed to prepare task state for $ID" >&2
+  exit 1
+}
+publish_operation_manifest "$WT" || {
+  rollback_spawn || echo "error: failed to roll back launch resources for $ID" >&2
   echo "error: failed to atomically publish mandatory operation manifest for $ID" >&2
   exit 1
 }
@@ -642,9 +692,8 @@ MANIFEST_PATH=$(manifest_path_for "$ID")
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } | atomic_publish "$STATE/$ID.meta" || {
-  # A manifest without a visible task is inert. Remove it so a later dispatch
-  # cannot accidentally inherit a contract from this failed publication.
   rm -f "$MANIFEST_PATH"
+  rollback_spawn || echo "error: failed to roll back launch resources for $ID" >&2
   echo "error: failed to atomically publish task metadata for $ID" >&2
   exit 1
 }
