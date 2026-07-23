@@ -29,6 +29,7 @@ printf 'working: waiting for another event\n' >"$STATE_HOME/state/idle.status"
 printf 'done: https://example.test/pr/7\n' >"$STATE_HOME/state/terminal.status"
 printf 'working: lost pane receipt\n' >"$STATE_HOME/state/stalled.status"
 touch "$STATE_HOME/state/.last-watcher-beat"
+touch "$STATE_HOME/state/.artifact-supervisor.heartbeat"
 
 PATH="$TMP/bin:$PATH" FM_HOME="$STATE_HOME" FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" FM_BOARD_BODY="$TMP/none" "$ROOT/bin/fm-board.sh" --once
 first=$(sed -n 's/.*data-epoch="\([0-9]*\)".*/\1/p' "$TMP/board/board.html")
@@ -38,7 +39,14 @@ grep -q '>terminal<' "$TMP/board/board.html"
 grep -q '>stalled<' "$TMP/board/board.html"
 grep -q 'Terminal receipt recorded; pane presence does not imply work' "$TMP/board/board.html"
 grep -q 'Recorded pane is gone without a terminal receipt' "$TMP/board/board.html"
-grep -q 'Supervisor: healthy' "$TMP/board/board.html"
+grep -q 'Artifact supervisor: healthy' "$TMP/board/board.html"
+grep -q 'watcher healthy' "$TMP/board/board.html"
+
+rm -f "$STATE_HOME/state/.last-watcher-beat"
+PATH="$TMP/bin:$PATH" FM_HOME="$STATE_HOME" FM_BOARD_DIR="$TMP/board" FM_BOARD_OUT="$TMP/board/board.html" FM_BOARD_BODY="$TMP/none" "$ROOT/bin/fm-board.sh" --once
+grep -q 'Artifact supervisor: healthy' "$TMP/board/board.html"
+grep -q 'watcher stale/off' "$TMP/board/board.html"
+touch "$STATE_HOME/state/.last-watcher-beat"
 
 cat >"$STATE_HOME/state/artifact-supervisor.tsv" <<'TSV'
 artifact-supervisor-v1

@@ -80,6 +80,26 @@ test_bootstrap_starts_custom_main_home_supervisor() {
   pass "bootstrap starts supervisor for custom main home"
 }
 
+test_bootstrap_skips_supervisor_without_tmux() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/no-tmux"
+  mkdir -p "$case_dir/home" "$case_dir/board"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$case_dir/no-tmux-env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = tmux ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
+
+  out=$(BASH_ENV="$case_dir/no-tmux-env" FM_FAKE_TREEHOUSE_LEASE_HELP=1 PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_BOARD_DIR="$case_dir/board" "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F 'MISSING: tmux' >/dev/null || fail "bootstrap did not report missing tmux"
+  [ ! -e "$case_dir/home/state/.artifact-supervisor.pid" ] || fail "bootstrap started supervisor without tmux"
+  pass "bootstrap skips supervisor without tmux"
+}
+
 test_bootstrap_accepts_treehouse_lease_support() {
   local case_dir fakebin out
   case_dir="$TMP_ROOT/lease-supported"
@@ -147,3 +167,4 @@ test_bootstrap_reports_treehouse_without_lease_support
 test_bootstrap_reports_tasks_axi_when_available
 test_bootstrap_ignores_incompatible_tasks_axi
 test_bootstrap_starts_custom_main_home_supervisor
+test_bootstrap_skips_supervisor_without_tmux

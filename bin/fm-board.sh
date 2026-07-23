@@ -93,17 +93,20 @@ EOF
 }
 
 supervisor_card() {
-  local beat_age daemon_pid daemon_state activity activity_age
-  beat_age=$(age_of "$FM_HOME/state/.last-watcher-beat")
+  local artifact_age watcher_age watcher_state daemon_pid daemon_state activity activity_age
+  artifact_age=$(age_of "$FM_HOME/state/.artifact-supervisor.heartbeat")
+  watcher_age=$(age_of "$FM_HOME/state/.last-watcher-beat")
+  watcher_state=stale/off
+  [ "$watcher_age" -lt "$STALE_AFTER" ] && watcher_state=healthy
   daemon_pid=$(cat "$FM_HOME/state/.supervise-daemon.pid" 2>/dev/null || true)
   daemon_state=off
   [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null && daemon_state=running
   activity=$(cat "$FM_HOME/state/.fm-activity" 2>/dev/null || echo 'no activity receipt')
   activity_age=$(age_of "$FM_HOME/state/.fm-activity")
-  if [ "$beat_age" -ge "$STALE_AFTER" ]; then
-    printf '<div class="supervisor bad"><b>Supervisor: stale</b><span>No heartbeat for %s; restart supervision before trusting task state.</span><small>daemon %s · %s (%s ago)</small></div>' "$(age_text "$beat_age")" "$daemon_state" "$(printf '%s' "$activity" | escape_html)" "$(age_text "$activity_age")"
+  if [ "$artifact_age" -ge "$STALE_AFTER" ]; then
+    printf '<div class="supervisor bad"><b>Artifact supervisor: stale</b><span>No artifact heartbeat for %s; restart artifact supervision before trusting task state.</span><small>watcher %s (%s ago) · daemon %s · %s (%s ago)</small></div>' "$(age_text "$artifact_age")" "$watcher_state" "$(age_text "$watcher_age")" "$daemon_state" "$(printf '%s' "$activity" | escape_html)" "$(age_text "$activity_age")"
   else
-    printf '<div class="supervisor"><b>Supervisor: healthy</b><span>Heartbeat %s ago. State is derived from files, mtimes, and pane footers only.</span><small>daemon %s · %s (%s ago)</small></div>' "$(age_text "$beat_age")" "$daemon_state" "$(printf '%s' "$activity" | escape_html)" "$(age_text "$activity_age")"
+    printf '<div class="supervisor"><b>Artifact supervisor: healthy</b><span>Artifact heartbeat %s ago. State is derived from files, mtimes, and pane footers only.</span><small>watcher %s (%s ago) · daemon %s · %s (%s ago)</small></div>' "$(age_text "$artifact_age")" "$watcher_state" "$(age_text "$watcher_age")" "$daemon_state" "$(printf '%s' "$activity" | escape_html)" "$(age_text "$activity_age")"
   fi
 }
 
