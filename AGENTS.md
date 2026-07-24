@@ -432,7 +432,7 @@ Its charter retargets escalation to the main firstmate's status file, so routine
 
 ### Delivery modes and yolo
 
-A ship task's path from `done` to landed on `main` is set by the project's `mode` (recorded in meta; section 6); `yolo` decides who approves. The Validate / PR ready / Ship teardown stages below are written for the `no-mistakes` path; the other modes diverge:
+After reconciling each `done` claim against its brief and artifacts as required by section 8, a ship task's path to landed on `main` is set by the project's `mode` (recorded in meta; section 6); `yolo` decides who approves. The Validate / PR ready / Ship teardown stages below are written for the `no-mistakes` path; the other modes diverge:
 
 - **no-mistakes** - the stages below as written: no-mistakes validation pipeline -> PR -> captain merge.
 - **direct-PR** - no pipeline. The crewmate pushes and opens the PR itself (its brief says so) and reports `done: PR <url>`. Skip the Validate step and go straight to PR ready (run `fm-pr-check`, relay the PR). Teardown uses the normal pushed-branch check.
@@ -445,7 +445,7 @@ Pooled clones keep their local default refs frozen at clone time and can lag `or
 
 ### Validate
 
-For `no-mistakes`-mode ship tasks, when a crewmate's status says `done`, trigger validation using the crew's harness from `state/<id>.meta`.
+For `no-mistakes`-mode ship tasks, after reconciling the crewmate's `done` claim as required by section 8, trigger validation using the crew's harness from `state/<id>.meta`.
 Use `/no-mistakes` for claude, `$no-mistakes` for codex; natural language also works.
 For example, with claude:
 
@@ -494,7 +494,7 @@ With `--force`, teardown is the explicit discard path: it kills child windows, d
 
 A scout task follows Intake, Spawn, and Supervise exactly as above - scaffold the brief with `bin/fm-brief.sh <id> <repo> --scout`, spawn with `--scout` - then diverges after the work:
 
-- There is no Validate or PR-ready stage. When the crewmate's status says `done`, read `data/<id>/report.md`.
+- There is no Validate or PR-ready stage. When the crewmate's status says `done`, read `data/<id>/report.md` and reconcile the claim as required by section 8.
 - Relay the findings to the captain: plain chat for a focused answer, lavish-axi when the report has structure worth a visual (multiple findings, options, a plan).
 - Tear down immediately - no merge gate. `bin/fm-teardown.sh` allows a scout worktree's scratch commits and dirty files once the report exists; if the report is missing, it refuses, because the findings are the work product.
 - Record it in Done with the report path instead of a PR link using `tasks-axi done` when compatible tasks-axi is available, otherwise hand-edit `data/backlog.md` and keep Done to the 10 most recent, then re-evaluate the queue and apply the Queued dispatch checks above before dispatching each eligible item.

@@ -145,6 +145,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 - **Self-updates stay safe** - `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
   The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 - **Restart-proof** - all state lives in tmux, status files, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
+  Every incoming request is recorded in the local backlog before clarification, routing, or dispatch, so later messages and restarts do not silently drop it.
   Kill the first mate session anytime; the next one reconciles and carries on.
 
 ## The bin/ toolbelt
