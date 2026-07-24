@@ -348,13 +348,13 @@ run_loop() {
     return 1
   fi
   owner_tmp="$OWNER_RECEIPT.tmp.$$"
-  {
+  if ! {
     printf 'pid=%s\n' "$$"
     printf 'interval=%s\n' "$INTERVAL"
-  } > "$owner_tmp" && mv -f "$owner_tmp" "$OWNER_RECEIPT" || {
+  } > "$owner_tmp" || ! mv -f "$owner_tmp" "$OWNER_RECEIPT"; then
     fm_lock_release "$LOCK"
     return 1
-  }
+  fi
   printf '%s\n' "$$" > "$PIDFILE" || {
     rm -f "$OWNER_RECEIPT"
     fm_lock_release "$LOCK"
