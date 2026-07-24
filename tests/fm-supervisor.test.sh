@@ -115,6 +115,24 @@ SNAPSHOT="$HOME_DIR/state/firstmate-supervisor.tsv"
 BOARD="$BOARD_DIR/board.html"
 [ -s "$SNAPSHOT" ] || fail "machine-readable snapshot was not written"
 [ -s "$BOARD" ] || fail "board was not written"
+snapshot_before_wake_error=$(cksum "$SNAPSHOT")
+mkdir "$HOME_DIR/state/.wake-queue"
+if run_supervisor --once >/dev/null 2>&1; then
+  fail "unreadable wake queue produced a successful snapshot"
+fi
+[ "$(cksum "$SNAPSHOT")" = "$snapshot_before_wake_error" ] \
+  || fail "unreadable wake queue replaced the last valid snapshot"
+grep -F 'snapshot-write-failed' "$HOME_DIR/state/.firstmate-supervisor.error" >/dev/null \
+  || fail "unreadable wake queue did not record a snapshot failure"
+rmdir "$HOME_DIR/state/.wake-queue"
+mkdir "$HOME_DIR/state/.wake-queue.seq"
+if run_supervisor --once >/dev/null 2>&1; then
+  fail "unreadable wake sequence produced a successful snapshot"
+fi
+[ "$(cksum "$SNAPSHOT")" = "$snapshot_before_wake_error" ] \
+  || fail "unreadable wake sequence replaced the last valid snapshot"
+rmdir "$HOME_DIR/state/.wake-queue.seq"
+run_supervisor --once || fail "supervisor did not recover after wake read failures"
 grep -F $'task\tpre-deadline\tactive-unverified\t' "$SNAPSHOT" >/dev/null \
   || fail "pre-deadline missing receipt was not active-unverified"
 grep -F $'task\tpost-deadline\tstalled\treceipt deadline passed\t' "$SNAPSHOT" >/dev/null \
