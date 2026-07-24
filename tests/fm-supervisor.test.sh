@@ -590,10 +590,10 @@ printf 'v1\tgeneration:stalled-teardown-generation\t%s\t%s\t%s\tactive\t-\n' \
 FM_SUPERVISOR_TEARDOWN_STALL_AFTER=1 \
   run_supervisor_home "$STALLED_TEARDOWN_HOME" "$STALLED_TEARDOWN_BOARD" --once \
   || fail "stalled live teardown reconciliation cycle failed"
-grep -F $'\tstalled-teardown\tteardown-stalled\trerun bin/fm-teardown.sh stalled-teardown and inspect the stalled cleanup\t' \
+grep -F $'\tstalled-teardown\tteardown-stalled\tinspect and stop teardown owner '"$excluded_owner"$' before rerunning bin/fm-teardown.sh stalled-teardown\t' \
   "$STALLED_TEARDOWN_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
   || fail "stalled live teardown was not durably escalated"
-grep -F $'escalation\tstalled-teardown\tteardown-stalled\trerun bin/fm-teardown.sh stalled-teardown and inspect the stalled cleanup' \
+grep -F $'escalation\tstalled-teardown\tteardown-stalled\tinspect and stop teardown owner '"$excluded_owner"$' before rerunning bin/fm-teardown.sh stalled-teardown' \
   "$STALLED_TEARDOWN_HOME/state/firstmate-supervisor.tsv" >/dev/null \
   || fail "stalled live teardown was not surfaced in the snapshot"
 grep -F 'teardown-stalled' \
@@ -632,6 +632,63 @@ awk -F '\t' '$1 == "task" && $2 == "reused-task" { found=1 } END { exit !found }
 grep -F $'\treused-task\tteardown-owner-unverified\t' \
   "$LEGACY_TEARDOWN_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
   || fail "generation-less teardown evidence was not durably quarantined"
+
+V1_LEGACY_TEARDOWN_HOME="$TMP_ROOT/v1-legacy-teardown-home"
+V1_LEGACY_TEARDOWN_BOARD="$TMP_ROOT/v1-legacy-teardown-board"
+mkdir -p "$V1_LEGACY_TEARDOWN_HOME/state" "$V1_LEGACY_TEARDOWN_BOARD"
+{
+  printf 'window=fm-reused-v1\n'
+  printf 'worktree=/reused-v1-worktree\n'
+  printf 'project=/reused-v1-project\n'
+  printf 'kind=ship\n'
+} > "$V1_LEGACY_TEARDOWN_HOME/state/reused-v1.meta"
+v1_legacy_generation=$(run_supervisor_home \
+  "$V1_LEGACY_TEARDOWN_HOME" "$V1_LEGACY_TEARDOWN_BOARD" --once >/dev/null 2>&1 \
+  && cat "$(task_state_dir "$V1_LEGACY_TEARDOWN_HOME" reused-v1)/generation")
+printf 'v1\t%s\t%s\t%s\t%s\tactive\t-\n' \
+  "$v1_legacy_generation" "$excluded_owner" "$excluded_identity" "$(date +%s)" \
+  > "$V1_LEGACY_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-reused-v1"
+run_supervisor_home "$V1_LEGACY_TEARDOWN_HOME" "$V1_LEGACY_TEARDOWN_BOARD" --once \
+  || fail "v1 generation-less teardown quarantine cycle failed"
+awk -F '\t' '$1 == "task" && $2 == "reused-v1" { found=1 } END { exit !found }' \
+  "$V1_LEGACY_TEARDOWN_HOME/state/firstmate-supervisor.tsv" \
+  || fail "v1 generation-less teardown evidence excluded a current same-ID task"
+[ ! -e "$V1_LEGACY_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-reused-v1" ] \
+  || fail "v1 generation-less teardown evidence survived quarantine"
+grep -F $'\treused-v1\tteardown-owner-unverified\t' \
+  "$V1_LEGACY_TEARDOWN_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
+  || fail "v1 generation-less teardown evidence was not durably quarantined"
+
+CAS_TEARDOWN_HOME="$TMP_ROOT/cas-teardown-home"
+CAS_TEARDOWN_BOARD="$TMP_ROOT/cas-teardown-board"
+mkdir -p \
+  "$CAS_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-locks/cas-teardown" \
+  "$CAS_TEARDOWN_BOARD"
+{
+  printf 'window=fm-gone\n'
+  printf 'kind=ship\n'
+  printf 'generation=cas-teardown-generation\n'
+} > "$CAS_TEARDOWN_HOME/state/cas-teardown.meta"
+cas_marker="$CAS_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-cas-teardown"
+printf 'v1\tgeneration:cas-teardown-generation\t%s\t%s\t%s\tactive\t-\n' \
+  "$excluded_owner" "$excluded_identity" "$(( $(date +%s) - 2 ))" > "$cas_marker"
+printf '%s\n' "${BASHPID:-$$}" \
+  > "$CAS_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-locks/cas-teardown/pid"
+FM_SUPERVISOR_TEARDOWN_STALL_AFTER=1 \
+  run_supervisor_home "$CAS_TEARDOWN_HOME" "$CAS_TEARDOWN_BOARD" --once &
+cas_supervisor_pid=$!
+/bin/sleep 0.2
+printf 'v1\tgeneration:cas-teardown-generation\t%s\t%s\t%s\tactive\t-\n' \
+  "$excluded_owner" "$excluded_identity" "$(date +%s)" > "$cas_marker"
+rm -f "$CAS_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-locks/cas-teardown/pid"
+rmdir "$CAS_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-locks/cas-teardown"
+wait "$cas_supervisor_pid" || fail "marker-CAS teardown reconciliation cycle failed"
+if grep -F $'\tcas-teardown\tteardown-stalled\t' \
+  "$CAS_TEARDOWN_HOME/state/.firstmate-supervisor.escalations" >/dev/null 2>&1; then
+  fail "stale teardown reconciliation overwrote concurrent progress"
+fi
+grep -F $'\tactive\t-' "$cas_marker" >/dev/null \
+  || fail "concurrent teardown progress was not preserved"
 
 DEAD_TEARDOWN_HOME="$TMP_ROOT/dead-teardown-home"
 DEAD_TEARDOWN_BOARD="$TMP_ROOT/dead-teardown-board"
@@ -720,6 +777,19 @@ fi
 awk -F '\t' '$1 == "task" && $2 == "legacy-retire" { found=1 } END { exit !found }' \
   "$LEGACY_RETIRE_HOME/state/firstmate-supervisor.tsv" \
   || fail "legacy retirement evidence excluded current same-ID metadata"
+
+LEGACY_ORPHAN_RETIRE_HOME="$TMP_ROOT/legacy-orphan-retire-home"
+LEGACY_ORPHAN_RETIRE_BOARD="$TMP_ROOT/legacy-orphan-retire-board"
+mkdir -p \
+  "$LEGACY_ORPHAN_RETIRE_HOME/state/.firstmate-supervisor.retirements" \
+  "$LEGACY_ORPHAN_RETIRE_BOARD"
+printf 'v1\t5\tlegacy-orphan-retire\tfailed\tmetadata-cleanup-failed\told action\torphan-retire-token\n' \
+  > "$LEGACY_ORPHAN_RETIRE_HOME/state/.firstmate-supervisor.retirements/legacy-orphan-retire"
+run_supervisor_home "$LEGACY_ORPHAN_RETIRE_HOME" "$LEGACY_ORPHAN_RETIRE_BOARD" --once \
+  || fail "metadata-free legacy retirement migration cycle failed"
+grep -F $'5\tlegacy-orphan-retire\tretirement-metadata-cleanup-failed\trun bin/fm-supervisor.sh --once to reconcile orphan supervisor state, then inspect leftover task resources\torphan-retire-token' \
+  "$LEGACY_ORPHAN_RETIRE_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
+  || fail "metadata-free legacy retirement omitted supported orphan recovery"
 
 LEGACY_ESC_HOME="$TMP_ROOT/legacy-escalation-home"
 LEGACY_ESC_BOARD="$TMP_ROOT/legacy-escalation-board"

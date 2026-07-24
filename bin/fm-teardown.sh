@@ -34,6 +34,8 @@ SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
@@ -100,15 +102,26 @@ process_identity() {
 }
 
 write_teardown_marker() {
-  local marker=$1 generation=$2 owner_pid=$3 owner_identity=$4 state=$5 condition=$6 tmp
+  local marker=$1 generation=$2 owner_pid=$3 owner_identity=$4 state=$5 condition=$6
+  local tmp lock attempts status=0
+  lock="$STATE/.firstmate-supervisor.teardown-locks/$ID"
+  mkdir -p "$STATE/.firstmate-supervisor.teardown-locks" || return 1
+  attempts=50
+  while ! fm_lock_try_acquire "$lock"; do
+    [ "$attempts" -gt 0 ] || return 1
+    sleep 0.1
+    attempts=$((attempts - 1))
+  done
   tmp="$marker.tmp.$$"
   if ! printf 'v1\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$generation" "$owner_pid" "$owner_identity" "$(date +%s)" "$state" "$condition" \
     > "$tmp" \
     || ! mv -f "$tmp" "$marker"; then
     rm -f "$tmp"
-    return 1
+    status=1
   fi
+  fm_lock_release "$lock" || status=1
+  return "$status"
 }
 
 backlog_refresh_reminder() {

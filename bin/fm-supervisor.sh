@@ -36,6 +36,7 @@ LOCK="$STATE/.firstmate-supervisor.lock"
 CONTROL_LOCK="$STATE/.firstmate-supervisor.control.lock"
 TASK_STATE_LOCK="$STATE/.firstmate-supervisor.state.lock"
 HEALTH_LOCK="$STATE/.firstmate-supervisor.health.lock"
+TEARDOWN_MARKER_LOCK_ROOT="$STATE/.firstmate-supervisor.teardown-locks"
 PIDFILE="$STATE/.firstmate-supervisor.pid"
 OWNER_RECEIPT="$STATE/.firstmate-supervisor.owner"
 HEARTBEAT="$STATE/.firstmate-supervisor.heartbeat"
@@ -335,6 +336,8 @@ task_teardown_excluded() { # <meta> <id>
 $record
 EOF
   [ "$format" = v1 ] && [ "$recorded" = "$expected" ] || return 1
+  case "$expected" in generation:*) ;; *) return 1 ;; esac
+  case "$recorded" in generation:*) ;; *) return 1 ;; esac
   case "$state" in active|failed|complete) return 0 ;; esac
   return 2
 }
@@ -357,7 +360,7 @@ EOF
       action="inspect legacy teardown evidence before retrying task cleanup"
       ;;
     stalled)
-      action="rerun bin/fm-teardown.sh $id and inspect the stalled cleanup"
+      action="inspect and stop teardown owner $pid before rerunning bin/fm-teardown.sh $id"
       ;;
     incomplete)
       action="rerun teardown because its completion marker conflicts with task metadata"
@@ -461,6 +464,42 @@ write_reconciled_teardown_marker() { # <path> <generation> <pid> <identity> <pro
   fi
 }
 
+acquire_teardown_marker_lock() { # <id>
+  local id=$1 lock attempts
+  lock="$TEARDOWN_MARKER_LOCK_ROOT/$id"
+  mkdir -p "$TEARDOWN_MARKER_LOCK_ROOT" || return 1
+  attempts=$((TASK_LOCK_WAIT * 10))
+  while ! fm_lock_try_acquire "$lock"; do
+    [ "$attempts" -gt 0 ] || return 1
+    sleep 0.1
+    attempts=$((attempts - 1))
+  done
+}
+
+transition_stalled_teardown_marker() { # <path> <id> <record> <generation> <pid> <identity> <progress> <epoch> <token> <action>
+  local marker=$1 id=$2 previous=$3 recorded=$4 pid=$5 identity=$6 progress=$7
+  local epoch=$8 token=$9
+  shift 9
+  local action=$1 lock current current_identity status=0
+  lock="$TEARDOWN_MARKER_LOCK_ROOT/$id"
+  acquire_teardown_marker_lock "$id" || return 1
+  current=$(read_optional_file "$marker") || status=1
+  if [ "$status" -eq 0 ] && [ "$current" = "$previous" ]; then
+    current_identity=$(process_identity "$pid" 2>/dev/null || true)
+    if [ -n "$current_identity" ] && [ "$current_identity" = "$identity" ]; then
+      journal_escalation \
+        "$epoch" "$id" teardown-stalled "$action" "$token" || status=1
+      if [ "$status" -eq 0 ]; then
+        write_reconciled_teardown_marker \
+          "$marker" "$recorded" "$pid" "$identity" "$progress" failed stalled \
+          || status=1
+      fi
+    fi
+  fi
+  fm_lock_release "$lock" || status=1
+  return "$status"
+}
+
 reconcile_teardown_markers() {
   local marker id meta expected record format recorded pid identity progress state condition tab
   local current_identity epoch token action age
@@ -508,6 +547,19 @@ EOF
       rm -f "$marker" || return 1
       continue
     fi
+    case "$recorded" in
+      generation:*) ;;
+      *)
+        epoch=$(fm_path_mtime "$marker") || return 1
+        token=$(printf '%s\t%s\t%s' "$id" "$record" "$epoch" \
+          | cksum | awk '{ print $1 "-" $2 }') || return 1
+        action="inspect quarantined legacy teardown evidence and any leftover task resources"
+        journal_escalation \
+          "$epoch" "$id" teardown-owner-unverified "$action" "$token" || return 1
+        rm -f "$marker" || return 1
+        continue
+        ;;
+    esac
     is_epoch "$progress" || return 1
     case "$state" in active|failed|complete) ;; *) return 1 ;; esac
     if [ -e "$meta" ] || [ -L "$meta" ]; then
@@ -530,12 +582,10 @@ EOF
           token=$(printf '%s\t%s\t%s\t%s\t%s\tstalled' \
             "$id" "$recorded" "$pid" "$identity" "$progress" \
             | cksum | awk '{ print $1 "-" $2 }') || return 1
-          action="rerun bin/fm-teardown.sh $id and inspect the stalled cleanup"
-          journal_escalation \
-            "$epoch" "$id" teardown-stalled "$action" "$token" || return 1
-          write_reconciled_teardown_marker \
-            "$marker" "$recorded" "$pid" "$identity" "$progress" failed stalled \
-            || return 1
+          action="inspect and stop teardown owner $pid before rerunning bin/fm-teardown.sh $id"
+          transition_stalled_teardown_marker \
+            "$marker" "$id" "$record" "$recorded" "$pid" "$identity" \
+            "$progress" "$epoch" "$token" "$action" || return 1
         fi
         continue
       fi
@@ -663,7 +713,11 @@ EOF
       ;;
     *) return 1 ;;
   esac
-  action="run bin/fm-teardown.sh $id to resume supported task cleanup"
+  if [ -f "$STATE/$id.meta" ]; then
+    action="run bin/fm-teardown.sh $id to resume supported task cleanup"
+  else
+    action="run bin/fm-supervisor.sh --once to reconcile orphan supervisor state, then inspect leftover task resources"
+  fi
   journal_escalation \
     "$epoch" "$id" "$journal_condition" "$action" "$token" || return 1
   rm -f "$path" || return 1

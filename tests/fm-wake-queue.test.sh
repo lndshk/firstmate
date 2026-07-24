@@ -351,6 +351,31 @@ test_atomic_double_drain() {
   pass "two atomic drains cannot consume the same records twice"
 }
 
+test_drain_reports_lock_release_failure() {
+  local dir state fakebin out status
+  dir=$(make_case drain-release-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/drain.out"
+  cat > "$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  *".wake-queue.lock/pid") printf '2147483647\n'; exit 0 ;;
+esac
+exec /bin/cat "$@"
+SH
+  chmod +x "$fakebin/cat"
+  append_wake "$state" heartbeat heartbeat heartbeat \
+    || fail "release-failure wake append failed"
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || status=$?
+  [ "$status" -ne 0 ] || fail "drain hid queue lock release failure"
+  grep "$(printf '\theartbeat\theartbeat\theartbeat')" "$out" >/dev/null \
+    || fail "release-failure drain lost its emitted wake"
+  pass "drain propagates queue lock release failure"
+}
+
 test_drain_dedupes_obvious_duplicates() {
   local dir state out count
   dir=$(make_case dedupe)
@@ -1399,6 +1424,7 @@ test_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_singleton_start
 test_atomic_double_drain
+test_drain_reports_lock_release_failure
 test_drain_dedupes_obvious_duplicates
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable

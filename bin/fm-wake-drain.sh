@@ -11,13 +11,18 @@ DRAIN_LOCK_HELD=false
 
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
-  local status=$?
+  local status=$? release_status=0
   if [ "$status" -ne 0 ] && [ "$DRAIN_LOCK_HELD" = true ] && [ -n "$DRAIN_TMP" ] && [ -e "$DRAIN_TMP" ]; then
     fm_wake_restore_queue "$DRAIN_TMP" || true
   fi
   if [ "$DRAIN_LOCK_HELD" = true ]; then
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    if fm_lock_release "$FM_WAKE_QUEUE_LOCK"; then
+      DRAIN_LOCK_HELD=false
+    else
+      release_status=$?
+    fi
   fi
+  [ "$status" -ne 0 ] || status=$release_status
   exit "$status"
 }
 
