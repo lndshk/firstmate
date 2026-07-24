@@ -125,6 +125,16 @@ test_bootstrap_reports_failed_initial_cycle() {
     || fail "bootstrap suppressed failed initial cycle: $out"
   [ ! -e "$case_dir/home/state/.firstmate-supervisor.heartbeat" ] \
     || fail "failed bootstrap activation published a readiness heartbeat"
+  [ ! -e "$case_dir/home/state/.firstmate-supervisor.pid" ] \
+    || fail "failed bootstrap activation retained its PID receipt"
+  [ ! -d "$case_dir/home/state/.firstmate-supervisor.lock" ] \
+    || fail "failed bootstrap activation retained its ownership lock"
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$case_dir/home" FM_BOARD_DIR="$case_dir/board" \
+    FM_SUPERVISOR_START_WAIT=2 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F \
+    'SUPERVISOR: startup failed: error: supervisor failed to publish a fresh heartbeat after its initial cycle' >/dev/null \
+    || fail "bootstrap retry silently accepted failed activation: $out"
   pass "bootstrap reports failed supervisor initial cycle"
 }
 

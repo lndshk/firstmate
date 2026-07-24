@@ -354,6 +354,58 @@ heartbeat_is_ready() { # <not-before-epoch>
   is_uint "$beat" && [ "$beat" -ge "$not_before" ]
 }
 
+heartbeat_is_healthy() {
+  local beat age max_age
+  beat=$(cat "$HEARTBEAT" 2>/dev/null || true)
+  is_uint "$beat" || return 1
+  age=$(( $(now_epoch) - beat ))
+  max_age=$((INTERVAL * 2 + START_WAIT))
+  [ "$age" -ge 0 ] && [ "$age" -le "$max_age" ]
+}
+
+child_has_exited() {
+  local child=$1 stat
+  fm_pid_alive "$child" || return 0
+  stat=$(ps -p "$child" -o stat= 2>/dev/null || true)
+  case "$stat" in *Z*) return 0 ;; esac
+  return 1
+}
+
+clear_child_ownership() {
+  local child=$1 lock_pid receipt_pid
+  receipt_pid=$(cat "$PIDFILE" 2>/dev/null || true)
+  [ "$receipt_pid" != "$child" ] || rm -f "$PIDFILE"
+  lock_pid=$(cat "$LOCK/pid" 2>/dev/null || true)
+  if [ "$lock_pid" = "$child" ]; then
+    rm -f "$LOCK/pid" 2>/dev/null || return 1
+    rmdir "$LOCK" 2>/dev/null || return 1
+  fi
+}
+
+stop_failed_child() {
+  local child=$1 waited=0
+  if ! child_has_exited "$child"; then
+    supervisor_process_matches_owner "$child" || return 1
+    kill -TERM "$child" 2>/dev/null || return 1
+    while ! child_has_exited "$child" && [ "$waited" -lt "$START_WAIT" ]; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+  fi
+  if ! child_has_exited "$child"; then
+    supervisor_process_matches_owner "$child" || return 1
+    kill -KILL "$child" 2>/dev/null || return 1
+    waited=0
+    while ! child_has_exited "$child" && [ "$waited" -lt "$START_WAIT" ]; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+  fi
+  child_has_exited "$child" || return 1
+  wait "$child" 2>/dev/null || true
+  clear_child_ownership "$child"
+}
+
 wait_for_owner() { # <preferred-child-pid> <not-before-epoch>
   local child=$1 not_before=$2 waited=0 pid
   while [ "$waited" -lt "$START_WAIT" ]; do
@@ -371,7 +423,10 @@ wait_for_owner() { # <preferred-child-pid> <not-before-epoch>
     printf 'supervisor running: pid %s\n' "$pid"
     return 0
   fi
-  fm_pid_alive "$child" && kill -TERM "$child" 2>/dev/null || true
+  if ! stop_failed_child "$child"; then
+    printf 'error: supervisor failed readiness and could not relinquish ownership safely\n' >&2
+    return 1
+  fi
   printf 'error: supervisor failed to publish a fresh heartbeat after its initial cycle\n' >&2
   return 1
 }
@@ -381,8 +436,12 @@ start_unlocked() {
   mkdir -p "$STATE"
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
   if supervisor_pid_is_ours "$pid"; then
-    printf 'supervisor already running: pid %s\n' "$pid"
-    return 0
+    if heartbeat_is_healthy; then
+      printf 'supervisor already running: pid %s\n' "$pid"
+      return 0
+    fi
+    printf 'error: supervisor pid %s has no fresh heartbeat\n' "$pid" >&2
+    return 1
   fi
   clear_foreign_runtime_lock || {
     printf 'error: could not clear a foreign supervisor lock\n' >&2

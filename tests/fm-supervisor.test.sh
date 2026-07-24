@@ -168,6 +168,20 @@ printf '%s\n' "$failed_start" \
   || fail "failed initial cycle did not report missing readiness: $failed_start"
 [ ! -e "$FAILED_HOME/state/.firstmate-supervisor.heartbeat" ] \
   || fail "failed initial cycle published a readiness heartbeat"
+[ ! -e "$FAILED_HOME/state/.firstmate-supervisor.pid" ] \
+  || fail "failed initial cycle retained its PID receipt"
+[ ! -d "$FAILED_HOME/state/.firstmate-supervisor.lock" ] \
+  || fail "failed initial cycle retained its ownership lock"
+if failed_retry=$(FM_SUPERVISOR_START_WAIT=2 run_supervisor_home "$FAILED_HOME" "$FAILED_BOARD" start 2>&1); then
+  fail "immediate retry accepted a failed no-heartbeat owner"
+fi
+printf '%s\n' "$failed_retry" \
+  | grep -F 'failed to publish a fresh heartbeat after its initial cycle' >/dev/null \
+  || fail "immediate retry did not perform a fresh activation attempt: $failed_retry"
+[ ! -e "$FAILED_HOME/state/.firstmate-supervisor.pid" ] \
+  || fail "failed retry retained its PID receipt"
+[ ! -d "$FAILED_HOME/state/.firstmate-supervisor.lock" ] \
+  || fail "failed retry retained its ownership lock"
 
 FM_SUPERVISOR_INTERVAL=1 run_supervisor start >/dev/null || fail "supervisor start failed"
 for _ in 1 2 3 4 5; do
@@ -176,6 +190,22 @@ for _ in 1 2 3 4 5; do
 done
 case "${first_pid:-}" in ''|*[!0-9]*) fail "start did not publish PID receipt" ;; esac
 kill -0 "$first_pid" 2>/dev/null || fail "published supervisor PID is not alive"
+kill -STOP "$first_pid" 2>/dev/null || fail "could not pause supervisor for heartbeat-health test"
+rm -f "$HOME_DIR/state/.firstmate-supervisor.heartbeat"
+if unhealthy_start=$(FM_SUPERVISOR_INTERVAL=1 run_supervisor start 2>&1); then
+  fail "idempotent start accepted an owner without a fresh heartbeat"
+fi
+printf '%s\n' "$unhealthy_start" | grep -F "supervisor pid $first_pid has no fresh heartbeat" >/dev/null \
+  || fail "unhealthy existing owner did not report heartbeat failure: $unhealthy_start"
+[ "$(cat "$HOME_DIR/state/.firstmate-supervisor.pid")" = "$first_pid" ] \
+  || fail "heartbeat-health check replaced the existing owner"
+kill -CONT "$first_pid" 2>/dev/null || fail "could not resume supervisor after heartbeat-health test"
+for _ in 1 2 3 4 5; do
+  [ -s "$HOME_DIR/state/.firstmate-supervisor.heartbeat" ] && break
+  sleep 1
+done
+[ -s "$HOME_DIR/state/.firstmate-supervisor.heartbeat" ] \
+  || fail "resumed supervisor did not restore its heartbeat"
 kill -STOP "$first_pid" 2>/dev/null || fail "could not pause supervisor for drained-wake test"
 first_generated=$(awk -F '\t' '$1 == "generated-at" { print $2 }' "$SNAPSHOT")
 first_board_generated=$(sed -n 's/.*const generated=\([0-9][0-9]*\),.*/\1/p' "$BOARD")
