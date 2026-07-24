@@ -28,7 +28,6 @@ SNAPSHOT="${FM_SUPERVISOR_SNAPSHOT:-$STATE/firstmate-supervisor.tsv}"
 ESCALATIONS="$STATE/.firstmate-supervisor.escalations"
 LOG="$STATE/.firstmate-supervisor.log"
 ERROR="$STATE/.firstmate-supervisor.error"
-WAIT_PID=
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -370,13 +369,12 @@ run_loop() {
 }
 
 owner_cleanup() {
-  local status=$1
+  local status=$1 child_pid
   trap - INT TERM EXIT
-  if [ -n "$WAIT_PID" ]; then
-    kill "$WAIT_PID" 2>/dev/null || true
-    wait "$WAIT_PID" 2>/dev/null || true
-    WAIT_PID=
-  fi
+  for child_pid in $(jobs -p); do
+    kill "$child_pid" 2>/dev/null || true
+    wait "$child_pid" 2>/dev/null || true
+  done
   rm -f "$PIDFILE" "$OWNER_RECEIPT"
   fm_lock_release "$LOCK"
   exit "$status"
@@ -384,9 +382,7 @@ owner_cleanup() {
 
 sleep_interval() {
   sleep "$INTERVAL" &
-  WAIT_PID=$!
-  wait "$WAIT_PID" 2>/dev/null || true
-  WAIT_PID=
+  wait 2>/dev/null || true
 }
 
 heartbeat_is_ready() { # <not-before-epoch>
