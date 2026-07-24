@@ -28,6 +28,20 @@ jobs:
             "$test_script"
           done
 
+  macos-bash-32:
+    name: Supervisor on macOS Bash 3.2
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: |
+          set -eu
+          version=$(/bin/bash -c 'printf "%s.%s\n" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"')
+          [ "$version" = "3.2" ] || {
+            echo "::error::Expected /bin/bash 3.2, found $version"
+            exit 1
+          }
+          /bin/bash tests/fm-supervisor.test.sh
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
