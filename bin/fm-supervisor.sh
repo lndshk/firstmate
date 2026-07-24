@@ -268,16 +268,20 @@ EOF
 }
 
 wake_snapshot() { # prints: <count><tab><last-seq>
-  local wakes count queue_last_seq durable_last_seq
-  wakes=$(fm_wake_peek 2>/dev/null) || return 1
+  local wakes count queue_last_seq durable_last_seq sequence_copy
+  sequence_copy="$STATE/.wake-queue.seq.peek.$(fm_current_pid)"
+  wakes=$(fm_wake_peek "$sequence_copy" 2>/dev/null) || {
+    rm -f "$sequence_copy"
+    return 1
+  }
+  durable_last_seq=$(cat "$sequence_copy" 2>/dev/null) || {
+    rm -f "$sequence_copy"
+    return 1
+  }
+  rm -f "$sequence_copy"
+  is_uint "$durable_last_seq" || return 1
   count=$(printf '%s\n' "$wakes" | awk 'NF { n++ } END { print n + 0 }') || return 1
   queue_last_seq=$(printf '%s\n' "$wakes" | awk -F '\t' 'NF >= 2 && $2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print max + 0 }') || return 1
-  if [ -e "$STATE/.wake-queue.seq" ]; then
-    durable_last_seq=$(cat "$STATE/.wake-queue.seq" 2>/dev/null) || return 1
-    is_uint "$durable_last_seq" || return 1
-  else
-    durable_last_seq=0
-  fi
   [ "$queue_last_seq" -le "$durable_last_seq" ] || durable_last_seq=$queue_last_seq
   printf '%s\t%s\n' "$count" "$durable_last_seq"
 }

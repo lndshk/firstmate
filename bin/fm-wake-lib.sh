@@ -178,8 +178,10 @@ fm_wake_print_deduped() {
 # it. The always-on supervisor uses this to reconcile wake state while leaving
 # ownership of the real drain with Firstmate and the existing AFK flow.
 fm_wake_peek() {
-  local peek status
+  local peek sequence_copy seq_file status
   peek="$STATE/.wake-queue.peek.$(fm_current_pid)"
+  sequence_copy=${1:-}
+  seq_file="$STATE/.wake-queue.seq"
   status=0
 
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
@@ -188,11 +190,21 @@ fm_wake_peek() {
   else
     : > "$peek" || status=$?
   fi
+  if [ "$status" -eq 0 ] && [ -n "$sequence_copy" ]; then
+    if [ -e "$seq_file" ]; then
+      cat "$seq_file" > "$sequence_copy" || status=$?
+    else
+      printf '0\n' > "$sequence_copy" || status=$?
+    fi
+  fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 
   if [ "$status" -eq 0 ]; then
     fm_wake_print_deduped "$peek" || status=$?
   fi
   rm -f "$peek"
+  if [ "$status" -ne 0 ] && [ -n "$sequence_copy" ]; then
+    rm -f "$sequence_copy"
+  fi
   return "$status"
 }

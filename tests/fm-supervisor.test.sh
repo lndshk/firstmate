@@ -132,6 +132,25 @@ fi
 [ "$(cksum "$SNAPSHOT")" = "$snapshot_before_wake_error" ] \
   || fail "unreadable wake sequence replaced the last valid snapshot"
 rmdir "$HOME_DIR/state/.wake-queue.seq"
+printf '1\n' > "$HOME_DIR/state/.wake-queue.seq"
+printf '1\t1\theartbeat\theartbeat\theartbeat\n' > "$HOME_DIR/state/.wake-queue"
+sequence_copy="$HOME_DIR/state/wake-sequence-copy"
+FM_STATE_OVERRIDE="$HOME_DIR/state" bash -c '
+  . "$1/bin/fm-wake-lib.sh"
+  fm_lock_release() {
+    local lockdir=$1 pid current
+    current=${BASHPID:-$$}
+    pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+    [ "$pid" = "$current" ] || return 0
+    rm -f "$lockdir/pid" 2>/dev/null || true
+    rmdir "$lockdir" 2>/dev/null || true
+    : > "$STATE/.wake-queue.seq"
+  }
+  fm_wake_peek "$2" >/dev/null
+' -- "$ROOT" "$sequence_copy" || fail "locked wake snapshot failed"
+[ "$(cat "$sequence_copy")" = 1 ] \
+  || fail "wake sequence was not copied before the queue lock was released"
+rm -f "$HOME_DIR/state/.wake-queue" "$HOME_DIR/state/.wake-queue.seq" "$sequence_copy"
 run_supervisor --once || fail "supervisor did not recover after wake read failures"
 grep -F $'task\tpre-deadline\tactive-unverified\t' "$SNAPSHOT" >/dev/null \
   || fail "pre-deadline missing receipt was not active-unverified"
