@@ -8,7 +8,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BRIEF="$ROOT/bin/fm-brief.sh"
 AGENTS="$ROOT/AGENTS.md"
 README="$ROOT/README.md"
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-brief-contract.XXXXXX")
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-brief-contract.XXXXXX") || exit 1
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 fail() {
