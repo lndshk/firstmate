@@ -110,6 +110,24 @@ test_bootstrap_reports_supervisor_startup_failure() {
   pass "bootstrap reports supervisor startup failure"
 }
 
+test_bootstrap_reports_failed_initial_cycle() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/supervisor-initial-cycle-failure"
+  mkdir -p "$case_dir/home"
+  : > "$case_dir/board"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$case_dir/home" FM_BOARD_DIR="$case_dir/board" \
+    FM_SUPERVISOR_START_WAIT=2 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F \
+    'SUPERVISOR: startup failed: error: supervisor failed to publish a fresh heartbeat after its initial cycle' >/dev/null \
+    || fail "bootstrap suppressed failed initial cycle: $out"
+  [ ! -e "$case_dir/home/state/.firstmate-supervisor.heartbeat" ] \
+    || fail "failed bootstrap activation published a readiness heartbeat"
+  pass "bootstrap reports failed supervisor initial cycle"
+}
+
 test_bootstrap_accepts_treehouse_lease_support() {
   local case_dir fakebin out
   case_dir="$TMP_ROOT/lease-supported"
@@ -178,3 +196,4 @@ test_bootstrap_reports_tasks_axi_when_available
 test_bootstrap_ignores_incompatible_tasks_axi
 test_bootstrap_starts_main_home_supervisor
 test_bootstrap_reports_supervisor_startup_failure
+test_bootstrap_reports_failed_initial_cycle

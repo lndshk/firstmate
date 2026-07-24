@@ -150,7 +150,7 @@ receipt_evidence() { # <id> <status-file> <receipt>; prints <version><tab><time>
   IFS="$(printf '\t')" read -r saved_version saved_time <<EOF
 $(cat "$cursor" 2>/dev/null || true)
 EOF
-  if is_uint "$saved_time"; then
+  if [ "$saved_version" = "$version" ] && is_uint "$saved_time"; then
     observed=$saved_time
   fi
   if [ "$saved_version" != "$version" ] || ! is_uint "$saved_time"; then
@@ -348,11 +348,17 @@ run_loop() {
   done
 }
 
-wait_for_owner() { # <preferred-child-pid>
-  local child=$1 waited=0 pid
+heartbeat_is_ready() { # <not-before-epoch>
+  local not_before=$1 beat
+  beat=$(cat "$HEARTBEAT" 2>/dev/null || true)
+  is_uint "$beat" && [ "$beat" -ge "$not_before" ]
+}
+
+wait_for_owner() { # <preferred-child-pid> <not-before-epoch>
+  local child=$1 not_before=$2 waited=0 pid
   while [ "$waited" -lt "$START_WAIT" ]; do
     pid=$(cat "$PIDFILE" 2>/dev/null || true)
-    if supervisor_pid_is_ours "$pid"; then
+    if supervisor_pid_is_ours "$pid" && heartbeat_is_ready "$not_before"; then
       printf 'supervisor running: pid %s\n' "$pid"
       return 0
     fi
@@ -361,16 +367,17 @@ wait_for_owner() { # <preferred-child-pid>
     waited=$((waited + 1))
   done
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
-  if supervisor_pid_is_ours "$pid"; then
+  if supervisor_pid_is_ours "$pid" && heartbeat_is_ready "$not_before"; then
     printf 'supervisor running: pid %s\n' "$pid"
     return 0
   fi
-  printf 'error: supervisor failed to publish a live PID receipt\n' >&2
+  fm_pid_alive "$child" && kill -TERM "$child" 2>/dev/null || true
+  printf 'error: supervisor failed to publish a fresh heartbeat after its initial cycle\n' >&2
   return 1
 }
 
 start_unlocked() {
-  local pid child
+  local pid child started
   mkdir -p "$STATE"
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
   if supervisor_pid_is_ours "$pid"; then
@@ -381,9 +388,14 @@ start_unlocked() {
     printf 'error: could not clear a foreign supervisor lock\n' >&2
     return 1
   }
+  rm -f "$HEARTBEAT" || {
+    printf 'error: could not clear stale supervisor heartbeat\n' >&2
+    return 1
+  }
+  started=$(now_epoch)
   nohup "$SCRIPT_DIR/fm-supervisor.sh" --run "--owner-token=$OWNER_TOKEN" >> "$LOG" 2>&1 &
   child=$!
-  wait_for_owner "$child"
+  wait_for_owner "$child" "$started"
 }
 
 start() {

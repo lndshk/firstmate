@@ -76,10 +76,12 @@ write_meta busy-after-deadline fm-busy 1
 write_meta unreadable-after-deadline fm-unreadable 1
 write_meta terminal-task fm-gone "$((now + 300))"
 write_meta late-terminal fm-gone 1
+write_meta transitioned-terminal fm-waiting "$((now + 300))"
 write_meta failed-task fm-gone "$((now + 300))"
 write_meta missing-process fm-gone "$((now + 300))"
 printf 'done: PR https://example.test/42 checks green\n' > "$HOME_DIR/state/terminal-task.status"
 printf 'done: late terminal receipt\n' > "$HOME_DIR/state/late-terminal.status"
+printf 'working: on-time receipt\n' > "$HOME_DIR/state/transitioned-terminal.status"
 printf 'failed: deterministic test failure\n' > "$HOME_DIR/state/failed-task.status"
 
 run_supervisor() {
@@ -133,6 +135,17 @@ grep -F $'\tfailed-task\tfailed-receipt\tact on terminal receipt: failed: determ
 [ -s "$HOME_DIR/state/.firstmate-supervisor.receipt-late-terminal-receipt" ] \
   || fail "late terminal receipt timing evidence was not persisted"
 
+transitioned_deadline=$(cut -f2 "$HOME_DIR/state/.firstmate-supervisor.receipt-transitioned-terminal-receipt")
+write_meta transitioned-terminal fm-waiting "$transitioned_deadline"
+sleep 1
+printf 'done: terminal receipt after deadline\n' >> "$HOME_DIR/state/transitioned-terminal.status"
+run_supervisor --once || fail "transitioned terminal receipt cycle failed"
+grep -F $'task\ttransitioned-terminal\tterminal\tterminal receipt recorded\t' "$SNAPSHOT" >/dev/null \
+  || fail "transitioned terminal receipt was not terminal"
+grep -F $'\ttransitioned-terminal\tmissed-receipt-deadline\tobtain the declared receipt or investigate the direct report' \
+  "$HOME_DIR/state/.firstmate-supervisor.escalations" >/dev/null \
+  || fail "late terminal receipt inherited an earlier receipt timestamp"
+
 printf 'needs-decision: choose deterministic recovery\n' >> "$HOME_DIR/state/failed-task.status"
 run_supervisor --once || fail "distinct failed-receipt cycle failed"
 failed_escalations=$(awk -F '\t' '$2 == "failed-task" && $3 == "failed-receipt" { count++ } END { print count + 0 }' \
@@ -142,6 +155,19 @@ run_supervisor --once || fail "failed-receipt dedupe cycle failed"
 failed_escalations=$(awk -F '\t' '$2 == "failed-task" && $3 == "failed-receipt" { count++ } END { print count + 0 }' \
   "$HOME_DIR/state/.firstmate-supervisor.escalations")
 [ "$failed_escalations" -eq 2 ] || fail "unchanged failed receipt was escalated twice"
+
+FAILED_HOME="$TMP_ROOT/failed-home"
+FAILED_BOARD="$TMP_ROOT/failed-board"
+mkdir -p "$FAILED_HOME/state"
+: > "$FAILED_BOARD"
+if failed_start=$(FM_SUPERVISOR_START_WAIT=2 run_supervisor_home "$FAILED_HOME" "$FAILED_BOARD" start 2>&1); then
+  fail "new owner reported ready without a successful initial cycle"
+fi
+printf '%s\n' "$failed_start" \
+  | grep -F 'failed to publish a fresh heartbeat after its initial cycle' >/dev/null \
+  || fail "failed initial cycle did not report missing readiness: $failed_start"
+[ ! -e "$FAILED_HOME/state/.firstmate-supervisor.heartbeat" ] \
+  || fail "failed initial cycle published a readiness heartbeat"
 
 FM_SUPERVISOR_INTERVAL=1 run_supervisor start >/dev/null || fail "supervisor start failed"
 for _ in 1 2 3 4 5; do
