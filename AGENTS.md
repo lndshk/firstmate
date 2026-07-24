@@ -542,7 +542,7 @@ The AFK daemon retains its existing batching and injection behavior.
 
 Every recorded direct report is exactly `active`, `active-unverified`, `stalled`, or `terminal`.
 A visible busy pane or a declared live `process-pid=` is `active`.
-Without verifiable activity or a terminal receipt, it is `active-unverified` until an explicit `receipt-deadline=<Unix epoch>` passes with no receipt, then `stalled`.
+Without verifiable activity or a terminal receipt, it is `active-unverified` until an explicit `receipt-deadline=<Unix epoch>` passes without an on-time receipt, then `stalled`.
 A missing recorded pane/process is `stalled`; a terminal status receipt is `terminal`.
 Missing-process, missed-deadline, and failed/blocked/needs-decision receipt conditions append deduplicated actionable rows to `state/.firstmate-supervisor.escalations`.
 A busy pane remains `active` even when its receipt deadline has passed, while the missed receipt still produces its durable escalation.

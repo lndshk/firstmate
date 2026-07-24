@@ -27,13 +27,17 @@ SNAPSHOT="${FM_SUPERVISOR_SNAPSHOT:-$STATE/firstmate-supervisor.tsv}"
 ESCALATIONS="$STATE/.firstmate-supervisor.escalations"
 LOG="$STATE/.firstmate-supervisor.log"
 ERROR="$STATE/.firstmate-supervisor.error"
-OWNER_HOME=$(cd "$FM_HOME" 2>/dev/null && pwd -P || printf '%s' "$FM_HOME")
-OWNER_TOKEN=$(printf '%s' "$OWNER_HOME" | cksum | awk '{ print $1 "-" $2 }')
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
+
+OWNER_STATE=$(cd "$STATE" 2>/dev/null && pwd -P) || {
+  printf 'error: cannot resolve supervisor state directory: %s\n' "$STATE" >&2
+  exit 1
+}
+OWNER_TOKEN=$(printf '%s' "$OWNER_STATE" | cksum | awk '{ print $1 "-" $2 }')
 
 now_epoch() { date +%s; }
 is_uint() {
@@ -46,6 +50,7 @@ snapshot_field() {
 }
 meta_field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -1; }
 last_receipt() { awk 'NF { line=$0 } END { print line }' "$1" 2>/dev/null; }
+last_receipt_line() { awk 'NF { line=NR } END { print line + 0 }' "$1" 2>/dev/null; }
 
 terminal_receipt() {
   case "$1" in
@@ -106,25 +111,64 @@ escalation_key() {
   printf '%s-%s' "$1" "$2" | tr -c 'A-Za-z0-9_.-' '_'
 }
 
-escalate_once() { # <id> <condition> <action>
-  local id=$1 condition=$2 action=$3 marker
+escalate_once() { # <id> <condition> <action> [evidence]
+  local id=$1 condition=$2 action=$3 marker evidence previous tmp
   marker="$STATE/.firstmate-supervisor.escalated-$(escalation_key "$id" "$condition")"
-  [ -e "$marker" ] && return 0
+  if [ $# -lt 4 ]; then
+    [ -e "$marker" ] && return 0
+  else
+    evidence=$4
+    previous=$(cat "$marker" 2>/dev/null || true)
+    [ "$previous" = "$evidence" ] && return 0
+  fi
   printf '%s\t%s\t%s\t%s\n' \
     "$(now_epoch)" \
     "$(printf '%s' "$id" | clean_field)" \
     "$(printf '%s' "$condition" | clean_field)" \
     "$(printf '%s' "$action" | clean_field)" >> "$ESCALATIONS" || return 1
-  : > "$marker"
+  if [ $# -lt 4 ]; then
+    : > "$marker"
+  else
+    tmp="$marker.tmp.$$"
+    printf '%s\n' "$evidence" > "$tmp" && mv -f "$tmp" "$marker"
+  fi
 }
 
 clear_escalation() { # <id> <condition>
   rm -f "$STATE/.firstmate-supervisor.escalated-$(escalation_key "$1" "$2")"
 }
 
+receipt_evidence() { # <id> <status-file> <receipt>; prints <version><tab><time>
+  local id=$1 receipt_file=$2 receipt=$3 line hash version observed cursor
+  local saved_version saved_time tmp
+  line=$(last_receipt_line "$receipt_file")
+  hash=$(printf '%s' "$receipt" | cksum | awk '{ print $1 "-" $2 }')
+  version="$line-$hash"
+  observed=$(fm_path_mtime "$receipt_file" 2>/dev/null || true)
+  is_uint "$observed" || observed=$(now_epoch)
+  cursor="$STATE/.firstmate-supervisor.receipt-$(escalation_key "$id" receipt)"
+  IFS="$(printf '\t')" read -r saved_version saved_time <<EOF
+$(cat "$cursor" 2>/dev/null || true)
+EOF
+  if is_uint "$saved_time"; then
+    observed=$saved_time
+  fi
+  if [ "$saved_version" != "$version" ] || ! is_uint "$saved_time"; then
+    tmp="$cursor.tmp.$$"
+    printf '%s\t%s\n' "$version" "$observed" > "$tmp" \
+      && mv -f "$tmp" "$cursor" || return 1
+  fi
+  printf '%s\t%s\n' "$version" "$observed"
+}
+
+clear_receipt_evidence() { # <id>
+  rm -f "$STATE/.firstmate-supervisor.receipt-$(escalation_key "$1" receipt)"
+}
+
 classify_meta() { # <meta>; prints one TSV task row
   local meta=$1 id window pid deadline receipt receipt_file now
   local state reason process_condition="" deadline_condition="" receipt_condition=""
+  local pane_activity=idle receipt_version="" receipt_time=""
   id=$(basename "$meta" .meta)
   window=$(meta_field "$meta" window)
   pid=$(meta_field "$meta" process-pid)
@@ -134,6 +178,19 @@ classify_meta() { # <meta>; prints one TSV task row
   receipt_file="$STATE/$id.status"
   receipt=$(last_receipt "$receipt_file")
   now=$(now_epoch)
+
+  if [ -n "$receipt" ]; then
+    IFS="$(printf '\t')" read -r receipt_version receipt_time <<EOF
+$(receipt_evidence "$id" "$receipt_file" "$receipt")
+EOF
+  else
+    clear_receipt_evidence "$id"
+  fi
+  if is_uint "$deadline" && [ "$deadline" -le "$now" ]; then
+    if [ -z "$receipt" ] || ! is_uint "$receipt_time" || [ "$receipt_time" -gt "$deadline" ]; then
+      deadline_condition=missed-receipt-deadline
+    fi
+  fi
 
   if terminal_receipt "$receipt"; then
     state=terminal
@@ -147,19 +204,22 @@ classify_meta() { # <meta>; prints one TSV task row
     elif [ -n "$pid" ] && ! fm_pid_alive "$pid"; then
       process_condition=missing-process
     fi
-    if [ -z "$receipt" ] && is_uint "$deadline" && [ "$deadline" -le "$now" ]; then
-      deadline_condition=missed-receipt-deadline
+    if [ -n "$window" ] && [ -z "$process_condition" ]; then
+      pane_activity=$(fm_pane_busy_state "$window")
     fi
 
     if [ -n "$process_condition" ]; then
       state=stalled
       reason="recorded process is missing"
-    elif [ -n "$window" ] && fm_pane_is_busy "$window"; then
+    elif [ "$pane_activity" = busy ]; then
       state=active
       reason="busy pane observed"
     elif [ -n "$pid" ] && fm_pid_alive "$pid"; then
       state=active
       reason="declared process is alive"
+    elif [ "$pane_activity" = unknown ]; then
+      state=active-unverified
+      reason="pane activity could not be verified"
     elif [ -n "$deadline_condition" ]; then
       state=stalled
       reason="receipt deadline passed"
@@ -183,7 +243,7 @@ classify_meta() { # <meta>; prints one TSV task row
   fi
   if [ -n "$receipt_condition" ]; then
     escalate_once "$id" "$receipt_condition" \
-      "act on terminal receipt: $receipt" || return 1
+      "act on terminal receipt: $receipt" "$receipt_version" || return 1
   else
     clear_escalation "$id" failed-receipt
   fi
@@ -199,15 +259,14 @@ classify_meta() { # <meta>; prints one TSV task row
 }
 
 wake_snapshot() { # prints: <count><tab><last-seq>
-  local wakes count last_seq
+  local wakes count queue_last_seq durable_last_seq
   wakes=$(fm_wake_peek 2>/dev/null || true)
-  if [ -z "$wakes" ]; then
-    printf '0\t0\n'
-    return
-  fi
   count=$(printf '%s\n' "$wakes" | awk 'NF { n++ } END { print n + 0 }')
-  last_seq=$(printf '%s\n' "$wakes" | awk -F '\t' 'NF >= 2 && $2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print max + 0 }')
-  printf '%s\t%s\n' "$count" "$last_seq"
+  queue_last_seq=$(printf '%s\n' "$wakes" | awk -F '\t' 'NF >= 2 && $2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print max + 0 }')
+  durable_last_seq=$(cat "$STATE/.wake-queue.seq" 2>/dev/null || echo 0)
+  is_uint "$durable_last_seq" || durable_last_seq=0
+  [ "$queue_last_seq" -le "$durable_last_seq" ] || durable_last_seq=$queue_last_seq
+  printf '%s\t%s\n' "$count" "$durable_last_seq"
 }
 
 write_snapshot() {

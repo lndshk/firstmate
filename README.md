@@ -249,7 +249,7 @@ These commands are safe to run immediately after merge; `start` is idempotent an
 
 The snapshot is `state/firstmate-supervisor.tsv`, actionable conditions append to `state/.firstmate-supervisor.escalations`, and the generated board is `state/board/board.html`.
 Task state is exactly `active`, `active-unverified`, `stalled`, or `terminal`.
-An optional `receipt-deadline=<absolute Unix epoch>` in task meta makes a missing receipt `stalled` only after that deadline; before it, the task remains `active-unverified`, and a live busy pane remains `active`.
+An optional `receipt-deadline=<absolute Unix epoch>` in task meta makes a missing or late receipt `stalled` only after that deadline; before it, the task remains `active-unverified`, and a live busy pane remains `active` while the missed receipt is escalated separately.
 The supervisor never drains Firstmate's wake queue, changes the backlog, or sends chat, so normal ownership and AFK batching/injection remain unchanged.
 
 ## Development
