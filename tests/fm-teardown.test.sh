@@ -74,10 +74,9 @@ if [ "${FM_TEST_FAIL_TASK_CLEANUP:-0}" = 1 ]; then
     [ "$arg" != "$FM_STATE_OVERRIDE/task-x1.status" ] || exit 23
   done
 fi
-if [ "${FM_TEST_FAIL_MARKER_CLEAR:-0}" = 1 ]; then
+if [ "${FM_TEST_FAIL_META_CLEAR:-0}" = 1 ]; then
   for arg in "$@"; do
-    [ "$arg" != "$FM_STATE_OVERRIDE/.firstmate-supervisor.teardown-task-x1" ] \
-      || exit 24
+    [ "$arg" != "$FM_STATE_OVERRIDE/task-x1.meta" ] || exit 25
   done
 fi
 exec /bin/rm "$@"
@@ -284,8 +283,9 @@ test_teardown_excludes_observer_and_commits_meta_last() {
     || fail "teardown-order: destructive cleanup began without an observer exclusion"
   [ ! -e "$case_dir/state/task-x1.meta" ] \
     || fail "teardown-order: metadata survived successful cleanup"
-  [ ! -e "$case_dir/state/.firstmate-supervisor.teardown-task-x1" ] \
-    || fail "teardown-order: successful cleanup retained its exclusion"
+  grep -F $'\tcomplete\t-' \
+    "$case_dir/state/.firstmate-supervisor.teardown-task-x1" >/dev/null \
+    || fail "teardown-order: successful cleanup did not leave a completion marker"
 
   case_dir=$(make_case teardown-cleanup-failure)
   write_meta "$case_dir" local-only ship
@@ -302,14 +302,19 @@ test_teardown_excludes_observer_and_commits_meta_last() {
   [ -s "$case_dir/state/.firstmate-supervisor.teardown-task-x1" ] \
     || fail "teardown-cleanup-failure: observer exclusion was removed"
 
-  case_dir=$(make_case teardown-marker-clear)
+  case_dir=$(make_case teardown-meta-failure)
   write_meta "$case_dir" local-only ship
-  FM_TEST_FAIL_MARKER_CLEAR=1 run_teardown "$case_dir" >/dev/null \
-    || fail "teardown-marker-clear: non-authoritative marker cleanup failed teardown"
-  [ ! -e "$case_dir/state/task-x1.meta" ] \
-    || fail "teardown-marker-clear: final metadata removal did not commit"
-  [ -s "$case_dir/state/.firstmate-supervisor.teardown-task-x1" ] \
-    || fail "teardown-marker-clear: marker failure was not exercised"
+  set +e
+  FM_TEST_FAIL_META_CLEAR=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 25 "$rc" "teardown-meta-failure"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "teardown-meta-failure: metadata retry anchor was removed"
+  grep -F $'\tcomplete\t-' \
+    "$case_dir/state/.firstmate-supervisor.teardown-task-x1" >/dev/null \
+    || fail "teardown-meta-failure: completed cleanup was not recorded before metadata"
 }
 
 test_local_only_truly_unpushed_refuses() {

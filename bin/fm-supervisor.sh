@@ -33,6 +33,7 @@ case "$TASK_LOCK_WAIT" in ''|*[!0-9]*) TASK_LOCK_WAIT=5 ;; esac
 LOCK="$STATE/.firstmate-supervisor.lock"
 CONTROL_LOCK="$STATE/.firstmate-supervisor.control.lock"
 TASK_STATE_LOCK="$STATE/.firstmate-supervisor.state.lock"
+HEALTH_LOCK="$STATE/.firstmate-supervisor.health.lock"
 PIDFILE="$STATE/.firstmate-supervisor.pid"
 OWNER_RECEIPT="$STATE/.firstmate-supervisor.owner"
 HEARTBEAT="$STATE/.firstmate-supervisor.heartbeat"
@@ -319,15 +320,49 @@ meta_generation() {
 }
 
 task_teardown_excluded() { # <meta> <id>
-  local meta=$1 id=$2 marker expected recorded
+  local meta=$1 id=$2 marker expected record format recorded pid identity progress state condition tab
   marker=$(teardown_marker_path "$id") || return 2
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
     return 1
   fi
   [ -f "$marker" ] || return 2
   expected=$(meta_generation "$meta") || return 2
-  recorded=$(read_optional_file "$marker") || return 2
-  [ "$recorded" = "$expected" ]
+  record=$(read_optional_file "$marker") || return 2
+  tab=$(printf '\t')
+  IFS="$tab" read -r format recorded pid identity progress state condition <<EOF
+$record
+EOF
+  [ "$format" = v1 ] && [ "$recorded" = "$expected" ] || return 1
+  case "$state" in active|failed|complete) return 0 ;; esac
+  return 2
+}
+
+teardown_marker_snapshot() { # <id>
+  local id=$1 marker record format generation pid identity progress state condition tab action
+  marker=$(teardown_marker_path "$id") || return 1
+  record=$(read_optional_file "$marker") || return 1
+  tab=$(printf '\t')
+  IFS="$tab" read -r format generation pid identity progress state condition <<EOF
+$record
+EOF
+  [ "$format" = v1 ] || return 1
+  [ "$state" = failed ] || return 0
+  case "$condition" in
+    owner-exited)
+      action="rerun teardown for the recorded task and inspect interrupted cleanup"
+      ;;
+    owner-unverified)
+      action="inspect legacy teardown evidence before retrying task cleanup"
+      ;;
+    incomplete)
+      action="rerun teardown because its completion marker conflicts with task metadata"
+      ;;
+    *) return 1 ;;
+  esac
+  printf 'escalation\t%s\t%s\t%s\n' \
+    "$(snapshot_field "$id")" \
+    "teardown-$condition" \
+    "$(snapshot_field "$action")"
 }
 
 write_task_identity() {
@@ -387,8 +422,43 @@ garbage_collect_task_state() {
   done
 }
 
+process_identity() { # <pid>
+  local pid=$1 started status
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  fm_pid_alive "$pid" || return 1
+  status=$(LC_ALL=C ps -p "$pid" -o stat= 2>/dev/null) || return 1
+  case "$status" in *Z*) return 1 ;; esac
+  started=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ -n "$started" ] || return 1
+  printf '%s' "$started" | cksum | awk '{ print $1 "-" $2 }'
+}
+
+journal_escalation() { # <epoch> <id> <condition> <action> <token>
+  local epoch=$1 id=$2 condition=$3 action=$4 token=$5 logged_status
+  if escalation_logged "$id" "$condition" "$token"; then
+    return 0
+  else
+    logged_status=$?
+    [ "$logged_status" -eq 1 ] || return 1
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$epoch" "$id" "$condition" "$action" "$token" >> "$ESCALATIONS"
+}
+
+write_reconciled_teardown_marker() { # <path> <generation> <pid> <identity> <progress> <state> <condition>
+  local path=$1 generation=$2 pid=$3 identity=$4 progress=$5 state=$6 condition=$7 tmp
+  tmp="$path.tmp.$$"
+  if ! printf 'v1\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$generation" "$pid" "$identity" "$progress" "$state" "$condition" > "$tmp" \
+    || ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
 reconcile_teardown_markers() {
-  local marker id meta expected recorded
+  local marker id meta expected record format recorded pid identity progress state condition tab
+  local current_identity epoch token action
   for marker in "$STATE"/.firstmate-supervisor.teardown-*; do
     if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
       continue
@@ -397,14 +467,83 @@ reconcile_teardown_markers() {
     id=${marker##*/.firstmate-supervisor.teardown-}
     case "$id" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
     meta="$STATE/$id.meta"
-    if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
+    record=$(read_optional_file "$marker") || return 1
+    tab=$(printf '\t')
+    IFS="$tab" read -r format recorded pid identity progress state condition <<EOF
+$record
+EOF
+    if [ "$format" != v1 ]; then
+      if [ -e "$meta" ] || [ -L "$meta" ]; then
+        [ -f "$meta" ] || return 1
+        expected=$(meta_generation "$meta") || return 1
+        if [ "$record" = "$expected" ]; then
+          epoch=$(fm_path_mtime "$marker") || return 1
+          token=$(printf '%s\t%s\t%s' "$id" "$record" "$epoch" \
+            | cksum | awk '{ print $1 "-" $2 }') || return 1
+          action="inspect legacy teardown evidence before retrying task cleanup"
+          journal_escalation \
+            "$epoch" "$id" teardown-owner-unverified "$action" "$token" || return 1
+          write_reconciled_teardown_marker \
+            "$marker" "$record" 0 - "$epoch" failed owner-unverified || return 1
+          continue
+        fi
+      fi
       rm -f "$marker" || return 1
       continue
     fi
-    [ -f "$meta" ] || return 1
-    expected=$(meta_generation "$meta") || return 1
-    recorded=$(read_optional_file "$marker") || return 1
-    if [ "$recorded" != "$expected" ]; then
+    is_epoch "$progress" || return 1
+    case "$state" in active|failed|complete) ;; *) return 1 ;; esac
+    if [ -e "$meta" ] || [ -L "$meta" ]; then
+      [ -f "$meta" ] || return 1
+      expected=$(meta_generation "$meta") || return 1
+      if [ "$recorded" != "$expected" ]; then
+        rm -f "$marker" || return 1
+        continue
+      fi
+    else
+      expected=
+    fi
+    if [ "$state" = active ]; then
+      current_identity=$(process_identity "$pid" 2>/dev/null || true)
+      if [ -n "$current_identity" ] && [ "$current_identity" = "$identity" ]; then
+        continue
+      fi
+      epoch=$(now_epoch)
+      token=$(printf '%s\t%s\t%s\t%s' "$id" "$recorded" "$pid" "$identity" \
+        | cksum | awk '{ print $1 "-" $2 }') || return 1
+      action="rerun teardown for the recorded task and inspect interrupted cleanup"
+      journal_escalation \
+        "$epoch" "$id" teardown-owner-exited "$action" "$token" || return 1
+      if [ -n "$expected" ]; then
+        write_reconciled_teardown_marker \
+          "$marker" "$recorded" "$pid" "$identity" "$epoch" failed owner-exited \
+          || return 1
+      else
+        rm -f "$marker" || return 1
+      fi
+      continue
+    fi
+    if [ "$state" = complete ]; then
+      if [ -n "$expected" ]; then
+        current_identity=$(process_identity "$pid" 2>/dev/null || true)
+        if [ -n "$current_identity" ] && [ "$current_identity" = "$identity" ]; then
+          continue
+        fi
+        epoch=$(now_epoch)
+        token=$(printf '%s\t%s\tcomplete' "$id" "$recorded" \
+          | cksum | awk '{ print $1 "-" $2 }') || return 1
+        action="rerun teardown because its completion marker conflicts with task metadata"
+        journal_escalation \
+          "$epoch" "$id" teardown-incomplete "$action" "$token" || return 1
+        write_reconciled_teardown_marker \
+          "$marker" "$recorded" "$pid" "$identity" "$epoch" failed incomplete \
+          || return 1
+      else
+        rm -f "$marker" || return 1
+      fi
+      continue
+    fi
+    if [ -z "$expected" ]; then
       rm -f "$marker" || return 1
     fi
   done
@@ -431,7 +570,7 @@ legacy_escalation_identity() { # <path>; prints <id><tab><condition>
 }
 
 reconcile_legacy_escalation() {
-  local path=$1 previous identity id condition action epoch token logged_status tab
+  local path=$1 previous identity id condition action tab
   previous=$(read_optional_file "$path") || return 1
   identity=$(legacy_escalation_identity "$path") || return 1
   IFS="$(printf '\t')" read -r id condition <<EOF
@@ -446,21 +585,7 @@ EOF
     "v1$tab"*)
       reconcile_escalation_marker "$path" "$id" "$condition" "$action" || return 1
       ;;
-    *)
-      epoch=$(fm_path_mtime "$path") || return 1
-      is_epoch "$epoch" || return 1
-      token=$(printf '%s\t%s\t%s' "$id" "$condition" "$previous" \
-        | cksum | awk '{ print $1 "-" $2 }') || return 1
-      if escalation_logged "$id" "$condition" "$token"; then
-        :
-      else
-        logged_status=$?
-        [ "$logged_status" -eq 1 ] || return 1
-        printf '%s\t%s\t%s\t%s\t%s\n' \
-          "$epoch" "$id" "$condition" "$action" "$token" >> "$ESCALATIONS" \
-          || return 1
-      fi
-      ;;
+    *) ;;
   esac
 }
 
@@ -485,20 +610,9 @@ garbage_collect_legacy_task_state() {
   done
 }
 
-write_teardown_marker() { # <meta> <id>
-  local meta=$1 id=$2 marker generation tmp
-  marker=$(teardown_marker_path "$id") || return 1
-  generation=$(meta_generation "$meta") || return 1
-  tmp="$marker.tmp.$$"
-  if ! printf '%s\n' "$generation" > "$tmp" || ! mv -f "$tmp" "$marker"; then
-    rm -f "$tmp"
-    return 1
-  fi
-}
-
 reconcile_legacy_retirement_record() { # <path> <root>
   local path=$1 root=$2 record format epoch id state condition action token
-  local journal_condition logged_status meta
+  local journal_condition
   [ -f "$path" ] || return 1
   record=$(read_optional_file "$path") || return 1
   IFS="$(printf '\t')" read -r \
@@ -519,20 +633,8 @@ EOF
     *) return 1 ;;
   esac
   [ -n "$action" ] && [ "$action" != - ] || return 1
-  if escalation_logged "$id" "$journal_condition" "$token"; then
-    :
-  else
-    logged_status=$?
-    [ "$logged_status" -eq 1 ] || return 1
-    printf '%s\t%s\t%s\t%s\t%s\n' \
-      "$epoch" "$id" "$journal_condition" "$action" "$token" >> "$ESCALATIONS" \
-      || return 1
-  fi
-  meta="$STATE/$id.meta"
-  if [ -e "$meta" ] || [ -L "$meta" ]; then
-    [ -f "$meta" ] || return 1
-    write_teardown_marker "$meta" "$id" || return 1
-  fi
+  journal_escalation \
+    "$epoch" "$id" "$journal_condition" "$action" "$token" || return 1
   rm -f "$path" || return 1
 }
 
@@ -964,7 +1066,7 @@ wake_snapshot() { # prints: <count><tab><last-seq>
 }
 
 write_snapshot() {
-  local tmp rows meta id excluded wake wake_count wake_last_seq status
+  local tmp rows meta id excluded marker_row wake wake_count wake_last_seq status
   tmp="$SNAPSHOT.tmp.$$"
   rows="$tmp.rows"
   rm -f "$rows"
@@ -978,6 +1080,14 @@ write_snapshot() {
     }
     id=$(basename "$meta" .meta)
     if task_teardown_excluded "$meta" "$id"; then
+      marker_row=$(teardown_marker_snapshot "$id") || {
+        rm -f "$tmp" "$rows"
+        return 1
+      }
+      [ -z "$marker_row" ] || printf '%s\n' "$marker_row" >> "$rows" || {
+        rm -f "$tmp" "$rows"
+        return 1
+      }
       continue
     else
       excluded=$?
@@ -1028,6 +1138,16 @@ acquire_task_state_lock() {
   local attempts
   attempts=$((TASK_LOCK_WAIT * 10))
   while ! fm_lock_try_acquire "$TASK_STATE_LOCK"; do
+    [ "$attempts" -gt 0 ] || return 1
+    sleep 0.1
+    attempts=$((attempts - 1))
+  done
+}
+
+acquire_health_lock() {
+  local attempts
+  attempts=$((TASK_LOCK_WAIT * 10))
+  while ! fm_lock_try_acquire "$HEALTH_LOCK"; do
     [ "$attempts" -gt 0 ] || return 1
     sleep 0.1
     attempts=$((attempts - 1))
@@ -1144,35 +1264,45 @@ cycle_locked() {
 }
 
 cycle() {
-  local status release_status
+  local status=0
   mkdir -p "$STATE" || return 1
+  if ! acquire_health_lock; then
+    return 1
+  fi
   if ! acquire_task_state_lock; then
     record_error task-state-lock-failed
-    return 1
+    status=1
+  else
+    cycle_locked
+    status=$?
+    if ! fm_lock_release "$TASK_STATE_LOCK"; then
+      rm -f "$HEARTBEAT" 2>/dev/null || true
+      record_error task-state-unlock-failed
+      status=1
+    fi
   fi
-  cycle_locked
-  status=$?
-  fm_lock_release "$TASK_STATE_LOCK"
-  release_status=$?
-  if [ "$release_status" -ne 0 ]; then
+  if [ "$status" -eq 0 ]; then
+    if ! clear_error_state; then
+      record_error error-clear-failed
+      status=1
+    elif ! write_heartbeat; then
+      record_error heartbeat-write-failed
+      status=1
+    elif ! record_recovery; then
+      rm -f "$HEARTBEAT" 2>/dev/null || true
+      record_error recovery-log-failed
+      status=1
+    fi
+  fi
+  if [ "$status" -ne 0 ]; then
     rm -f "$HEARTBEAT" 2>/dev/null || true
-    record_error task-state-unlock-failed
-    return 1
   fi
-  [ "$status" -eq 0 ] || return "$status"
-  if ! clear_error_state; then
-    record_error error-clear-failed
-    return 1
+  if ! fm_lock_release "$HEALTH_LOCK"; then
+    rm -f "$HEARTBEAT" 2>/dev/null || true
+    record_error cycle-health-unlock-failed
+    status=1
   fi
-  if ! write_heartbeat; then
-    record_error heartbeat-write-failed
-    return 1
-  fi
-  if ! record_recovery; then
-    record_error recovery-log-failed
-    return 1
-  fi
-  return 0
+  return "$status"
 }
 
 run_loop() {

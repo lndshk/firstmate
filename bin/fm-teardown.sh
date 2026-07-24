@@ -88,10 +88,24 @@ meta_generation() {
     | cksum | awk '{ printf "legacy:%s-%s\\n", $1, $2 }'
 }
 
+process_identity() {
+  local pid=$1 started status
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  status=$(LC_ALL=C ps -p "$pid" -o stat= 2>/dev/null) || return 1
+  case "$status" in *Z*) return 1 ;; esac
+  started=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ -n "$started" ] || return 1
+  printf '%s' "$started" | cksum | awk '{ print $1 "-" $2 }'
+}
+
 write_teardown_marker() {
-  local marker=$1 tmp
+  local marker=$1 generation=$2 owner_pid=$3 owner_identity=$4 state=$5 condition=$6 tmp
   tmp="$marker.tmp.$$"
-  if ! meta_generation > "$tmp" || ! mv -f "$tmp" "$marker"; then
+  if ! printf 'v1\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$generation" "$owner_pid" "$owner_identity" "$(date +%s)" "$state" "$condition" \
+    > "$tmp" \
+    || ! mv -f "$tmp" "$marker"; then
     rm -f "$tmp"
     return 1
   fi
@@ -485,7 +499,15 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 TEARDOWN_MARKER="$STATE/.firstmate-supervisor.teardown-$ID"
-write_teardown_marker "$TEARDOWN_MARKER" || {
+TEARDOWN_GENERATION=$(meta_generation)
+TEARDOWN_OWNER_PID=${BASHPID:-$$}
+TEARDOWN_OWNER_IDENTITY=$(process_identity "$TEARDOWN_OWNER_PID") || {
+  echo "error: could not verify teardown owner for $ID" >&2
+  exit 1
+}
+write_teardown_marker \
+  "$TEARDOWN_MARKER" "$TEARDOWN_GENERATION" \
+  "$TEARDOWN_OWNER_PID" "$TEARDOWN_OWNER_IDENTITY" active - || {
   echo "error: could not record teardown in progress for $ID" >&2
   exit 1
 }
@@ -520,19 +542,36 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   ( cd "$PROJ" && treehouse return --force "$WT" )
 fi
 
+write_teardown_marker \
+  "$TEARDOWN_MARKER" "$TEARDOWN_GENERATION" \
+  "$TEARDOWN_OWNER_PID" "$TEARDOWN_OWNER_IDENTITY" active - || {
+  echo "error: could not update teardown progress for $ID" >&2
+  exit 1
+}
 tmux kill-window -t "$T" 2>/dev/null || true
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
   remove_secondmate_registry_entry "$ID"
 fi
+write_teardown_marker \
+  "$TEARDOWN_MARKER" "$TEARDOWN_GENERATION" \
+  "$TEARDOWN_OWNER_PID" "$TEARDOWN_OWNER_IDENTITY" active - || {
+  echo "error: could not update teardown progress for $ID" >&2
+  exit 1
+}
 rm -f \
   "$STATE/$ID.status" \
   "$STATE/$ID.turn-ended" \
   "$STATE/$ID.check.sh" \
   "$STATE/$ID.pi-ext.ts"
+write_teardown_marker \
+  "$TEARDOWN_MARKER" "$TEARDOWN_GENERATION" \
+  "$TEARDOWN_OWNER_PID" "$TEARDOWN_OWNER_IDENTITY" complete - || {
+  echo "error: could not record teardown completion for $ID" >&2
+  exit 1
+}
 rm -f "$STATE/$ID.meta"
-rm -f "$TEARDOWN_MARKER" 2>/dev/null || true
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

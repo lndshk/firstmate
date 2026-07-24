@@ -129,7 +129,10 @@ fm_lock_acquire_wait() {
 fm_lock_release() {
   local lockdir=$1 pid current
   current=${BASHPID:-$$}
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  pid=$(cat "$lockdir/pid" 2>/dev/null) || return 1
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
   [ "$pid" = "$current" ] || return 0
   rm -f "$lockdir/pid" 2>/dev/null || return 1
   rmdir "$lockdir" 2>/dev/null
