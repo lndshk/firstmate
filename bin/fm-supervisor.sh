@@ -27,9 +27,11 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 INTERVAL="${FM_SUPERVISOR_INTERVAL:-15}"
 START_WAIT="${FM_SUPERVISOR_START_WAIT:-5}"
 TASK_LOCK_WAIT="${FM_SUPERVISOR_TASK_LOCK_WAIT:-5}"
+TEARDOWN_STALL_AFTER="${FM_SUPERVISOR_TEARDOWN_STALL_AFTER:-300}"
 case "$INTERVAL" in ''|0|*[!0-9]*) INTERVAL=15 ;; esac
 case "$START_WAIT" in ''|0|*[!0-9]*) START_WAIT=5 ;; esac
 case "$TASK_LOCK_WAIT" in ''|*[!0-9]*) TASK_LOCK_WAIT=5 ;; esac
+case "$TEARDOWN_STALL_AFTER" in ''|0|*[!0-9]*) TEARDOWN_STALL_AFTER=300 ;; esac
 LOCK="$STATE/.firstmate-supervisor.lock"
 CONTROL_LOCK="$STATE/.firstmate-supervisor.control.lock"
 TASK_STATE_LOCK="$STATE/.firstmate-supervisor.state.lock"
@@ -354,6 +356,9 @@ EOF
     owner-unverified)
       action="inspect legacy teardown evidence before retrying task cleanup"
       ;;
+    stalled)
+      action="rerun bin/fm-teardown.sh $id and inspect the stalled cleanup"
+      ;;
     incomplete)
       action="rerun teardown because its completion marker conflicts with task metadata"
       ;;
@@ -458,7 +463,7 @@ write_reconciled_teardown_marker() { # <path> <generation> <pid> <identity> <pro
 
 reconcile_teardown_markers() {
   local marker id meta expected record format recorded pid identity progress state condition tab
-  local current_identity epoch token action
+  local current_identity epoch token action age
   for marker in "$STATE"/.firstmate-supervisor.teardown-*; do
     if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
       continue
@@ -473,10 +478,22 @@ reconcile_teardown_markers() {
 $record
 EOF
     if [ "$format" != v1 ]; then
+      case "$record" in
+        legacy:*)
+          epoch=$(fm_path_mtime "$marker") || return 1
+          token=$(printf '%s\t%s\t%s' "$id" "$record" "$epoch" \
+            | cksum | awk '{ print $1 "-" $2 }') || return 1
+          action="inspect quarantined legacy teardown evidence, then run bin/fm-teardown.sh $id if cleanup remains"
+          journal_escalation \
+            "$epoch" "$id" teardown-owner-unverified "$action" "$token" || return 1
+          rm -f "$marker" || return 1
+          continue
+          ;;
+      esac
       if [ -e "$meta" ] || [ -L "$meta" ]; then
         [ -f "$meta" ] || return 1
         expected=$(meta_generation "$meta") || return 1
-        if [ "$record" = "$expected" ]; then
+        if [ "$record" = "$expected" ] && [ "${record#generation:}" != "$record" ]; then
           epoch=$(fm_path_mtime "$marker") || return 1
           token=$(printf '%s\t%s\t%s' "$id" "$record" "$epoch" \
             | cksum | awk '{ print $1 "-" $2 }') || return 1
@@ -506,6 +523,20 @@ EOF
     if [ "$state" = active ]; then
       current_identity=$(process_identity "$pid" 2>/dev/null || true)
       if [ -n "$current_identity" ] && [ "$current_identity" = "$identity" ]; then
+        epoch=$(now_epoch)
+        age=$((epoch - progress))
+        [ "$age" -ge 0 ] || age=0
+        if [ "$age" -ge "$TEARDOWN_STALL_AFTER" ]; then
+          token=$(printf '%s\t%s\t%s\t%s\t%s\tstalled' \
+            "$id" "$recorded" "$pid" "$identity" "$progress" \
+            | cksum | awk '{ print $1 "-" $2 }') || return 1
+          action="rerun bin/fm-teardown.sh $id and inspect the stalled cleanup"
+          journal_escalation \
+            "$epoch" "$id" teardown-stalled "$action" "$token" || return 1
+          write_reconciled_teardown_marker \
+            "$marker" "$recorded" "$pid" "$identity" "$progress" failed stalled \
+            || return 1
+        fi
         continue
       fi
       epoch=$(now_epoch)
@@ -632,7 +663,7 @@ EOF
       ;;
     *) return 1 ;;
   esac
-  [ -n "$action" ] && [ "$action" != - ] || return 1
+  action="run bin/fm-teardown.sh $id to resume supported task cleanup"
   journal_escalation \
     "$epoch" "$id" "$journal_condition" "$action" "$token" || return 1
   rm -f "$path" || return 1
@@ -1523,12 +1554,21 @@ restart() {
 }
 
 status() {
-  local pid beat beat_age snapshot_age error state rc
+  local pid beat beat_age snapshot_age error state rc teardown_stalled
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
   beat=$(cat "$HEARTBEAT" 2>/dev/null || true)
   beat_age=$(fm_path_age "$HEARTBEAT")
   snapshot_age=$(fm_path_age "$SNAPSHOT")
   error=$(cat "$ERROR" 2>/dev/null || true)
+  teardown_stalled=$(
+    awk -F '\t' '
+      $1 == "escalation" && $3 == "teardown-stalled" {
+        if (found) printf ","
+        printf "%s", $2
+        found=1
+      }
+    ' "$SNAPSHOT" 2>/dev/null || true
+  )
   if supervisor_pid_is_ours "$pid"; then
     if ! supervisor_pid_is_current "$pid"; then
       state=outdated
@@ -1544,12 +1584,16 @@ status() {
       "$state" \
       "$pid" "${beat:-missing}" "$beat_age" "$snapshot_age"
     [ -z "$error" ] || printf ' error=%s' "$(printf '%s' "$error" | clean_field)"
+    [ -z "$teardown_stalled" ] \
+      || printf ' teardown-stalled=%s' "$(printf '%s' "$teardown_stalled" | clean_field)"
     printf '\n'
     return "$rc"
   fi
   printf 'state=stopped pid=%s heartbeat=%s heartbeat-age=%s snapshot-age=%s' \
     "${pid:-none}" "${beat:-missing}" "$beat_age" "$snapshot_age"
   [ -z "$error" ] || printf ' error=%s' "$(printf '%s' "$error" | clean_field)"
+  [ -z "$teardown_stalled" ] \
+    || printf ' teardown-stalled=%s' "$(printf '%s' "$teardown_stalled" | clean_field)"
   printf '\n'
   return 1
 }

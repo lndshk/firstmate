@@ -133,7 +133,7 @@ fm_lock_release() {
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  [ "$pid" = "$current" ] || return 0
+  [ "$pid" = "$current" ] || return 1
   rm -f "$lockdir/pid" 2>/dev/null || return 1
   rmdir "$lockdir" 2>/dev/null
 }
