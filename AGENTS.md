@@ -538,6 +538,10 @@ bin/fm-supervisor.sh start   # ensure the always-on no-chat owner is live
 `bin/fm-supervisor.sh` is the deterministic present-mode safety net.
 It continuously reconciles a locked copy of durable wakes without draining them, inspects only this home's recorded `state/*.meta` direct reports, status receipts, pane/process evidence, and explicit receipt deadlines, then atomically refreshes `state/firstmate-supervisor.tsv` and `state/board/board.html`.
 Supervisor-owned per-task evidence is keyed to each metadata generation and reclaimed when its recorded metadata disappears, so reused task ids cannot inherit prior receipt, deadline, or escalation state.
+Teardown is the sole writer of atomic, generation-identified teardown markers.
+The supervisor only observes those markers: a matching live owner remains active, a missing owner is escalated, and completed or dead-owner orphan evidence is reclaimed after metadata disappears.
+It never creates marker locks, rewrites live teardown evidence, coordinates cleanup, or derives cleanup advice from generation-less legacy markers; ambiguous and temporary marker evidence is ignored.
+Teardown establishes an explicit generation before destructive work and rechecks it before each same-id state cleanup, so a reused id's metadata and receipts are preserved.
 It is an observer and recorder, not another task scheduler: it never mutates the backlog, sends keys, injects chat, changes AFK state, or replaces Firstmate's brief/artifact reconciliation.
 The AFK daemon retains its existing batching and injection behavior.
 
@@ -549,7 +553,7 @@ Every recorded direct report is exactly `active`, `active-unverified`, `stalled`
 4. Otherwise, a missing recorded pane/process or a missed receipt deadline is `stalled`.
 5. Otherwise, the report is `active-unverified` while it awaits verifiable activity or a receipt.
 
-Missing-process, missed-deadline, and failed/blocked/needs-decision receipt conditions independently append deduplicated actionable rows to `state/.firstmate-supervisor.escalations` and remain visible as current escalation records in the snapshot and board until resolved.
+Missing-process, missed-deadline, and failed/blocked/needs-decision receipt conditions independently append deduplicated actionable rows to `state/.firstmate-supervisor.escalations`, enqueue a normal `signal` wake for Firstmate, and remain visible as current escalation records in the snapshot and board until resolved.
 That keeps busy work `active`, unreadable work `active-unverified`, and a late terminal receipt `terminal` while still preserving each separate contract breach as an escalation.
 `receipt-deadline=<epoch>` is an any-receipt contract: the first durable status receipt recorded at or before the unchanged epoch satisfies it permanently, and the snapshot records the satisfying receipt version.
 Generated briefs append the receipt epoch as a tab-separated final field so the supervisor can process every receipt version even when several appends occur between cycles; legacy unstamped receipts retain modification-time compatibility.

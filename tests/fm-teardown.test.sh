@@ -55,11 +55,7 @@ make_case() {
   # run; the ALLOW cases need them so the script can complete cleanly.
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-if [ "${FM_TEST_ASSERT_TEARDOWN_MARKER:-0}" = 1 ]; then
-  [ -s "$FM_STATE_OVERRIDE/.firstmate-supervisor.teardown-task-x1" ] || exit 21
-  [ -f "$FM_STATE_OVERRIDE/task-x1.meta" ] || exit 22
-  printf '%s\n' observed > "$FM_STATE_OVERRIDE/teardown-observed"
-fi
+# `treehouse return --force <wt>`: succeed silently.
 exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
@@ -67,21 +63,7 @@ SH
 # tmux kill-window etc.: succeed silently.
 exit 0
 SH
-  cat > "$fakebin/rm" <<'SH'
-#!/usr/bin/env bash
-if [ "${FM_TEST_FAIL_TASK_CLEANUP:-0}" = 1 ]; then
-  for arg in "$@"; do
-    [ "$arg" != "$FM_STATE_OVERRIDE/task-x1.status" ] || exit 23
-  done
-fi
-if [ "${FM_TEST_FAIL_META_CLEAR:-0}" = 1 ]; then
-  for arg in "$@"; do
-    [ "$arg" != "$FM_STATE_OVERRIDE/task-x1.meta" ] || exit 25
-  done
-fi
-exec /bin/rm "$@"
-SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/rm"
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -152,6 +134,7 @@ worktree=$case_dir/wt
 project=$case_dir/project
 kind=$kind
 mode=$mode
+generation=test-task-x1
 EOF
 }
 
@@ -237,84 +220,6 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
   printf '%s\n' "$out" | grep -F 'keep Done to the 10 most recent' >/dev/null \
     && fail "teardown kept manual Done pruning in compatible tasks-axi prompt: $out"
   pass "teardown prompts tasks-axi backlog refresh when compatible"
-}
-
-test_teardown_leaves_supervisor_state_for_observer() {
-  local case_dir task_dir other_dir
-  case_dir=$(make_case supervisor-state)
-  write_meta "$case_dir" local-only ship
-  task_dir="$case_dir/state/.firstmate-supervisor.task-task-x1"
-  other_dir="$case_dir/state/.firstmate-supervisor.task-task-x10"
-  mkdir -p "$task_dir" "$other_dir"
-  printf 'v2\t1\ttask-x1\tfuture-condition\tinspect future condition\ttoken-1\tevidence\n' \
-    > "$task_dir/escalated-future-condition"
-  : > "$task_dir/receipt"
-  : > "$other_dir/receipt"
-  : > "$case_dir/state/.firstmate-supervisor.receipt-task-x1-receipt"
-  : > "$case_dir/state/.firstmate-supervisor.deadline-task-x1-receipt"
-  : > "$case_dir/state/.firstmate-supervisor.escalated-task-x1-failed-receipt"
-
-  run_teardown "$case_dir" >/dev/null \
-    || fail "supervisor-state: teardown failed"
-
-  [ ! -e "$case_dir/state/task-x1.meta" ] \
-    || fail "supervisor-state: task metadata survived teardown"
-  [ -e "$task_dir/escalated-future-condition" ] \
-    || fail "supervisor-state: teardown mutated supervisor-owned state"
-  [ -e "$case_dir/state/.firstmate-supervisor.receipt-task-x1-receipt" ] \
-    || fail "supervisor-state: teardown removed legacy supervisor state"
-  [ ! -e "$case_dir/state/.firstmate-supervisor.escalations" ] \
-    || fail "supervisor-state: teardown journaled supervisor evidence"
-  [ -e "$other_dir/receipt" ] \
-    || fail "supervisor-state: teardown removed another task's state"
-  pass "teardown leaves supervisor-owned state for observer reclamation"
-}
-
-test_teardown_excludes_observer_and_commits_meta_last() {
-  local case_dir rc
-  case_dir=$(make_case teardown-order)
-  write_meta "$case_dir" local-only ship
-  : > "$case_dir/state/task-x1.status"
-  : > "$case_dir/state/task-x1.check.sh"
-
-  FM_TEST_ASSERT_TEARDOWN_MARKER=1 run_teardown "$case_dir" >/dev/null \
-    || fail "teardown-order: teardown failed"
-  [ -s "$case_dir/state/teardown-observed" ] \
-    || fail "teardown-order: destructive cleanup began without an observer exclusion"
-  [ ! -e "$case_dir/state/task-x1.meta" ] \
-    || fail "teardown-order: metadata survived successful cleanup"
-  grep -F $'\tcomplete\t-' \
-    "$case_dir/state/.firstmate-supervisor.teardown-task-x1" >/dev/null \
-    || fail "teardown-order: successful cleanup did not leave a completion marker"
-
-  case_dir=$(make_case teardown-cleanup-failure)
-  write_meta "$case_dir" local-only ship
-  : > "$case_dir/state/task-x1.status"
-  : > "$case_dir/state/task-x1.check.sh"
-  set +e
-  FM_TEST_FAIL_TASK_CLEANUP=1 \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-  expect_code 23 "$rc" "teardown-cleanup-failure"
-  [ -f "$case_dir/state/task-x1.meta" ] \
-    || fail "teardown-cleanup-failure: metadata retry anchor was removed"
-  [ -s "$case_dir/state/.firstmate-supervisor.teardown-task-x1" ] \
-    || fail "teardown-cleanup-failure: observer exclusion was removed"
-
-  case_dir=$(make_case teardown-meta-failure)
-  write_meta "$case_dir" local-only ship
-  set +e
-  FM_TEST_FAIL_META_CLEAR=1 \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-  expect_code 25 "$rc" "teardown-meta-failure"
-  [ -f "$case_dir/state/task-x1.meta" ] \
-    || fail "teardown-meta-failure: metadata retry anchor was removed"
-  grep -F $'\tcomplete\t-' \
-    "$case_dir/state/.firstmate-supervisor.teardown-task-x1" >/dev/null \
-    || fail "teardown-meta-failure: completed cleanup was not recorded before metadata"
 }
 
 test_local_only_truly_unpushed_refuses() {
@@ -486,6 +391,66 @@ test_abort_failure_does_not_fail_teardown() {
   pass "a failing no-mistakes abort does not fail teardown (best-effort |\\| true)"
 }
 
+test_legacy_meta_gets_generation_and_atomic_marker() {
+  local case_dir marker
+  case_dir=$(make_case legacy-generation)
+  write_meta "$case_dir" local-only ship
+  sed '/^generation=/d' "$case_dir/state/task-x1.meta" \
+    > "$case_dir/state/task-x1.meta.legacy"
+  mv "$case_dir/state/task-x1.meta.legacy" "$case_dir/state/task-x1.meta"
+
+  run_teardown "$case_dir" >/dev/null \
+    || fail "legacy-generation: teardown failed"
+
+  marker="$case_dir/state/.firstmate-supervisor.teardown-task-x1"
+  [ -f "$marker" ] || fail "legacy-generation: completion marker was not written"
+  awk -F '\t' '
+    $1 == "v1" && $2 ~ /^generation:[0-9]+-[0-9]+-[0-9]+$/ && $6 == "complete" {
+      found=1
+    }
+    END { exit !found }
+  ' "$marker" || fail "legacy-generation: marker lacked an explicit generated identity"
+  [ ! -d "$case_dir/state/.firstmate-supervisor.teardown-locks" ] \
+    || fail "legacy-generation: teardown created the obsolete marker-lock subsystem"
+  pass "legacy metadata receives an explicit generation before teardown writes its marker"
+}
+
+test_generation_change_preserves_reused_id_state() {
+  local case_dir real_treehouse marker rc
+  case_dir=$(make_case generation-recheck)
+  write_meta "$case_dir" local-only ship
+  printf 'working: new generation owns this receipt\n' > "$case_dir/state/task-x1.status"
+  real_treehouse="$case_dir/fakebin/treehouse"
+cat > "$real_treehouse" <<SH
+#!/usr/bin/env bash
+: > "$case_dir/treehouse.called"
+sed 's/^generation=.*/generation=reused-task-x1/' \
+  "$case_dir/state/task-x1.meta" > "$case_dir/state/task-x1.meta.new"
+mv "$case_dir/state/task-x1.meta.new" "$case_dir/state/task-x1.meta"
+exit 0
+SH
+  chmod +x "$real_treehouse"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "generation-recheck: generation replacement must stop same-id cleanup"
+  [ -f "$case_dir/treehouse.called" ] \
+    || fail "generation-recheck: external worktree cleanup was skipped"
+  grep -Fx 'generation=reused-task-x1' "$case_dir/state/task-x1.meta" >/dev/null \
+    || fail "generation-recheck: replacement metadata was removed"
+  [ -f "$case_dir/state/task-x1.status" ] \
+    || fail "generation-recheck: replacement status was removed"
+  marker="$case_dir/state/.firstmate-supervisor.teardown-task-x1"
+  awk -F '\t' '$6 == "failed" && $7 == "generation-changed" { found=1 } END { exit !found }' \
+    "$marker" || fail "generation-recheck: mismatch was not recorded by teardown"
+  [ ! -d "$case_dir/state/.firstmate-supervisor.teardown-locks" ] \
+    || fail "generation-recheck: mismatch handling created marker locks"
+  pass "explicit generation rechecks protect reused task ids without supervisor locks"
+}
+
 # A PR-based teardown passes project= back to fm-fleet-sync.sh explicitly.
 # When that project path is a symlink, the canonical checkout must still catch
 # up to origin after teardown. The git wrapper rejects the symlink as a -C path,
@@ -537,12 +502,12 @@ SH
 
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
-test_teardown_leaves_supervisor_state_for_observer
-test_teardown_excludes_observer_and_commits_meta_last
 test_no_mistakes_ship_aborts_run_on_task_branch
 test_scout_does_not_abort_run
 test_local_only_does_not_abort_run
 test_abort_failure_does_not_fail_teardown
+test_legacy_meta_gets_generation_and_atomic_marker
+test_generation_change_preserves_reused_id_state
 test_teardown_syncs_symlink_project_target
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows

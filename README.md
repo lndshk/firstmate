@@ -250,6 +250,8 @@ These commands are safe to run immediately after merge; `start` is idempotent an
 
 The snapshot is `state/firstmate-supervisor.tsv`, current actionable conditions appear in its escalation records and the generated board, and their durable history appends to `state/.firstmate-supervisor.escalations`.
 Per-task supervisor evidence follows the generation recorded by `fm-spawn` and is reclaimed after task metadata disappears.
+Teardown alone writes generation-identified teardown markers and rechecks the generation before same-id state cleanup.
+The supervisor observes matching markers without locks or rewrites, ignores ambiguous legacy and temporary evidence, and reclaims only completed or dead-owner orphan markers after metadata is absent.
 The authoritative state-classification and optional receipt-deadline contract is in the [supervision protocol](AGENTS.md#8-supervision-protocol).
 The supervisor never drains Firstmate's wake queue, changes the backlog, or sends chat, so normal ownership and AFK batching/injection remain unchanged.
 

@@ -34,12 +34,9 @@ SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
-case "$ID" in ''|*[!A-Za-z0-9_.-]*) echo "error: invalid task id: $ID" >&2; exit 2 ;; esac
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
@@ -76,18 +73,37 @@ meta_value() {
 }
 
 meta_generation() {
-  local generation window worktree project home
+  local generation
   generation=$(meta_value "$META" generation)
-  if [ -n "$generation" ]; then
-    printf 'generation:%s\n' "$generation"
+  [ -n "$generation" ] || return 1
+  case "$generation" in *"$(printf '\t')"*|*$'\n'*) return 1 ;; esac
+  printf '%s\n' "$generation"
+}
+
+ensure_explicit_generation() {
+  local generation before current tmp
+  if generation=$(meta_generation); then
+    printf '%s\n' "$generation"
     return
   fi
-  window=$(meta_value "$META" window)
-  worktree=$(meta_value "$META" worktree)
-  project=$(meta_value "$META" project)
-  home=$(meta_value "$META" home)
-  printf '%s\t%s\t%s\t%s' "$window" "$worktree" "$project" "$home" \
-    | cksum | awk '{ printf "legacy:%s-%s\\n", $1, $2 }'
+  before=$(cksum < "$META") || return 1
+  generation="$(date +%s)-$$-${RANDOM:-0}"
+  tmp="$META.generation.$$"
+  if ! cp -p "$META" "$tmp" \
+    || ! printf 'generation=%s\n' "$generation" >> "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  current=$(cksum < "$META") || {
+    rm -f "$tmp"
+    return 1
+  }
+  if [ "$current" != "$before" ] || ! mv -f "$tmp" "$META"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  [ "$(meta_generation)" = "$generation" ] || return 1
+  printf '%s\n' "$generation"
 }
 
 process_identity() {
@@ -101,27 +117,44 @@ process_identity() {
   printf '%s' "$started" | cksum | awk '{ print $1 "-" $2 }'
 }
 
-write_teardown_marker() {
-  local marker=$1 generation=$2 owner_pid=$3 owner_identity=$4 state=$5 condition=$6
-  local tmp lock attempts status=0
-  lock="$STATE/.firstmate-supervisor.teardown-locks/$ID"
-  mkdir -p "$STATE/.firstmate-supervisor.teardown-locks" || return 1
-  attempts=50
-  while ! fm_lock_try_acquire "$lock"; do
-    [ "$attempts" -gt 0 ] || return 1
-    sleep 0.1
-    attempts=$((attempts - 1))
-  done
+write_teardown_marker() { # <state> <condition>
+  local marker tmp
+  marker="$STATE/.firstmate-supervisor.teardown-$ID"
   tmp="$marker.tmp.$$"
-  if ! printf 'v1\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$generation" "$owner_pid" "$owner_identity" "$(date +%s)" "$state" "$condition" \
-    > "$tmp" \
+  if ! printf 'v1\tgeneration:%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$TEARDOWN_GENERATION" \
+    "$TEARDOWN_OWNER_PID" \
+    "$TEARDOWN_OWNER_IDENTITY" \
+    "$(date +%s)" \
+    "$1" \
+    "$2" > "$tmp" \
     || ! mv -f "$tmp" "$marker"; then
     rm -f "$tmp"
-    status=1
+    return 1
   fi
-  fm_lock_release "$lock" || status=1
-  return "$status"
+}
+
+generation_still_matches() {
+  [ -f "$META" ] && [ "$(meta_generation 2>/dev/null || true)" = "$TEARDOWN_GENERATION" ]
+}
+
+require_teardown_generation() {
+  generation_still_matches && return 0
+  write_teardown_marker failed generation-changed || true
+  TEARDOWN_FAILURE_RECORDED=1
+  echo "REFUSED: task $ID generation changed during teardown; current task state was preserved." >&2
+  return 1
+}
+
+teardown_exit() {
+  local status=$1
+  trap - EXIT
+  if [ "${TEARDOWN_MARKER_ACTIVE:-0}" = 1 ] \
+    && [ "${TEARDOWN_FAILURE_RECORDED:-0}" != 1 ] \
+    && [ "$status" -ne 0 ]; then
+    write_teardown_marker failed command-failed || true
+  fi
+  exit "$status"
 }
 
 backlog_refresh_reminder() {
@@ -432,12 +465,7 @@ cleanup_firstmate_home_children() {
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
-    rm -f \
-      "$sub_state/$child_id.meta" \
-      "$sub_state/$child_id.status" \
-      "$sub_state/$child_id.turn-ended" \
-      "$sub_state/$child_id.check.sh" \
-      "$sub_state/$child_id.pi-ext.ts"
+    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts"
   done
 }
 
@@ -511,25 +539,31 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-TEARDOWN_MARKER="$STATE/.firstmate-supervisor.teardown-$ID"
-TEARDOWN_GENERATION=$(meta_generation)
+TEARDOWN_GENERATION=$(ensure_explicit_generation) || {
+  echo "error: could not establish an explicit generation for task $ID" >&2
+  exit 1
+}
 TEARDOWN_OWNER_PID=${BASHPID:-$$}
 TEARDOWN_OWNER_IDENTITY=$(process_identity "$TEARDOWN_OWNER_PID") || {
-  echo "error: could not verify teardown owner for $ID" >&2
+  echo "error: could not verify teardown owner for task $ID" >&2
   exit 1
 }
-write_teardown_marker \
-  "$TEARDOWN_MARKER" "$TEARDOWN_GENERATION" \
-  "$TEARDOWN_OWNER_PID" "$TEARDOWN_OWNER_IDENTITY" active - || {
-  echo "error: could not record teardown in progress for $ID" >&2
+TEARDOWN_MARKER_ACTIVE=0
+TEARDOWN_FAILURE_RECORDED=0
+write_teardown_marker active - || {
+  echo "error: could not record teardown start for task $ID" >&2
   exit 1
 }
+TEARDOWN_MARKER_ACTIVE=1
+trap 'teardown_exit $?' EXIT
 
+require_teardown_generation
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH"
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+require_teardown_generation
 if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # Close the no-mistakes run for this task so a merged/landed run does not linger as a
   # zombie "running" record. Firstmate merges PRs externally (gh-axi), so no-mistakes'
@@ -555,36 +589,23 @@ if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   ( cd "$PROJ" && treehouse return --force "$WT" )
 fi
 
-write_teardown_marker \
-  "$TEARDOWN_MARKER" "$TEARDOWN_GENERATION" \
-  "$TEARDOWN_OWNER_PID" "$TEARDOWN_OWNER_IDENTITY" active - || {
-  echo "error: could not update teardown progress for $ID" >&2
-  exit 1
-}
+require_teardown_generation
 tmux kill-window -t "$T" 2>/dev/null || true
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
   remove_secondmate_registry_entry "$ID"
 fi
-write_teardown_marker \
-  "$TEARDOWN_MARKER" "$TEARDOWN_GENERATION" \
-  "$TEARDOWN_OWNER_PID" "$TEARDOWN_OWNER_IDENTITY" active - || {
-  echo "error: could not update teardown progress for $ID" >&2
+require_teardown_generation
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.pi-ext.ts"
+require_teardown_generation
+write_teardown_marker complete - || {
+  echo "error: could not record teardown completion for task $ID" >&2
   exit 1
 }
-rm -f \
-  "$STATE/$ID.status" \
-  "$STATE/$ID.turn-ended" \
-  "$STATE/$ID.check.sh" \
-  "$STATE/$ID.pi-ext.ts"
-write_teardown_marker \
-  "$TEARDOWN_MARKER" "$TEARDOWN_GENERATION" \
-  "$TEARDOWN_OWNER_PID" "$TEARDOWN_OWNER_IDENTITY" complete - || {
-  echo "error: could not record teardown completion for $ID" >&2
-  exit 1
-}
+require_teardown_generation
 rm -f "$STATE/$ID.meta"
+TEARDOWN_MARKER_ACTIVE=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

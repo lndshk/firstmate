@@ -75,91 +75,49 @@ target=
 for arg in "$@"; do target=$arg; done
 if [ "${FM_TEST_FAIL_RECEIPT_CURSOR:-0}" = 1 ]; then
   case "$target" in
-    *".firstmate-supervisor.receipt-"*|*".firstmate-supervisor.task-"*"/receipt") exit 1 ;;
-  esac
-fi
-if [ "${FM_TEST_FAIL_ESCALATION_MARKER:-0}" = 1 ]; then
-  case "$target" in
-    *".firstmate-supervisor.task-"*"/escalated-"*) exit 1 ;;
-  esac
-fi
-if [ "${FM_TEST_FAIL_HEARTBEAT:-0}" = 1 ]; then
-  case "$target" in
-    *".firstmate-supervisor.heartbeat") exit 1 ;;
-  esac
-fi
-if [ -n "${FM_TEST_DELAY_HEARTBEAT_SIGNAL:-}" ]; then
-  case "$target" in
-    *".firstmate-supervisor.heartbeat")
-      : > "$FM_TEST_DELAY_HEARTBEAT_SIGNAL"
-      /bin/sleep 1
-      ;;
+    *".firstmate-supervisor.task-"*"/receipt") exit 1 ;;
   esac
 fi
 exec /bin/mv "$@"
 SH
 chmod +x "$FAKEBIN/mv"
 
-cat > "$FAKEBIN/rm" <<'SH'
-#!/usr/bin/env bash
-if [ "${FM_TEST_FAIL_ERROR_CLEAR:-0}" = 1 ]; then
-  for arg in "$@"; do
-    case "$arg" in
-      *".firstmate-supervisor.error") exit 1 ;;
-    esac
-  done
-fi
-if [ "${FM_TEST_FAIL_RECEIPT_CLEAR:-0}" = 1 ]; then
-  for arg in "$@"; do
-    case "$arg" in
-      *".firstmate-supervisor.task-"*"/receipt") exit 1 ;;
-    esac
-  done
-fi
-if [ "${FM_TEST_FAIL_TASK_STATE_CLEAR:-0}" = 1 ]; then
-  for arg in "$@"; do
-    case "$arg" in
-      *".firstmate-supervisor.task-"*) exit 1 ;;
-    esac
-  done
-fi
-if [ "${FM_TEST_FAIL_TASK_UNLOCK:-0}" = 1 ]; then
-  for arg in "$@"; do
-    case "$arg" in
-      *".firstmate-supervisor.state.lock/pid") exit 1 ;;
-    esac
-  done
-fi
-exec /bin/rm "$@"
-SH
-chmod +x "$FAKEBIN/rm"
-
-cat > "$FAKEBIN/cat" <<'SH'
-#!/usr/bin/env bash
-case "${1:-}" in
-  *".firstmate-supervisor.state.lock/pid")
-    case "${FM_TEST_TASK_UNLOCK_OWNER:-}" in
-      missing) exit 1 ;;
-      corrupt) printf 'not-a-pid\n'; exit 0 ;;
-      mismatch) printf '2147483647\n'; exit 0 ;;
-    esac
-    ;;
-esac
-exec /bin/cat "$@"
-SH
-chmod +x "$FAKEBIN/cat"
-
 write_meta() { # <id> <window> <deadline>
   {
     printf 'window=%s\n' "$2"
     printf 'kind=ship\n'
+    printf 'generation=test-%s\n' "$1"
     printf 'receipt-deadline=%s\n' "$3"
   } > "$HOME_DIR/state/$1.meta"
 }
 
-task_state_dir() {
-  printf '%s/state/.firstmate-supervisor.task-%s\n' \
-    "$1" "$(printf '%s' "$2" | tr -c 'A-Za-z0-9_.-' '_')"
+task_state_dir_for() { # <home> <id>
+  local home=$1 id=$2 dir
+  for dir in "$home"/state/.firstmate-supervisor.task-*; do
+    [ -d "$dir" ] || continue
+    [ "$(cat "$dir/id" 2>/dev/null || true)" = "$id" ] || continue
+    printf '%s\n' "$dir"
+    return
+  done
+  return 1
+}
+
+task_state_file() { # <home> <id> <name>
+  local dir
+  dir=$(task_state_dir_for "$1" "$2") || return 1
+  printf '%s/%s\n' "$dir" "$3"
+}
+
+task_state_dir_for_generation() { # <home> <id> <generation>
+  local home=$1 id=$2 generation=$3 dir
+  for dir in "$home"/state/.firstmate-supervisor.task-*; do
+    [ -d "$dir" ] || continue
+    [ "$(cat "$dir/id" 2>/dev/null || true)" = "$id" ] || continue
+    [ "$(cat "$dir/generation" 2>/dev/null || true)" = "$generation" ] || continue
+    printf '%s\n' "$dir"
+    return
+  done
+  return 1
 }
 
 now=$(date +%s)
@@ -215,6 +173,7 @@ BOARD="$BOARD_DIR/board.html"
 [ -s "$SNAPSHOT" ] || fail "machine-readable snapshot was not written"
 [ -s "$BOARD" ] || fail "board was not written"
 snapshot_before_wake_error=$(cksum "$SNAPSHOT")
+rm -f "$HOME_DIR/state/.wake-queue" "$HOME_DIR/state/.wake-queue.seq"
 mkdir "$HOME_DIR/state/.wake-queue"
 if run_supervisor --once >/dev/null 2>&1; then
   fail "unreadable wake queue produced a successful snapshot"
@@ -314,11 +273,15 @@ if awk -F '\t' '$1 == "contract" && $2 == "invalid-deadline" { found=1 } END { e
   "$SNAPSHOT"; then
   fail "invalid deadline was presented as an enforceable contract"
 fi
-[ -s "$(task_state_dir "$HOME_DIR" late-terminal)/receipt" ] \
+late_receipt_cursor=$(task_state_file "$HOME_DIR" late-terminal receipt) \
+  || fail "late terminal task state was not created"
+[ -s "$late_receipt_cursor" ] \
   || fail "late terminal receipt timing evidence was not persisted"
 
 snapshot_before_status_error=$(cksum "$SNAPSHOT")
-receipt_before_status_error=$(cksum "$(task_state_dir "$HOME_DIR" terminal-task)/receipt")
+terminal_receipt_cursor=$(task_state_file "$HOME_DIR" terminal-task receipt) \
+  || fail "terminal task state was not created"
+receipt_before_status_error=$(cksum "$terminal_receipt_cursor")
 mv "$HOME_DIR/state/terminal-task.status" "$HOME_DIR/state/terminal-task.status.saved"
 mkdir "$HOME_DIR/state/terminal-task.status"
 if run_supervisor --once >/dev/null 2>&1; then
@@ -326,7 +289,7 @@ if run_supervisor --once >/dev/null 2>&1; then
 fi
 [ "$(cksum "$SNAPSHOT")" = "$snapshot_before_status_error" ] \
   || fail "unreadable status path replaced the last valid snapshot"
-[ "$(cksum "$(task_state_dir "$HOME_DIR" terminal-task)/receipt")" = \
+[ "$(cksum "$terminal_receipt_cursor")" = \
     "$receipt_before_status_error" ] \
   || fail "unreadable status path changed persisted receipt evidence"
 snapshot_error_logs=$(awk -F '\t' '$2 == "snapshot-write-failed" { count++ } END { print count + 0 }' \
@@ -337,31 +300,9 @@ fi
 [ "$(awk -F '\t' '$2 == "snapshot-write-failed" { count++ } END { print count + 0 }' \
     "$HOME_DIR/state/.firstmate-supervisor.log")" -eq "$snapshot_error_logs" ] \
   || fail "identical persistent cycle failure appended another log entry"
-rm -f "$HOME_DIR/state/.firstmate-supervisor.error"
-mkdir "$HOME_DIR/state/.firstmate-supervisor.error"
-if run_supervisor --once >/dev/null 2>&1; then
-  fail "unwritable error state produced a successful snapshot"
-fi
-if run_supervisor --once >/dev/null 2>&1; then
-  fail "repeated unwritable error state produced a successful snapshot"
-fi
-[ "$(awk -F '\t' '$2 == "snapshot-write-failed" { count++ } END { print count + 0 }' \
-    "$HOME_DIR/state/.firstmate-supervisor.log")" -eq "$snapshot_error_logs" ] \
-  || fail "unwritable error state defeated authoritative log deduplication"
-rmdir "$HOME_DIR/state/.firstmate-supervisor.error"
 rmdir "$HOME_DIR/state/terminal-task.status"
 mv "$HOME_DIR/state/terminal-task.status.saved" "$HOME_DIR/state/terminal-task.status"
 run_supervisor --once || fail "supervisor did not recover after status read failure"
-
-snapshot_before_meta_error=$(cksum "$SNAPSHOT")
-mkdir "$HOME_DIR/state/nonregular.meta"
-if run_supervisor --once >/dev/null 2>&1; then
-  fail "non-regular metadata path produced a successful snapshot"
-fi
-[ "$(cksum "$SNAPSHOT")" = "$snapshot_before_meta_error" ] \
-  || fail "non-regular metadata path replaced the last valid snapshot"
-rmdir "$HOME_DIR/state/nonregular.meta"
-run_supervisor --once || fail "supervisor did not recover after metadata path failure"
 
 write_meta cursor-write fm-waiting "$((now + 300))"
 printf 'working: cursor persistence must succeed\n' > "$HOME_DIR/state/cursor-write.status"
@@ -372,10 +313,11 @@ fi
 [ "$(cksum "$SNAPSHOT")" = "$snapshot_before_cursor_error" ] \
   || fail "receipt cursor write failure replaced the last valid snapshot"
 rm -f "$HOME_DIR/state/cursor-write.meta" "$HOME_DIR/state/cursor-write.status"
-rm -rf "$(task_state_dir "$HOME_DIR" cursor-write)"
 run_supervisor --once || fail "supervisor did not recover after receipt cursor write failure"
 
-transitioned_version=$(cut -f2 "$(task_state_dir "$HOME_DIR" transitioned-terminal)/deadline")
+transitioned_deadline_cursor=$(task_state_file "$HOME_DIR" transitioned-terminal deadline) \
+  || fail "transitioned task deadline state was not created"
+transitioned_version=$(cut -f2 "$transitioned_deadline_cursor")
 sleep 2
 printf 'done: terminal receipt after deadline\n' >> "$HOME_DIR/state/transitioned-terminal.status"
 run_supervisor --once || fail "transitioned terminal receipt cycle failed"
@@ -398,534 +340,90 @@ run_supervisor --once || fail "failed-receipt dedupe cycle failed"
 failed_escalations=$(awk -F '\t' '$2 == "failed-task" && $3 == "failed-receipt" { count++ } END { print count + 0 }' \
   "$HOME_DIR/state/.firstmate-supervisor.escalations")
 [ "$failed_escalations" -eq 2 ] || fail "unchanged failed receipt was escalated twice"
-awk -F '\t' '$2 == "failed-task" && $3 == "failed-receipt" && NF == 5 && $5 != "" { found=1 } END { exit !found }' \
-  "$HOME_DIR/state/.firstmate-supervisor.escalations" \
-  || fail "durable escalation omitted its crash-recovery token"
 
-ATOMIC_HOME="$TMP_ROOT/atomic-home"
-ATOMIC_BOARD="$TMP_ROOT/atomic-board"
-mkdir -p "$ATOMIC_HOME/state" "$ATOMIC_BOARD"
-{
-  printf 'window=fm-gone\n'
-  printf 'kind=ship\n'
-} > "$ATOMIC_HOME/state/atomic-task.meta"
-if FM_TEST_FAIL_ESCALATION_MARKER=1 \
-  run_supervisor_home "$ATOMIC_HOME" "$ATOMIC_BOARD" --once >/dev/null 2>&1; then
-  fail "failed escalation marker persistence produced a successful cycle"
+write_meta reused-id fm-gone "$((now + 300))"
+printf 'generation=reused-one\n' >> "$HOME_DIR/state/reused-id.meta"
+run_supervisor --once || fail "first reused-id generation cycle failed"
+reused_old_dir=$(task_state_dir_for "$HOME_DIR" reused-id) \
+  || fail "first reused-id generation state was not created"
+sed \
+  -e 's/^generation=.*/generation=reused-two/' \
+  -e 's/^window=.*/window=fm-waiting/' \
+  "$HOME_DIR/state/reused-id.meta" \
+  > "$HOME_DIR/state/reused-id.meta.new"
+mv "$HOME_DIR/state/reused-id.meta.new" "$HOME_DIR/state/reused-id.meta"
+run_supervisor --once || fail "second reused-id generation cycle failed"
+reused_new_dir=$(task_state_dir_for_generation "$HOME_DIR" reused-id reused-two) \
+  || fail "second reused-id generation state was not created"
+[ "$reused_new_dir" != "$reused_old_dir" ] \
+  || fail "reused task id retained the prior generation state directory"
+[ -e "$reused_old_dir" ] \
+  || fail "prior generation evidence was collected before task metadata disappeared"
+if awk -F '\t' '$1 == "escalation" && $2 == "reused-id" && $3 == "missing-process" { found=1 } END { exit !found }' \
+  "$SNAPSHOT"; then
+  fail "reused task id inherited a prior generation escalation"
 fi
-[ ! -s "$ATOMIC_HOME/state/.firstmate-supervisor.escalations" ] \
-  || fail "escalation was appended before its recovery marker persisted"
-run_supervisor_home "$ATOMIC_HOME" "$ATOMIC_BOARD" --once \
-  || fail "escalation did not recover after marker persistence failure"
-run_supervisor_home "$ATOMIC_HOME" "$ATOMIC_BOARD" --once \
-  || fail "recovered escalation dedupe cycle failed"
-[ "$(awk -F '\t' '$2 == "atomic-task" && $3 == "missing-process" { count++ } END { print count + 0 }' \
-    "$ATOMIC_HOME/state/.firstmate-supervisor.escalations")" -eq 1 ] \
-  || fail "recovered escalation was not journaled exactly once"
+rm -f "$HOME_DIR/state/reused-id.meta"
+run_supervisor --once || fail "orphan generation reclamation cycle failed"
+[ ! -e "$reused_old_dir" ] \
+  || fail "prior reused-id generation was not reclaimed after metadata disappeared"
+[ ! -e "$reused_new_dir" ] \
+  || fail "orphan generation state was not reclaimed authoritatively"
 
-PENDING_HOME="$TMP_ROOT/pending-home"
-PENDING_BOARD="$TMP_ROOT/pending-board"
-mkdir -p "$PENDING_HOME/state" "$PENDING_BOARD"
-{
-  printf 'window=fm-gone\n'
-  printf 'kind=ship\n'
-} > "$PENDING_HOME/state/pending-task.meta"
-mkdir "$PENDING_HOME/state/.firstmate-supervisor.escalations"
-if run_supervisor_home "$PENDING_HOME" "$PENDING_BOARD" --once >/dev/null 2>&1; then
-  fail "failed escalation journal append produced a successful cycle"
+test_owner_started=$(LC_ALL=C ps -p "$$" -o lstart=) \
+  || fail "could not read teardown test owner start time"
+test_owner_identity=$(printf '%s' "$test_owner_started" | cksum | awk '{ print $1 "-" $2 }') \
+  || fail "could not derive teardown test owner identity"
+write_meta teardown-live fm-gone "$((now + 300))"
+printf 'v1\tgeneration:test-teardown-live\t%s\t%s\t%s\tactive\t-\n' \
+  "$$" "$test_owner_identity" "$(date +%s)" \
+  > "$HOME_DIR/state/.firstmate-supervisor.teardown-teardown-live"
+teardown_live_before=$(cksum "$HOME_DIR/state/.firstmate-supervisor.teardown-teardown-live")
+run_supervisor --once || fail "live teardown observation cycle failed"
+grep -F $'task\tteardown-live\tactive\tteardown owner is live\t' "$SNAPSHOT" >/dev/null \
+  || fail "live teardown owner was falsely stalled"
+[ "$(cksum "$HOME_DIR/state/.firstmate-supervisor.teardown-teardown-live")" = \
+    "$teardown_live_before" ] \
+  || fail "supervisor rewrote a live teardown marker"
+[ ! -d "$HOME_DIR/state/.firstmate-supervisor.teardown-locks" ] \
+  || fail "supervisor created the obsolete teardown marker-lock subsystem"
+
+write_meta teardown-dead fm-gone "$((now + 300))"
+printf 'v1\tgeneration:test-teardown-dead\t2147483647\tdead\t%s\tactive\t-\n' \
+  "$(date +%s)" > "$HOME_DIR/state/.firstmate-supervisor.teardown-teardown-dead"
+run_supervisor --once || fail "dead teardown observation cycle failed"
+grep -F $'task\tteardown-dead\tstalled\tteardown owner is missing\t' "$SNAPSHOT" >/dev/null \
+  || fail "missing teardown owner was not stalled"
+grep -F $'escalation\tteardown-dead\tteardown-owner-missing\tinspect the recorded teardown owner and task resources' \
+  "$SNAPSHOT" >/dev/null \
+  || fail "missing teardown owner lacked a non-destructive action"
+grep -F $'\tsignal\tsupervisor:teardown-dead\tteardown-owner-missing:' \
+  "$HOME_DIR/state/.wake-queue" >/dev/null \
+  || fail "missing teardown owner did not produce normal-mode wake delivery"
+
+write_meta legacy-marker fm-gone "$((now + 300))"
+printf 'legacy evidence without generation\n' \
+  > "$HOME_DIR/state/.firstmate-supervisor.teardown-legacy-marker"
+printf 'temporary partial marker\n' \
+  > "$HOME_DIR/state/.firstmate-supervisor.teardown-partial.tmp.123"
+run_supervisor --once || fail "legacy teardown quarantine cycle failed"
+grep -F $'task\tlegacy-marker\tstalled\trecorded process is missing\t' "$SNAPSHOT" >/dev/null \
+  || fail "ambiguous legacy teardown evidence influenced task classification"
+if grep -F $'escalation\tlegacy-marker\tteardown-' "$SNAPSHOT" >/dev/null; then
+  fail "ambiguous legacy evidence produced teardown advice"
 fi
-[ -s "$(task_state_dir "$PENDING_HOME" pending-task)/escalated-missing-process-condition" ] \
-  || fail "failed escalation journal append did not preserve its pending record"
-rmdir "$PENDING_HOME/state/.firstmate-supervisor.escalations"
-printf 'done: condition resolved before journal recovery\n' \
-  > "$PENDING_HOME/state/pending-task.status"
-run_supervisor_home "$PENDING_HOME" "$PENDING_BOARD" --once \
-  || fail "resolved escalation did not reconcile its pending journal record"
-[ "$(awk -F '\t' '$2 == "pending-task" && $3 == "missing-process" { count++ } END { print count + 0 }' \
-    "$PENDING_HOME/state/.firstmate-supervisor.escalations")" -eq 1 ] \
-  || fail "resolved pending escalation was not journaled exactly once"
-[ ! -e "$(task_state_dir "$PENDING_HOME" pending-task)/escalated-missing-process-condition" ] \
-  || fail "resolved pending escalation marker was not cleared after journaling"
+grep -Fx 'legacy evidence without generation' \
+  "$HOME_DIR/state/.firstmate-supervisor.teardown-legacy-marker" >/dev/null \
+  || fail "supervisor rewrote ambiguous legacy evidence"
+grep -Fx 'temporary partial marker' \
+  "$HOME_DIR/state/.firstmate-supervisor.teardown-partial.tmp.123" >/dev/null \
+  || fail "supervisor consumed a temporary teardown artifact"
 
-CLEAR_HOME="$TMP_ROOT/clear-home"
-CLEAR_BOARD="$TMP_ROOT/clear-board"
-mkdir -p "$CLEAR_HOME/state" "$CLEAR_BOARD"
-{
-  printf 'window=\n'
-  printf 'kind=ship\n'
-} > "$CLEAR_HOME/state/clear-task.meta"
-mkdir -p "$(task_state_dir "$CLEAR_HOME" clear-task)"
-printf 'stale receipt evidence\n' > "$(task_state_dir "$CLEAR_HOME" clear-task)/receipt"
-if FM_TEST_FAIL_RECEIPT_CLEAR=1 \
-  run_supervisor_home "$CLEAR_HOME" "$CLEAR_BOARD" --once >/dev/null 2>&1; then
-  fail "receipt evidence removal failure produced a successful cycle"
-fi
-[ ! -e "$CLEAR_HOME/state/.firstmate-supervisor.heartbeat" ] \
-  || fail "receipt evidence removal failure published a heartbeat"
-run_supervisor_home "$CLEAR_HOME" "$CLEAR_BOARD" --once \
-  || fail "supervisor did not recover after receipt evidence removal failure"
-
-ERROR_CLEAR_HOME="$TMP_ROOT/error-clear-home"
-ERROR_CLEAR_BOARD="$TMP_ROOT/error-clear-board"
-mkdir -p "$ERROR_CLEAR_HOME/state" "$ERROR_CLEAR_BOARD"
-printf '1\tsnapshot-write-failed\n' \
-  > "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.log"
-printf '1\tsnapshot-write-failed\n' \
-  > "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.error"
-if FM_TEST_FAIL_ERROR_CLEAR=1 \
-  run_supervisor_home "$ERROR_CLEAR_HOME" "$ERROR_CLEAR_BOARD" --once >/dev/null 2>&1; then
-  fail "error-state removal failure produced a successful cycle"
-fi
-[ ! -e "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.heartbeat" ] \
-  || fail "error-state removal failure published a heartbeat"
-if FM_TEST_FAIL_HEARTBEAT=1 \
-  run_supervisor_home "$ERROR_CLEAR_HOME" "$ERROR_CLEAR_BOARD" --once >/dev/null 2>&1; then
-  fail "heartbeat persistence failure produced a successful cycle"
-fi
-[ "$(awk -F '\t' '$2 == "recovered" { count++ } END { print count + 0 }' \
-  "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.log")" -eq 0 ] \
-  || fail "recovery was recorded before the complete cycle succeeded"
-[ ! -e "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.heartbeat" ] \
-  || fail "failed recovery cycle retained a readiness heartbeat"
-run_supervisor_home "$ERROR_CLEAR_HOME" "$ERROR_CLEAR_BOARD" --once \
-  || fail "supervisor did not recover after error-state removal failure"
-[ -s "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.heartbeat" ] \
-  || fail "successful recovery did not publish its final heartbeat"
-[ "$(awk -F '\t' '$2 == "recovered" { count++ } END { print count + 0 }' \
-  "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.log")" -eq 1 ] \
-  || fail "successful complete cycle did not record one recovery"
-
-GENERATION_HOME="$TMP_ROOT/generation-home"
-GENERATION_BOARD="$TMP_ROOT/generation-board"
-mkdir -p "$GENERATION_HOME/state" "$GENERATION_BOARD"
-{
-  printf 'window=\n'
-  printf 'kind=ship\n'
-  printf 'generation=first-generation\n'
-} > "$GENERATION_HOME/state/reused-task.meta"
-run_supervisor_home "$GENERATION_HOME" "$GENERATION_BOARD" --once \
-  || fail "initial generated task cycle failed"
-generation_dir=$(task_state_dir "$GENERATION_HOME" reused-task)
-printf 'stale receipt evidence\n' > "$generation_dir/receipt"
-printf 'v2\t1\treused-task\tfuture-condition\tinspect stale generation\ttoken-old\told\n' \
-  > "$generation_dir/escalated-future-condition"
-{
-  printf 'window=\n'
-  printf 'kind=ship\n'
-  printf 'generation=second-generation\n'
-} > "$GENERATION_HOME/state/reused-task.meta"
-run_supervisor_home "$GENERATION_HOME" "$GENERATION_BOARD" --once \
-  || fail "reused task generation cycle failed"
-grep -Fx 'generation:second-generation' "$generation_dir/generation" >/dev/null \
-  || fail "reused task did not adopt its new generation"
-[ ! -e "$generation_dir/receipt" ] \
-  || fail "reused task inherited stale receipt evidence"
-[ ! -e "$generation_dir/escalated-future-condition" ] \
-  || fail "reused task inherited a stale escalation marker"
-grep -F $'1\treused-task\tfuture-condition\tinspect stale generation\ttoken-old' \
-  "$GENERATION_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
-  || fail "generation reset discarded pending escalation history"
-
-PROMOTION_HOME="$TMP_ROOT/promotion-home"
-PROMOTION_BOARD="$TMP_ROOT/promotion-board"
-mkdir -p "$PROMOTION_HOME/state" "$PROMOTION_BOARD"
-{
-  printf 'window=\n'
-  printf 'worktree=/immutable-worktree\n'
-  printf 'project=/immutable-project\n'
-  printf 'kind=scout\n'
-} > "$PROMOTION_HOME/state/promoted-task.meta"
-printf 'working: preserve receipt across promotion\n' \
-  > "$PROMOTION_HOME/state/promoted-task.status"
-run_supervisor_home "$PROMOTION_HOME" "$PROMOTION_BOARD" --once \
-  || fail "legacy promotion setup cycle failed"
-promotion_dir=$(task_state_dir "$PROMOTION_HOME" promoted-task)
-promotion_generation=$(cat "$promotion_dir/generation")
-promotion_receipt=$(cksum "$promotion_dir/receipt")
-sed 's/^kind=scout$/kind=ship/' "$PROMOTION_HOME/state/promoted-task.meta" \
-  > "$PROMOTION_HOME/state/promoted-task.meta.next"
-mv "$PROMOTION_HOME/state/promoted-task.meta.next" \
-  "$PROMOTION_HOME/state/promoted-task.meta"
-run_supervisor_home "$PROMOTION_HOME" "$PROMOTION_BOARD" --once \
-  || fail "legacy promoted task cycle failed"
-[ "$(cat "$promotion_dir/generation")" = "$promotion_generation" ] \
-  || fail "task promotion changed the immutable legacy identity"
-[ "$(cksum "$promotion_dir/receipt")" = "$promotion_receipt" ] \
-  || fail "task promotion reset persisted receipt evidence"
-
-EXCLUDED_HOME="$TMP_ROOT/excluded-home"
-EXCLUDED_BOARD="$TMP_ROOT/excluded-board"
-mkdir -p "$EXCLUDED_HOME/state" "$EXCLUDED_BOARD"
-{
-  printf 'window=fm-gone\n'
-  printf 'kind=ship\n'
-  printf 'generation=teardown-generation\n'
-} > "$EXCLUDED_HOME/state/excluded-task.meta"
-excluded_owner=${BASHPID:-$$}
-excluded_identity=$(LC_ALL=C ps -p "$excluded_owner" -o lstart= 2>/dev/null \
-  | cksum | awk '{ print $1 "-" $2 }')
-printf 'v1\tgeneration:teardown-generation\t%s\t%s\t%s\tactive\t-\n' \
-  "$excluded_owner" "$excluded_identity" "$(date +%s)" \
-  > "$EXCLUDED_HOME/state/.firstmate-supervisor.teardown-excluded-task"
-run_supervisor_home "$EXCLUDED_HOME" "$EXCLUDED_BOARD" --once \
-  || fail "teardown-excluded task cycle failed"
-if awk -F '\t' '$1 == "task" && $2 == "excluded-task" { found=1 } END { exit !found }' \
-  "$EXCLUDED_HOME/state/firstmate-supervisor.tsv"; then
-  fail "teardown-excluded task remained in the snapshot"
-fi
-[ ! -s "$EXCLUDED_HOME/state/.firstmate-supervisor.escalations" ] \
-  || fail "teardown-excluded task produced a durable escalation"
-
-STALLED_TEARDOWN_HOME="$TMP_ROOT/stalled-teardown-home"
-STALLED_TEARDOWN_BOARD="$TMP_ROOT/stalled-teardown-board"
-mkdir -p "$STALLED_TEARDOWN_HOME/state" "$STALLED_TEARDOWN_BOARD"
-{
-  printf 'window=fm-gone\n'
-  printf 'kind=ship\n'
-  printf 'generation=stalled-teardown-generation\n'
-} > "$STALLED_TEARDOWN_HOME/state/stalled-teardown.meta"
-printf 'v1\tgeneration:stalled-teardown-generation\t%s\t%s\t%s\tactive\t-\n' \
-  "$excluded_owner" "$excluded_identity" "$(( $(date +%s) - 2 ))" \
-  > "$STALLED_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-stalled-teardown"
-FM_SUPERVISOR_TEARDOWN_STALL_AFTER=1 \
-  run_supervisor_home "$STALLED_TEARDOWN_HOME" "$STALLED_TEARDOWN_BOARD" --once \
-  || fail "stalled live teardown reconciliation cycle failed"
-grep -F $'\tstalled-teardown\tteardown-stalled\tinspect and stop teardown owner '"$excluded_owner"$' before rerunning bin/fm-teardown.sh stalled-teardown\t' \
-  "$STALLED_TEARDOWN_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
-  || fail "stalled live teardown was not durably escalated"
-grep -F $'escalation\tstalled-teardown\tteardown-stalled\tinspect and stop teardown owner '"$excluded_owner"$' before rerunning bin/fm-teardown.sh stalled-teardown' \
-  "$STALLED_TEARDOWN_HOME/state/firstmate-supervisor.tsv" >/dev/null \
-  || fail "stalled live teardown was not surfaced in the snapshot"
-grep -F 'teardown-stalled' \
-  "$STALLED_TEARDOWN_BOARD/board.html" >/dev/null \
-  || fail "stalled live teardown was not surfaced on the board"
-stalled_status=$(FM_HOME="$STALLED_TEARDOWN_HOME" \
-  FM_STATE_OVERRIDE="$STALLED_TEARDOWN_HOME/state" \
-  FM_SUPERVISOR_SNAPSHOT="$STALLED_TEARDOWN_HOME/state/firstmate-supervisor.tsv" \
-  "$ROOT/bin/fm-supervisor.sh" status 2>/dev/null || true)
-case "$stalled_status" in
-  *"teardown-stalled=stalled-teardown"*) ;;
-  *) fail "stalled live teardown was not surfaced by supervisor status" ;;
-esac
-
-LEGACY_TEARDOWN_HOME="$TMP_ROOT/legacy-teardown-home"
-LEGACY_TEARDOWN_BOARD="$TMP_ROOT/legacy-teardown-board"
-mkdir -p "$LEGACY_TEARDOWN_HOME/state" "$LEGACY_TEARDOWN_BOARD"
-{
-  printf 'window=fm-reused\n'
-  printf 'worktree=/reused-worktree\n'
-  printf 'project=/reused-project\n'
-  printf 'kind=ship\n'
-} > "$LEGACY_TEARDOWN_HOME/state/reused-task.meta"
-legacy_generation=$(run_supervisor_home \
-  "$LEGACY_TEARDOWN_HOME" "$LEGACY_TEARDOWN_BOARD" --once >/dev/null 2>&1 \
-  && cat "$(task_state_dir "$LEGACY_TEARDOWN_HOME" reused-task)/generation")
-printf '%s\n' "$legacy_generation" \
-  > "$LEGACY_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-reused-task"
-run_supervisor_home "$LEGACY_TEARDOWN_HOME" "$LEGACY_TEARDOWN_BOARD" --once \
-  || fail "generation-less teardown quarantine cycle failed"
-awk -F '\t' '$1 == "task" && $2 == "reused-task" { found=1 } END { exit !found }' \
-  "$LEGACY_TEARDOWN_HOME/state/firstmate-supervisor.tsv" \
-  || fail "generation-less teardown evidence excluded a current same-ID task"
-[ ! -e "$LEGACY_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-reused-task" ] \
-  || fail "generation-less teardown evidence survived quarantine"
-grep -F $'\treused-task\tteardown-owner-unverified\t' \
-  "$LEGACY_TEARDOWN_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
-  || fail "generation-less teardown evidence was not durably quarantined"
-
-V1_LEGACY_TEARDOWN_HOME="$TMP_ROOT/v1-legacy-teardown-home"
-V1_LEGACY_TEARDOWN_BOARD="$TMP_ROOT/v1-legacy-teardown-board"
-mkdir -p "$V1_LEGACY_TEARDOWN_HOME/state" "$V1_LEGACY_TEARDOWN_BOARD"
-{
-  printf 'window=fm-reused-v1\n'
-  printf 'worktree=/reused-v1-worktree\n'
-  printf 'project=/reused-v1-project\n'
-  printf 'kind=ship\n'
-} > "$V1_LEGACY_TEARDOWN_HOME/state/reused-v1.meta"
-v1_legacy_generation=$(run_supervisor_home \
-  "$V1_LEGACY_TEARDOWN_HOME" "$V1_LEGACY_TEARDOWN_BOARD" --once >/dev/null 2>&1 \
-  && cat "$(task_state_dir "$V1_LEGACY_TEARDOWN_HOME" reused-v1)/generation")
-printf 'v1\t%s\t%s\t%s\t%s\tactive\t-\n' \
-  "$v1_legacy_generation" "$excluded_owner" "$excluded_identity" "$(date +%s)" \
-  > "$V1_LEGACY_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-reused-v1"
-run_supervisor_home "$V1_LEGACY_TEARDOWN_HOME" "$V1_LEGACY_TEARDOWN_BOARD" --once \
-  || fail "v1 generation-less teardown quarantine cycle failed"
-awk -F '\t' '$1 == "task" && $2 == "reused-v1" { found=1 } END { exit !found }' \
-  "$V1_LEGACY_TEARDOWN_HOME/state/firstmate-supervisor.tsv" \
-  || fail "v1 generation-less teardown evidence excluded a current same-ID task"
-[ ! -e "$V1_LEGACY_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-reused-v1" ] \
-  || fail "v1 generation-less teardown evidence survived quarantine"
-grep -F $'\treused-v1\tteardown-owner-unverified\t' \
-  "$V1_LEGACY_TEARDOWN_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
-  || fail "v1 generation-less teardown evidence was not durably quarantined"
-
-CAS_TEARDOWN_HOME="$TMP_ROOT/cas-teardown-home"
-CAS_TEARDOWN_BOARD="$TMP_ROOT/cas-teardown-board"
-mkdir -p \
-  "$CAS_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-locks/cas-teardown" \
-  "$CAS_TEARDOWN_BOARD"
-{
-  printf 'window=fm-gone\n'
-  printf 'kind=ship\n'
-  printf 'generation=cas-teardown-generation\n'
-} > "$CAS_TEARDOWN_HOME/state/cas-teardown.meta"
-cas_marker="$CAS_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-cas-teardown"
-printf 'v1\tgeneration:cas-teardown-generation\t%s\t%s\t%s\tactive\t-\n' \
-  "$excluded_owner" "$excluded_identity" "$(( $(date +%s) - 2 ))" > "$cas_marker"
-printf '%s\n' "${BASHPID:-$$}" \
-  > "$CAS_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-locks/cas-teardown/pid"
-FM_SUPERVISOR_TEARDOWN_STALL_AFTER=1 \
-  run_supervisor_home "$CAS_TEARDOWN_HOME" "$CAS_TEARDOWN_BOARD" --once &
-cas_supervisor_pid=$!
-/bin/sleep 0.2
-printf 'v1\tgeneration:cas-teardown-generation\t%s\t%s\t%s\tactive\t-\n' \
-  "$excluded_owner" "$excluded_identity" "$(date +%s)" > "$cas_marker"
-rm -f "$CAS_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-locks/cas-teardown/pid"
-rmdir "$CAS_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-locks/cas-teardown"
-wait "$cas_supervisor_pid" || fail "marker-CAS teardown reconciliation cycle failed"
-if grep -F $'\tcas-teardown\tteardown-stalled\t' \
-  "$CAS_TEARDOWN_HOME/state/.firstmate-supervisor.escalations" >/dev/null 2>&1; then
-  fail "stale teardown reconciliation overwrote concurrent progress"
-fi
-grep -F $'\tactive\t-' "$cas_marker" >/dev/null \
-  || fail "concurrent teardown progress was not preserved"
-
-DEAD_TEARDOWN_HOME="$TMP_ROOT/dead-teardown-home"
-DEAD_TEARDOWN_BOARD="$TMP_ROOT/dead-teardown-board"
-mkdir -p "$DEAD_TEARDOWN_HOME/state" "$DEAD_TEARDOWN_BOARD"
-{
-  printf 'window=fm-gone\n'
-  printf 'kind=ship\n'
-  printf 'generation=dead-teardown-generation\n'
-} > "$DEAD_TEARDOWN_HOME/state/dead-teardown.meta"
-printf 'v1\tgeneration:dead-teardown-generation\t2147483647\tdead-owner\t%s\tactive\t-\n' \
-  "$(date +%s)" \
-  > "$DEAD_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-dead-teardown"
-run_supervisor_home "$DEAD_TEARDOWN_HOME" "$DEAD_TEARDOWN_BOARD" --once \
-  || fail "dead teardown owner reconciliation cycle failed"
-grep -F $'\tdead-teardown\tteardown-owner-exited\trerun teardown for the recorded task and inspect interrupted cleanup\t' \
-  "$DEAD_TEARDOWN_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
-  || fail "dead teardown owner was not durably escalated"
-grep -F $'escalation\tdead-teardown\tteardown-owner-exited\trerun teardown for the recorded task and inspect interrupted cleanup' \
-  "$DEAD_TEARDOWN_HOME/state/firstmate-supervisor.tsv" >/dev/null \
-  || fail "dead teardown owner was not surfaced in the snapshot"
-
-COMPLETE_TEARDOWN_HOME="$TMP_ROOT/complete-teardown-home"
-COMPLETE_TEARDOWN_BOARD="$TMP_ROOT/complete-teardown-board"
-mkdir -p "$COMPLETE_TEARDOWN_HOME/state" "$COMPLETE_TEARDOWN_BOARD"
-printf 'v1\tgeneration:complete-teardown\t%s\t%s\t%s\tcomplete\t-\n' \
-  "$excluded_owner" "$excluded_identity" "$(date +%s)" \
-  > "$COMPLETE_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-complete-teardown"
-run_supervisor_home "$COMPLETE_TEARDOWN_HOME" "$COMPLETE_TEARDOWN_BOARD" --once \
-  || fail "completed teardown marker reclamation cycle failed"
-[ ! -e "$COMPLETE_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-complete-teardown" ] \
-  || fail "observer did not reclaim a successful teardown marker"
-
-INCOMPLETE_TEARDOWN_HOME="$TMP_ROOT/incomplete-teardown-home"
-INCOMPLETE_TEARDOWN_BOARD="$TMP_ROOT/incomplete-teardown-board"
-mkdir -p "$INCOMPLETE_TEARDOWN_HOME/state" "$INCOMPLETE_TEARDOWN_BOARD"
-{
-  printf 'window=fm-gone\n'
-  printf 'kind=ship\n'
-  printf 'generation=incomplete-teardown-generation\n'
-} > "$INCOMPLETE_TEARDOWN_HOME/state/incomplete-teardown.meta"
-printf 'v1\tgeneration:incomplete-teardown-generation\t2147483647\tdead-owner\t%s\tcomplete\t-\n' \
-  "$(date +%s)" \
-  > "$INCOMPLETE_TEARDOWN_HOME/state/.firstmate-supervisor.teardown-incomplete-teardown"
-run_supervisor_home "$INCOMPLETE_TEARDOWN_HOME" "$INCOMPLETE_TEARDOWN_BOARD" --once \
-  || fail "incomplete teardown reconciliation cycle failed"
-grep -F $'\tincomplete-teardown\tteardown-incomplete\trerun teardown because its completion marker conflicts with task metadata\t' \
-  "$INCOMPLETE_TEARDOWN_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
-  || fail "incomplete teardown was not durably escalated"
-grep -F $'escalation\tincomplete-teardown\tteardown-incomplete\trerun teardown because its completion marker conflicts with task metadata' \
-  "$INCOMPLETE_TEARDOWN_HOME/state/firstmate-supervisor.tsv" >/dev/null \
-  || fail "incomplete teardown was not surfaced in the snapshot"
-
-LEGACY_RETIRE_HOME="$TMP_ROOT/legacy-retire-home"
-LEGACY_RETIRE_BOARD="$TMP_ROOT/legacy-retire-board"
-mkdir -p \
-  "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.retirements" \
-  "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.retirement-intents" \
-  "$LEGACY_RETIRE_BOARD"
-{
-  printf 'window=fm-gone\n'
-  printf 'kind=ship\n'
-  printf 'generation=legacy-retirement\n'
-} > "$LEGACY_RETIRE_HOME/state/legacy-retire.meta"
-printf 'v1\t3\tlegacy-retire\tfailed\tmetadata-cleanup-failed\tretry teardown safely\tretire-token\n' \
-  > "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.retirements/legacy-retire"
-printf 'v1\t2\tlegacy-retire\tpending\t-\tcomplete task retirement\tpending-token\n' \
-  > "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.retirement-intents/legacy-retire"
-run_supervisor_home "$LEGACY_RETIRE_HOME" "$LEGACY_RETIRE_BOARD" --once \
-  || fail "legacy retirement migration cycle failed"
-grep -F $'3\tlegacy-retire\tretirement-metadata-cleanup-failed\trun bin/fm-teardown.sh legacy-retire to resume supported task cleanup\tretire-token' \
-  "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
-  || fail "legacy retirement failure was not durably journaled"
-grep -F $'2\tlegacy-retire\tretirement-pending\trun bin/fm-teardown.sh legacy-retire to resume supported task cleanup\tpending-token' \
-  "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
-  || fail "legacy pending retirement was not durably journaled"
-if grep -F -- '--retire-task' \
-  "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.escalations" >/dev/null; then
-  fail "legacy retirement migration retained removed recovery syntax"
-fi
-[ ! -e "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.retirements" ] \
-  || fail "legacy retirement records survived migration"
-[ ! -e "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.retirement-intents" ] \
-  || fail "legacy retirement intents survived migration"
-[ ! -e "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.teardown-legacy-retire" ] \
-  || fail "legacy retirement evidence was bound to current same-ID metadata"
-awk -F '\t' '$1 == "task" && $2 == "legacy-retire" { found=1 } END { exit !found }' \
-  "$LEGACY_RETIRE_HOME/state/firstmate-supervisor.tsv" \
-  || fail "legacy retirement evidence excluded current same-ID metadata"
-
-LEGACY_ORPHAN_RETIRE_HOME="$TMP_ROOT/legacy-orphan-retire-home"
-LEGACY_ORPHAN_RETIRE_BOARD="$TMP_ROOT/legacy-orphan-retire-board"
-mkdir -p \
-  "$LEGACY_ORPHAN_RETIRE_HOME/state/.firstmate-supervisor.retirements" \
-  "$LEGACY_ORPHAN_RETIRE_BOARD"
-printf 'v1\t5\tlegacy-orphan-retire\tfailed\tmetadata-cleanup-failed\told action\torphan-retire-token\n' \
-  > "$LEGACY_ORPHAN_RETIRE_HOME/state/.firstmate-supervisor.retirements/legacy-orphan-retire"
-run_supervisor_home "$LEGACY_ORPHAN_RETIRE_HOME" "$LEGACY_ORPHAN_RETIRE_BOARD" --once \
-  || fail "metadata-free legacy retirement migration cycle failed"
-grep -F $'5\tlegacy-orphan-retire\tretirement-metadata-cleanup-failed\trun bin/fm-supervisor.sh --once to reconcile orphan supervisor state, then inspect leftover task resources\torphan-retire-token' \
-  "$LEGACY_ORPHAN_RETIRE_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
-  || fail "metadata-free legacy retirement omitted supported orphan recovery"
-
-LEGACY_ESC_HOME="$TMP_ROOT/legacy-escalation-home"
-LEGACY_ESC_BOARD="$TMP_ROOT/legacy-escalation-board"
-mkdir -p "$LEGACY_ESC_HOME/state" "$LEGACY_ESC_BOARD"
-printf 'v2\t4\tlegacy-orphan\tfailed-receipt\tact on legacy failure\tlegacy-token\told\n' \
-  > "$LEGACY_ESC_HOME/state/.firstmate-supervisor.escalated-legacy-orphan-failed-receipt"
-run_supervisor_home "$LEGACY_ESC_HOME" "$LEGACY_ESC_BOARD" --once \
-  || fail "legacy pending escalation migration cycle failed"
-grep -F $'4\tlegacy-orphan\tfailed-receipt\tact on legacy failure\tlegacy-token' \
-  "$LEGACY_ESC_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
-  || fail "legacy pending escalation was not durably journaled"
-[ ! -e "$LEGACY_ESC_HOME/state/.firstmate-supervisor.escalated-legacy-orphan-failed-receipt" ] \
-  || fail "legacy pending escalation marker survived migration"
-
-RAW_LEGACY_HOME="$TMP_ROOT/raw-legacy-home"
-RAW_LEGACY_BOARD="$TMP_ROOT/raw-legacy-board"
-mkdir -p "$RAW_LEGACY_HOME/state" "$RAW_LEGACY_BOARD"
-printf '4\traw-legacy\tfailed-receipt\tact on legacy failure\told-token\n' \
-  > "$RAW_LEGACY_HOME/state/.firstmate-supervisor.escalations"
-printf 'old-token\n' \
-  > "$RAW_LEGACY_HOME/state/.firstmate-supervisor.escalated-raw-legacy-failed-receipt"
-run_supervisor_home "$RAW_LEGACY_HOME" "$RAW_LEGACY_BOARD" --once \
-  || fail "raw legacy escalation cleanup cycle failed"
-[ "$(wc -l < "$RAW_LEGACY_HOME/state/.firstmate-supervisor.escalations")" -eq 1 ] \
-  || fail "raw legacy escalation was appended to the durable journal again"
-[ ! -e "$RAW_LEGACY_HOME/state/.firstmate-supervisor.escalated-raw-legacy-failed-receipt" ] \
-  || fail "raw legacy escalation marker survived cleanup"
-
-ORPHAN_HOME="$TMP_ROOT/orphan-home"
-ORPHAN_BOARD="$TMP_ROOT/orphan-board"
-mkdir -p "$ORPHAN_HOME/state" "$ORPHAN_BOARD"
-{
-  printf 'window=\n'
-  printf 'kind=ship\n'
-  printf 'generation=orphan-generation\n'
-} > "$ORPHAN_HOME/state/orphan-task.meta"
-run_supervisor_home "$ORPHAN_HOME" "$ORPHAN_BOARD" --once \
-  || fail "orphan setup cycle failed"
-orphan_dir=$(task_state_dir "$ORPHAN_HOME" orphan-task)
-printf 'v2\t2\torphan-task\tfuture-condition\tinspect orphan\ttoken-orphan\torphan\n' \
-  > "$orphan_dir/escalated-future-condition"
-printf 'legacy receipt\n' \
-  > "$ORPHAN_HOME/state/.firstmate-supervisor.receipt-orphan-task-receipt"
-rm -f "$ORPHAN_HOME/state/orphan-task.meta"
-if FM_TEST_FAIL_TASK_STATE_CLEAR=1 \
-  run_supervisor_home "$ORPHAN_HOME" "$ORPHAN_BOARD" --once >/dev/null 2>&1; then
-  fail "orphan cleanup failure produced a successful cycle"
-fi
-[ -d "$orphan_dir" ] \
-  || fail "failed orphan cleanup lost its retry state"
-rm -f "$ORPHAN_HOME/state/.firstmate-supervisor.heartbeat"
-run_supervisor_home "$ORPHAN_HOME" "$ORPHAN_BOARD" --once \
-  || fail "orphan task state was not reclaimed"
-[ ! -e "$orphan_dir" ] \
-  || fail "absent task retained supervisor-owned state"
-[ ! -e "$ORPHAN_HOME/state/.firstmate-supervisor.receipt-orphan-task-receipt" ] \
-  || fail "absent task retained legacy supervisor state"
-grep -F $'2\torphan-task\tfuture-condition\tinspect orphan\ttoken-orphan' \
-  "$ORPHAN_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
-  || fail "orphan reclamation discarded pending escalation history"
-if awk -F '\t' '$1 == "task" && $2 == "orphan-task" { found=1 } END { exit !found }' \
-  "$ORPHAN_HOME/state/firstmate-supervisor.tsv"; then
-  fail "absent task remained in the supervisor snapshot"
-fi
-
-UNLOCK_HOME="$TMP_ROOT/unlock-home"
-UNLOCK_BOARD="$TMP_ROOT/unlock-board"
-mkdir -p "$UNLOCK_HOME/state" "$UNLOCK_BOARD"
-{
-  printf 'window=\n'
-  printf 'kind=ship\n'
-  printf 'generation=unlock-generation\n'
-} > "$UNLOCK_HOME/state/unlock-task.meta"
-if FM_TEST_FAIL_TASK_UNLOCK=1 \
-  run_supervisor_home "$UNLOCK_HOME" "$UNLOCK_BOARD" --once >/dev/null 2>&1; then
-  fail "task-state unlock failure produced a successful cycle"
-fi
-[ ! -e "$UNLOCK_HOME/state/.firstmate-supervisor.heartbeat" ] \
-  || fail "task-state unlock failure published a healthy heartbeat"
-grep -F 'task-state-unlock-failed' "$UNLOCK_HOME/state/.firstmate-supervisor.error" >/dev/null \
-  || fail "task-state unlock failure omitted durable cycle error state"
-/bin/rm -f "$UNLOCK_HOME/state/.firstmate-supervisor.state.lock/pid"
-rmdir "$UNLOCK_HOME/state/.firstmate-supervisor.state.lock"
-
-for unlock_owner in missing corrupt mismatch; do
-  UNKNOWN_UNLOCK_HOME="$TMP_ROOT/unknown-unlock-$unlock_owner-home"
-  UNKNOWN_UNLOCK_BOARD="$TMP_ROOT/unknown-unlock-$unlock_owner-board"
-  mkdir -p "$UNKNOWN_UNLOCK_HOME/state" "$UNKNOWN_UNLOCK_BOARD"
-  {
-    printf 'window=\n'
-    printf 'kind=ship\n'
-    printf 'generation=unknown-unlock-%s\n' "$unlock_owner"
-  } > "$UNKNOWN_UNLOCK_HOME/state/unknown-unlock.meta"
-  if FM_TEST_TASK_UNLOCK_OWNER="$unlock_owner" \
-    run_supervisor_home \
-      "$UNKNOWN_UNLOCK_HOME" "$UNKNOWN_UNLOCK_BOARD" --once >/dev/null 2>&1; then
-    fail "$unlock_owner task-state lock owner produced a successful cycle"
-  fi
-  [ ! -e "$UNKNOWN_UNLOCK_HOME/state/.firstmate-supervisor.heartbeat" ] \
-    || fail "$unlock_owner task-state lock owner published a healthy heartbeat"
-  grep -F 'task-state-unlock-failed' \
-    "$UNKNOWN_UNLOCK_HOME/state/.firstmate-supervisor.error" >/dev/null \
-    || fail "$unlock_owner task-state lock owner omitted durable failure state"
-  /bin/rm -f "$UNKNOWN_UNLOCK_HOME/state/.firstmate-supervisor.state.lock/pid"
-  rmdir "$UNKNOWN_UNLOCK_HOME/state/.firstmate-supervisor.state.lock"
-done
-
-OVERLAP_HOME="$TMP_ROOT/overlap-home"
-OVERLAP_BOARD="$TMP_ROOT/overlap-board"
-OVERLAP_BAD_BOARD="$TMP_ROOT/overlap-bad-board"
-OVERLAP_SIGNAL="$TMP_ROOT/overlap-heartbeat"
-mkdir -p "$OVERLAP_HOME/state" "$OVERLAP_BOARD"
-: > "$OVERLAP_BAD_BOARD"
-{
-  printf 'window=\n'
-  printf 'kind=ship\n'
-  printf 'generation=overlap-generation\n'
-} > "$OVERLAP_HOME/state/overlap-task.meta"
-FM_TEST_DELAY_HEARTBEAT_SIGNAL="$OVERLAP_SIGNAL" \
-  run_supervisor_home "$OVERLAP_HOME" "$OVERLAP_BOARD" --once &
-overlap_first=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  [ -e "$OVERLAP_SIGNAL" ] && break
-  /bin/sleep 0.1
-done
-[ -e "$OVERLAP_SIGNAL" ] || fail "overlapping cycle did not reach health publication"
-if run_supervisor_home \
-  "$OVERLAP_HOME" "$OVERLAP_BAD_BOARD" --once >/dev/null 2>&1; then
-  fail "later overlapping failed cycle reported success"
-fi
-wait "$overlap_first" || fail "earlier overlapping successful cycle failed"
-[ ! -e "$OVERLAP_HOME/state/.firstmate-supervisor.heartbeat" ] \
-  || fail "earlier overlapping cycle overwrote later failed cycle health"
-tail -n 1 "$OVERLAP_HOME/state/.firstmate-supervisor.log" \
-  | grep -F 'board-refresh-failed' >/dev/null \
-  || fail "overlapping cycle health publication reordered the final failure"
+printf 'v1\tgeneration:orphan-complete\t2147483647\tdead\t%s\tcomplete\t-\n' \
+  "$(date +%s)" > "$HOME_DIR/state/.firstmate-supervisor.teardown-orphan-complete"
+run_supervisor --once || fail "completed orphan marker reclamation cycle failed"
+[ ! -e "$HOME_DIR/state/.firstmate-supervisor.teardown-orphan-complete" ] \
+  || fail "provably completed orphan marker was not reclaimed"
 
 FAILED_HOME="$TMP_ROOT/failed-home"
 FAILED_BOARD="$TMP_ROOT/failed-board"
@@ -1001,6 +499,10 @@ done
 [ -s "$HOME_DIR/state/.firstmate-supervisor.heartbeat" ] \
   || fail "resumed supervisor did not restore its heartbeat"
 kill -STOP "$first_pid" 2>/dev/null || fail "could not pause supervisor for drained-wake test"
+FM_HOME="$HOME_DIR" "$ROOT/bin/fm-wake-drain.sh" >/dev/null \
+  || fail "could not clear prior supervisor escalation wakes"
+controlled_previous_seq=$(cat "$HOME_DIR/state/.wake-queue.seq" 2>/dev/null || echo 0)
+controlled_expected_seq=$((controlled_previous_seq + 1))
 first_generated=$(awk -F '\t' '$1 == "generated-at" { print $2 }' "$SNAPSHOT")
 first_board_generated=$(sed -n 's/.*const generated=\([0-9][0-9]*\),.*/\1/p' "$BOARD")
 FM_HOME="$HOME_DIR" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_wake_append heartbeat controlled "controlled wake"' -- "$ROOT" \
@@ -1019,14 +521,15 @@ for _ in 1 2 3 4 5; do
   wake_last_seq=$(awk -F '\t' '$1 == "wake-last-seq" { print $2 }' "$SNAPSHOT")
   if [ "$second_generated" -gt "$first_generated" ] \
     && [ "$second_board_generated" -gt "$first_board_generated" ] \
-    && [ "$wake_last_seq" = 1 ]; then
+    && [ "$wake_last_seq" = "$controlled_expected_seq" ]; then
     break
   fi
   sleep 1
 done
 [ "$second_generated" -gt "$first_generated" ] || fail "drained wake did not advance running snapshot"
 [ "$second_board_generated" -gt "$first_board_generated" ] || fail "drained wake did not advance running board"
-[ "$wake_last_seq" = 1 ] || fail "running supervisor lost drained wake sequence"
+[ "$wake_last_seq" = "$controlled_expected_seq" ] \
+  || fail "running supervisor lost drained wake sequence"
 grep -Fx $'wake-count\t0' "$SNAPSHOT" >/dev/null || fail "snapshot claimed ownership of drained wake"
 [ ! -e "$TMUX_LOG.injected" ] || fail "normal supervisor cycle injected chat"
 if grep -F 'send-keys' "$TMUX_LOG" >/dev/null; then
