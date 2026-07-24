@@ -72,6 +72,24 @@ meta_value() {
   grep "^$key=" "$meta" | cut -d= -f2- || true
 }
 
+supervisor_task_state_dir() {
+  printf '%s/.firstmate-supervisor.task-%s\n' \
+    "$1" "$(printf '%s' "$2" | tr -c 'A-Za-z0-9_.-' '_')"
+}
+
+cleanup_supervisor_task_state() {
+  local state=$1 id=$2 dir
+  dir=$(supervisor_task_state_dir "$state" "$id")
+  rm -rf "$dir"
+  rm -f \
+    "$state/.firstmate-supervisor.receipt-$(printf '%s-receipt' "$id" | tr -c 'A-Za-z0-9_.-' '_')" \
+    "$state/.firstmate-supervisor.deadline-$(printf '%s-receipt' "$id" | tr -c 'A-Za-z0-9_.-' '_')" \
+    "$state/.firstmate-supervisor.escalated-$(printf '%s-missing-process' "$id" | tr -c 'A-Za-z0-9_.-' '_')" \
+    "$state/.firstmate-supervisor.escalated-$(printf '%s-missed-receipt-deadline' "$id" | tr -c 'A-Za-z0-9_.-' '_')" \
+    "$state/.firstmate-supervisor.escalated-$(printf '%s-failed-receipt' "$id" | tr -c 'A-Za-z0-9_.-' '_')" \
+    "$state/.firstmate-supervisor.escalated-$(printf '%s-invalid-receipt-deadline' "$id" | tr -c 'A-Za-z0-9_.-' '_')"
+}
+
 backlog_refresh_reminder() {
   local pr done_cmd report_path dispatch_checks
   dispatch_checks="apply secondmate routing and the advisory three-active-ordinary-report limit before every dispatch unless the captain explicitly overrides that dispatch; never kill, interrupt, or discard existing work to make room."
@@ -380,6 +398,7 @@ cleanup_firstmate_home_children() {
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
+    cleanup_supervisor_task_state "$sub_state" "$child_id"
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts"
   done
 }
@@ -490,6 +509,7 @@ if [ "$KIND" = secondmate ]; then
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
   remove_secondmate_registry_entry "$ID"
 fi
+cleanup_supervisor_task_state "$STATE" "$ID"
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true

@@ -75,7 +75,12 @@ target=
 for arg in "$@"; do target=$arg; done
 if [ "${FM_TEST_FAIL_RECEIPT_CURSOR:-0}" = 1 ]; then
   case "$target" in
-    *".firstmate-supervisor.receipt-"*) exit 1 ;;
+    *".firstmate-supervisor.receipt-"*|*".firstmate-supervisor.task-"*"/receipt") exit 1 ;;
+  esac
+fi
+if [ "${FM_TEST_FAIL_ESCALATION_MARKER:-0}" = 1 ]; then
+  case "$target" in
+    *".firstmate-supervisor.task-"*"/escalated-"*) exit 1 ;;
   esac
 fi
 exec /bin/mv "$@"
@@ -88,6 +93,11 @@ write_meta() { # <id> <window> <deadline>
     printf 'kind=ship\n'
     printf 'receipt-deadline=%s\n' "$3"
   } > "$HOME_DIR/state/$1.meta"
+}
+
+task_state_dir() {
+  printf '%s/state/.firstmate-supervisor.task-%s\n' \
+    "$1" "$(printf '%s' "$2" | tr -c 'A-Za-z0-9_.-' '_')"
 }
 
 now=$(date +%s)
@@ -242,11 +252,11 @@ if awk -F '\t' '$1 == "contract" && $2 == "invalid-deadline" { found=1 } END { e
   "$SNAPSHOT"; then
   fail "invalid deadline was presented as an enforceable contract"
 fi
-[ -s "$HOME_DIR/state/.firstmate-supervisor.receipt-late-terminal-receipt" ] \
+[ -s "$(task_state_dir "$HOME_DIR" late-terminal)/receipt" ] \
   || fail "late terminal receipt timing evidence was not persisted"
 
 snapshot_before_status_error=$(cksum "$SNAPSHOT")
-receipt_before_status_error=$(cksum "$HOME_DIR/state/.firstmate-supervisor.receipt-terminal-task-receipt")
+receipt_before_status_error=$(cksum "$(task_state_dir "$HOME_DIR" terminal-task)/receipt")
 mv "$HOME_DIR/state/terminal-task.status" "$HOME_DIR/state/terminal-task.status.saved"
 mkdir "$HOME_DIR/state/terminal-task.status"
 if run_supervisor --once >/dev/null 2>&1; then
@@ -254,7 +264,7 @@ if run_supervisor --once >/dev/null 2>&1; then
 fi
 [ "$(cksum "$SNAPSHOT")" = "$snapshot_before_status_error" ] \
   || fail "unreadable status path replaced the last valid snapshot"
-[ "$(cksum "$HOME_DIR/state/.firstmate-supervisor.receipt-terminal-task-receipt")" = \
+[ "$(cksum "$(task_state_dir "$HOME_DIR" terminal-task)/receipt")" = \
     "$receipt_before_status_error" ] \
   || fail "unreadable status path changed persisted receipt evidence"
 snapshot_error_logs=$(awk -F '\t' '$2 == "snapshot-write-failed" { count++ } END { print count + 0 }' \
@@ -265,9 +275,31 @@ fi
 [ "$(awk -F '\t' '$2 == "snapshot-write-failed" { count++ } END { print count + 0 }' \
     "$HOME_DIR/state/.firstmate-supervisor.log")" -eq "$snapshot_error_logs" ] \
   || fail "identical persistent cycle failure appended another log entry"
+rm -f "$HOME_DIR/state/.firstmate-supervisor.error"
+mkdir "$HOME_DIR/state/.firstmate-supervisor.error"
+if run_supervisor --once >/dev/null 2>&1; then
+  fail "unwritable error state produced a successful snapshot"
+fi
+if run_supervisor --once >/dev/null 2>&1; then
+  fail "repeated unwritable error state produced a successful snapshot"
+fi
+[ "$(awk -F '\t' '$2 == "snapshot-write-failed" { count++ } END { print count + 0 }' \
+    "$HOME_DIR/state/.firstmate-supervisor.log")" -eq "$snapshot_error_logs" ] \
+  || fail "unwritable error state defeated authoritative log deduplication"
+rmdir "$HOME_DIR/state/.firstmate-supervisor.error"
 rmdir "$HOME_DIR/state/terminal-task.status"
 mv "$HOME_DIR/state/terminal-task.status.saved" "$HOME_DIR/state/terminal-task.status"
 run_supervisor --once || fail "supervisor did not recover after status read failure"
+
+snapshot_before_meta_error=$(cksum "$SNAPSHOT")
+mkdir "$HOME_DIR/state/nonregular.meta"
+if run_supervisor --once >/dev/null 2>&1; then
+  fail "non-regular metadata path produced a successful snapshot"
+fi
+[ "$(cksum "$SNAPSHOT")" = "$snapshot_before_meta_error" ] \
+  || fail "non-regular metadata path replaced the last valid snapshot"
+rmdir "$HOME_DIR/state/nonregular.meta"
+run_supervisor --once || fail "supervisor did not recover after metadata path failure"
 
 write_meta cursor-write fm-waiting "$((now + 300))"
 printf 'working: cursor persistence must succeed\n' > "$HOME_DIR/state/cursor-write.status"
@@ -277,11 +309,11 @@ if FM_TEST_FAIL_RECEIPT_CURSOR=1 run_supervisor --once >/dev/null 2>&1; then
 fi
 [ "$(cksum "$SNAPSHOT")" = "$snapshot_before_cursor_error" ] \
   || fail "receipt cursor write failure replaced the last valid snapshot"
-rm -f "$HOME_DIR/state/cursor-write.meta" "$HOME_DIR/state/cursor-write.status" \
-  "$HOME_DIR/state/.firstmate-supervisor.receipt-cursor-write-receipt.tmp."*
+rm -f "$HOME_DIR/state/cursor-write.meta" "$HOME_DIR/state/cursor-write.status"
+rm -rf "$(task_state_dir "$HOME_DIR" cursor-write)"
 run_supervisor --once || fail "supervisor did not recover after receipt cursor write failure"
 
-transitioned_version=$(cut -f2 "$HOME_DIR/state/.firstmate-supervisor.deadline-transitioned-terminal-receipt")
+transitioned_version=$(cut -f2 "$(task_state_dir "$HOME_DIR" transitioned-terminal)/deadline")
 sleep 2
 printf 'done: terminal receipt after deadline\n' >> "$HOME_DIR/state/transitioned-terminal.status"
 run_supervisor --once || fail "transitioned terminal receipt cycle failed"
@@ -304,6 +336,30 @@ run_supervisor --once || fail "failed-receipt dedupe cycle failed"
 failed_escalations=$(awk -F '\t' '$2 == "failed-task" && $3 == "failed-receipt" { count++ } END { print count + 0 }' \
   "$HOME_DIR/state/.firstmate-supervisor.escalations")
 [ "$failed_escalations" -eq 2 ] || fail "unchanged failed receipt was escalated twice"
+awk -F '\t' '$2 == "failed-task" && $3 == "failed-receipt" && NF == 5 && $5 != "" { found=1 } END { exit !found }' \
+  "$HOME_DIR/state/.firstmate-supervisor.escalations" \
+  || fail "durable escalation omitted its crash-recovery token"
+
+ATOMIC_HOME="$TMP_ROOT/atomic-home"
+ATOMIC_BOARD="$TMP_ROOT/atomic-board"
+mkdir -p "$ATOMIC_HOME/state" "$ATOMIC_BOARD"
+{
+  printf 'window=fm-gone\n'
+  printf 'kind=ship\n'
+} > "$ATOMIC_HOME/state/atomic-task.meta"
+if FM_TEST_FAIL_ESCALATION_MARKER=1 \
+  run_supervisor_home "$ATOMIC_HOME" "$ATOMIC_BOARD" --once >/dev/null 2>&1; then
+  fail "failed escalation marker persistence produced a successful cycle"
+fi
+[ ! -s "$ATOMIC_HOME/state/.firstmate-supervisor.escalations" ] \
+  || fail "escalation was appended before its recovery marker persisted"
+run_supervisor_home "$ATOMIC_HOME" "$ATOMIC_BOARD" --once \
+  || fail "escalation did not recover after marker persistence failure"
+run_supervisor_home "$ATOMIC_HOME" "$ATOMIC_BOARD" --once \
+  || fail "recovered escalation dedupe cycle failed"
+[ "$(awk -F '\t' '$2 == "atomic-task" && $3 == "missing-process" { count++ } END { print count + 0 }' \
+    "$ATOMIC_HOME/state/.firstmate-supervisor.escalations")" -eq 1 ] \
+  || fail "recovered escalation was not journaled exactly once"
 
 FAILED_HOME="$TMP_ROOT/failed-home"
 FAILED_BOARD="$TMP_ROOT/failed-board"

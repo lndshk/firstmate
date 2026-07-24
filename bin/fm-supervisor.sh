@@ -61,7 +61,16 @@ snapshot_field() {
   if [ -n "$1" ]; then printf '%s' "$1" | clean_field
   else printf -- '-'; fi
 }
-meta_field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -1; }
+meta_field() {
+  [ -f "$1" ] || return 1
+  awk -v prefix="$2=" '
+    index($0, prefix) == 1 {
+      value=substr($0, length(prefix) + 1)
+      found=1
+    }
+    END { if (found) print value }
+  ' "$1"
+}
 last_receipt_record() {
   awk 'NF { number=NR; line=$0 } END { printf "%d\t%s\n", number + 0, line }' "$1"
 }
@@ -121,8 +130,8 @@ supervisor_pid_is_ours() {
 supervisor_pid_is_current() {
   local pid=$1 receipt_pid receipt_revision
   supervisor_pid_is_ours "$pid" || return 1
-  receipt_pid=$(meta_field "$OWNER_RECEIPT" pid)
-  receipt_revision=$(meta_field "$OWNER_RECEIPT" revision)
+  receipt_pid=$(meta_field "$OWNER_RECEIPT" pid) || return 1
+  receipt_revision=$(meta_field "$OWNER_RECEIPT" revision) || return 1
   [ "$receipt_pid" = "$pid" ] && [ "$receipt_revision" = "$SCRIPT_REVISION" ] \
     && supervisor_process_matches_revision "$pid"
 }
@@ -150,38 +159,107 @@ escalation_key() {
   printf '%s-%s' "$1" "$2" | tr -c 'A-Za-z0-9_.-' '_'
 }
 
-escalate_once() { # <id> <condition> <action> [evidence]
-  local id=$1 condition=$2 action=$3 marker evidence previous tmp
-  marker="$STATE/.firstmate-supervisor.escalated-$(escalation_key "$id" "$condition")"
-  if [ $# -lt 4 ]; then
-    if [ -e "$marker" ] || [ -L "$marker" ]; then
-      [ -f "$marker" ] || return 1
-      return 0
-    fi
-  else
-    evidence=$4
-    previous=$(read_optional_file "$marker") || return 1
-    [ "$previous" = "$evidence" ] && return 0
+task_state_dir() {
+  printf '%s/.firstmate-supervisor.task-%s' \
+    "$STATE" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_')"
+}
+
+ensure_task_state_dir() {
+  local dir
+  dir=$(task_state_dir "$1") || return 1
+  mkdir -p "$dir" && [ -d "$dir" ]
+}
+
+migrate_task_state_file() { # <id> <legacy-path> <name>; prints current path
+  local id=$1 legacy=$2 name=$3 dir current
+  dir=$(task_state_dir "$id") || return 1
+  current="$dir/$name"
+  if [ ! -e "$current" ] && [ ! -L "$current" ] \
+    && { [ -e "$legacy" ] || [ -L "$legacy" ]; }; then
+    [ -f "$legacy" ] || return 1
+    ensure_task_state_dir "$id" || return 1
+    mv -f "$legacy" "$current" || return 1
   fi
-  printf '%s\t%s\t%s\t%s\n' \
+  printf '%s\n' "$current"
+}
+
+escalation_logged() { # <id> <condition> <token>
+  local id=$1 condition=$2 token=$3
+  if [ ! -e "$ESCALATIONS" ] && [ ! -L "$ESCALATIONS" ]; then
+    return 1
+  fi
+  [ -f "$ESCALATIONS" ] || return 2
+  awk -F '\t' -v id="$id" -v condition="$condition" -v token="$token" '
+    $2 == id && $3 == condition && $5 == token { found=1; exit }
+    END { exit !found }
+  ' "$ESCALATIONS"
+}
+
+escalate_once() { # <id> <condition> <action> [evidence]
+  local id=$1 condition=$2 action=$3 marker legacy evidence="" previous tmp
+  local tab token saved_evidence logged_status token_seed
+  legacy="$STATE/.firstmate-supervisor.escalated-$(escalation_key "$id" "$condition")"
+  marker=$(migrate_task_state_file \
+    "$id" "$legacy" "escalated-$(escalation_key "$condition" condition)") || return 1
+  [ $# -lt 4 ] || evidence=$4
+  previous=$(read_optional_file "$marker") || return 1
+  tab=$(printf '\t')
+  case "$previous" in
+    "v1$tab"*)
+      token=${previous#*"${tab}"}
+      token=${token%%"$tab"*}
+      saved_evidence=${previous#*"${tab}"}
+      saved_evidence=${saved_evidence#*"${tab}"}
+      if { [ $# -lt 4 ] || [ "$saved_evidence" = "$evidence" ]; } \
+        && [ -n "$token" ]; then
+        if escalation_logged "$id" "$condition" "$token"; then
+          return 0
+        else
+          logged_status=$?
+          [ "$logged_status" -eq 1 ] || return 1
+        fi
+      else
+        token=
+      fi
+      ;;
+    *)
+      if [ -e "$marker" ] || [ -L "$marker" ]; then
+        [ -f "$marker" ] || return 1
+        if [ $# -lt 4 ] || [ "$previous" = "$evidence" ]; then
+          return 0
+        fi
+      fi
+      token=
+      ;;
+  esac
+  if [ -z "${token:-}" ]; then
+    ensure_task_state_dir "$id" || return 1
+    token_seed="$(now_epoch)-$$-${RANDOM:-0}"
+    token=$(printf '%s\t%s\t%s\t%s' \
+      "$id" "$condition" "$evidence" "$token_seed" | cksum | awk '{ print $1 "-" $2 }')
+    tmp="$marker.tmp.$$"
+    printf 'v1\t%s\t%s\n' "$token" "$evidence" > "$tmp" \
+      && mv -f "$tmp" "$marker" || return 1
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' \
     "$(now_epoch)" \
     "$(printf '%s' "$id" | clean_field)" \
     "$(printf '%s' "$condition" | clean_field)" \
-    "$(printf '%s' "$action" | clean_field)" >> "$ESCALATIONS" || return 1
-  if [ $# -lt 4 ]; then
-    : > "$marker"
-  else
-    tmp="$marker.tmp.$$"
-    printf '%s\n' "$evidence" > "$tmp" && mv -f "$tmp" "$marker"
-  fi
+    "$(printf '%s' "$action" | clean_field)" \
+    "$token" >> "$ESCALATIONS"
 }
 
 clear_escalation() { # <id> <condition>
-  rm -f "$STATE/.firstmate-supervisor.escalated-$(escalation_key "$1" "$2")"
+  local dir
+  dir=$(task_state_dir "$1") || return 1
+  rm -f \
+    "$STATE/.firstmate-supervisor.escalated-$(escalation_key "$1" "$2")" \
+    "$dir/escalated-$(escalation_key "$2" condition)"
+  rmdir "$dir" 2>/dev/null || true
 }
 
 receipt_evidence() { # <id> <status-file> <raw-receipt> <line>; prints <version><tab><time>
-  local id=$1 receipt_file=$2 raw=$3 line=$4 receipt hash version observed cursor
+  local id=$1 receipt_file=$2 raw=$3 line=$4 receipt hash version observed cursor legacy
   local saved saved_version saved_time tmp
   receipt=$(fm_receipt_text "$raw")
   hash=$(printf '%s' "$receipt" | cksum | awk '{ print $1 "-" $2 }')
@@ -191,7 +269,8 @@ receipt_evidence() { # <id> <status-file> <raw-receipt> <line>; prints <version>
     observed=$(fm_path_mtime "$receipt_file") || return 1
   fi
   is_epoch "$observed" || return 1
-  cursor="$STATE/.firstmate-supervisor.receipt-$(escalation_key "$id" receipt)"
+  legacy="$STATE/.firstmate-supervisor.receipt-$(escalation_key "$id" receipt)"
+  cursor=$(migrate_task_state_file "$id" "$legacy" receipt) || return 1
   saved=$(read_optional_file "$cursor") || return 1
   IFS="$(printf '\t')" read -r saved_version saved_time <<EOF
 $saved
@@ -200,6 +279,7 @@ EOF
     observed=$saved_time
   fi
   if [ "$saved_version" != "$version" ] || ! is_epoch "$saved_time"; then
+    ensure_task_state_dir "$id" || return 1
     tmp="$cursor.tmp.$$"
     printf '%s\t%s\n' "$version" "$observed" > "$tmp" \
       && mv -f "$tmp" "$cursor" || return 1
@@ -208,7 +288,12 @@ EOF
 }
 
 clear_receipt_evidence() { # <id>
-  rm -f "$STATE/.firstmate-supervisor.receipt-$(escalation_key "$1" receipt)"
+  local dir
+  dir=$(task_state_dir "$1") || return 1
+  rm -f \
+    "$STATE/.firstmate-supervisor.receipt-$(escalation_key "$1" receipt)" \
+    "$dir/receipt"
+  rmdir "$dir" 2>/dev/null || true
 }
 
 timestamped_deadline_satisfaction() { # <status-file> <deadline>; prints <version><tab><time>
@@ -240,9 +325,10 @@ timestamped_deadline_satisfaction() { # <status-file> <deadline>; prints <versio
 }
 
 deadline_satisfaction() { # <id> <deadline> <status-file> <receipt-version> <receipt-time>; prints <version><tab><time>
-  local id=$1 deadline=$2 receipt_file=$3 receipt_version=$4 receipt_time=$5 cursor
+  local id=$1 deadline=$2 receipt_file=$3 receipt_version=$4 receipt_time=$5 cursor legacy
   local saved saved_deadline saved_version saved_time candidate candidate_status tmp
-  cursor="$STATE/.firstmate-supervisor.deadline-$(escalation_key "$id" receipt)"
+  legacy="$STATE/.firstmate-supervisor.deadline-$(escalation_key "$id" receipt)"
+  cursor=$(migrate_task_state_file "$id" "$legacy" deadline) || return 2
   saved=$(read_optional_file "$cursor") || return 2
   IFS="$(printf '\t')" read -r saved_deadline saved_version saved_time <<EOF
 $saved
@@ -266,6 +352,7 @@ EOF
   if [ -n "$receipt_version" ] \
     && is_epoch "$receipt_time" \
     && [ "$receipt_time" -le "$deadline" ]; then
+    ensure_task_state_dir "$id" || return 2
     tmp="$cursor.tmp.$$"
     printf '%s\t%s\t%s\n' "$deadline" "$receipt_version" "$receipt_time" > "$tmp" \
       && mv -f "$tmp" "$cursor" || return 2
@@ -277,7 +364,12 @@ EOF
 }
 
 clear_deadline_satisfaction() { # <id>
-  rm -f "$STATE/.firstmate-supervisor.deadline-$(escalation_key "$1" receipt)"
+  local dir
+  dir=$(task_state_dir "$1") || return 1
+  rm -f \
+    "$STATE/.firstmate-supervisor.deadline-$(escalation_key "$1" receipt)" \
+    "$dir/deadline"
+  rmdir "$dir" 2>/dev/null || true
 }
 
 classify_meta() { # <meta>; prints one TSV task row
@@ -289,12 +381,17 @@ classify_meta() { # <meta>; prints one TSV task row
   local deadline_status="" deadline_version="-" deadline_time="-"
   local deadline_action="" process_action="" receipt_action="" contract_action=""
   local satisfaction
+  [ -f "$meta" ] || return 1
   id=$(basename "$meta" .meta)
-  window=$(meta_field "$meta" window)
-  pid=$(meta_field "$meta" process-pid)
-  [ -n "$pid" ] || pid=$(meta_field "$meta" pid)
-  raw_deadline=$(meta_field "$meta" receipt-deadline)
-  [ -n "$raw_deadline" ] || raw_deadline=$(meta_field "$meta" deadline)
+  window=$(meta_field "$meta" window) || return 1
+  pid=$(meta_field "$meta" process-pid) || return 1
+  if [ -z "$pid" ]; then
+    pid=$(meta_field "$meta" pid) || return 1
+  fi
+  raw_deadline=$(meta_field "$meta" receipt-deadline) || return 1
+  if [ -z "$raw_deadline" ]; then
+    raw_deadline=$(meta_field "$meta" deadline) || return 1
+  fi
   deadline=$raw_deadline
   if [ -n "$deadline" ] && ! is_epoch "$deadline"; then
     contract_condition=invalid-receipt-deadline
@@ -483,7 +580,13 @@ write_snapshot() {
   rows="$tmp.rows"
   rm -f "$rows"
   for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
+    if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
+      continue
+    fi
+    [ -f "$meta" ] || {
+      rm -f "$tmp" "$rows"
+      return 1
+    }
     classify_meta "$meta" >> "$rows" || {
       rm -f "$tmp" "$rows"
       return 1
@@ -518,14 +621,37 @@ write_heartbeat() {
   printf '%s\n' "$(now_epoch)" > "$tmp" && mv -f "$tmp" "$HEARTBEAT"
 }
 
-record_error() {
-  local previous
-  previous=$(read_optional_file "$ERROR" 2>/dev/null || true)
+last_log_condition() {
+  local previous="" tab
+  if [ -e "$LOG" ] || [ -L "$LOG" ]; then
+    [ -f "$LOG" ] || return 1
+    previous=$(tail -n 1 "$LOG" 2>/dev/null) || return 1
+  fi
+  tab=$(printf '\t')
   case "$previous" in
-    *"$(printf '\t')$1") return ;;
+    *"$tab"*) printf '%s\n' "${previous#*"$tab"}" ;;
   esac
-  printf '%s\t%s\n' "$(now_epoch)" "$1" >> "$LOG" 2>/dev/null || true
-  printf '%s\t%s\n' "$(now_epoch)" "$1" > "$ERROR" 2>/dev/null || true
+}
+
+record_error() {
+  local previous_condition timestamp
+  previous_condition=$(last_log_condition) || return 1
+  [ "$previous_condition" != "$1" ] || return 0
+  timestamp=$(now_epoch)
+  printf '%s\t%s\n' "$timestamp" "$1" >> "$LOG" 2>/dev/null || return 1
+  { printf '%s\t%s\n' "$timestamp" "$1" > "$ERROR"; } 2>/dev/null || true
+}
+
+clear_error() {
+  local previous_condition timestamp
+  previous_condition=$(last_log_condition) || return 1
+  case "$previous_condition" in
+    *-failed)
+      timestamp=$(now_epoch)
+      printf '%s\trecovered\n' "$timestamp" >> "$LOG" 2>/dev/null || return 1
+      ;;
+  esac
+  rm -f "$ERROR"
 }
 
 cycle() {
@@ -545,7 +671,7 @@ cycle() {
     record_error heartbeat-write-failed
     return 1
   fi
-  rm -f "$ERROR"
+  clear_error
 }
 
 run_loop() {
@@ -605,8 +731,8 @@ heartbeat_is_ready() { # <not-before-epoch>
 
 owner_interval() { # <pid>
   local pid=$1 receipt_pid receipt_interval
-  receipt_pid=$(meta_field "$OWNER_RECEIPT" pid)
-  receipt_interval=$(meta_field "$OWNER_RECEIPT" interval)
+  receipt_pid=$(meta_field "$OWNER_RECEIPT" pid) || return 1
+  receipt_interval=$(meta_field "$OWNER_RECEIPT" interval) || return 1
   [ "$receipt_pid" = "$pid" ] || return 1
   is_uint "$receipt_interval" && [ "$receipt_interval" -gt 0 ] || return 1
   printf '%s\n' "$receipt_interval"
@@ -634,7 +760,7 @@ clear_child_ownership() {
   local child=$1 lock_pid receipt_pid owner_pid
   receipt_pid=$(cat "$PIDFILE" 2>/dev/null || true)
   [ "$receipt_pid" != "$child" ] || rm -f "$PIDFILE"
-  owner_pid=$(meta_field "$OWNER_RECEIPT" pid)
+  owner_pid=$(meta_field "$OWNER_RECEIPT" pid 2>/dev/null || true)
   [ "$owner_pid" != "$child" ] || rm -f "$OWNER_RECEIPT"
   lock_pid=$(cat "$LOCK/pid" 2>/dev/null || true)
   if [ "$lock_pid" = "$child" ]; then

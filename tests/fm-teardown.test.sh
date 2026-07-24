@@ -221,6 +221,36 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
   pass "teardown prompts tasks-axi backlog refresh when compatible"
 }
 
+test_teardown_reclaims_supervisor_task_state() {
+  local case_dir task_dir other_dir
+  case_dir=$(make_case supervisor-state)
+  write_meta "$case_dir" local-only ship
+  task_dir="$case_dir/state/.firstmate-supervisor.task-task-x1"
+  other_dir="$case_dir/state/.firstmate-supervisor.task-task-x10"
+  mkdir -p "$task_dir" "$other_dir"
+  : > "$task_dir/escalated-future-condition"
+  : > "$task_dir/receipt"
+  : > "$other_dir/receipt"
+  : > "$case_dir/state/.firstmate-supervisor.receipt-task-x1-receipt"
+  : > "$case_dir/state/.firstmate-supervisor.deadline-task-x1-receipt"
+  : > "$case_dir/state/.firstmate-supervisor.escalated-task-x1-failed-receipt"
+
+  run_teardown "$case_dir" >/dev/null \
+    || fail "supervisor-state: teardown failed"
+
+  [ ! -e "$task_dir" ] \
+    || fail "supervisor-state: per-task supervisor directory survived teardown"
+  [ ! -e "$case_dir/state/.firstmate-supervisor.receipt-task-x1-receipt" ] \
+    || fail "supervisor-state: legacy receipt cursor survived teardown"
+  [ ! -e "$case_dir/state/.firstmate-supervisor.deadline-task-x1-receipt" ] \
+    || fail "supervisor-state: legacy deadline cursor survived teardown"
+  [ ! -e "$case_dir/state/.firstmate-supervisor.escalated-task-x1-failed-receipt" ] \
+    || fail "supervisor-state: legacy escalation marker survived teardown"
+  [ -e "$other_dir/receipt" ] \
+    || fail "supervisor-state: teardown removed another task's state"
+  pass "teardown reclaims current and future per-task supervisor state"
+}
+
 test_local_only_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case truly-unpushed)
@@ -441,6 +471,7 @@ SH
 
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
+test_teardown_reclaims_supervisor_task_state
 test_no_mistakes_ship_aborts_run_on_task_branch
 test_scout_does_not_abort_run
 test_local_only_does_not_abort_run
