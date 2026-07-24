@@ -73,6 +73,30 @@ meta_value() {
   grep "^$key=" "$meta" | cut -d= -f2- || true
 }
 
+meta_generation() {
+  local generation window worktree project home
+  generation=$(meta_value "$META" generation)
+  if [ -n "$generation" ]; then
+    printf 'generation:%s\n' "$generation"
+    return
+  fi
+  window=$(meta_value "$META" window)
+  worktree=$(meta_value "$META" worktree)
+  project=$(meta_value "$META" project)
+  home=$(meta_value "$META" home)
+  printf '%s\t%s\t%s\t%s' "$window" "$worktree" "$project" "$home" \
+    | cksum | awk '{ printf "legacy:%s-%s\\n", $1, $2 }'
+}
+
+write_teardown_marker() {
+  local marker=$1 tmp
+  tmp="$marker.tmp.$$"
+  if ! meta_generation > "$tmp" || ! mv -f "$tmp" "$marker"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
 backlog_refresh_reminder() {
   local pr done_cmd report_path dispatch_checks
   dispatch_checks="apply secondmate routing and the advisory three-active-ordinary-report limit before every dispatch unless the captain explicitly overrides that dispatch; never kill, interrupt, or discard existing work to make room."
@@ -460,6 +484,12 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+TEARDOWN_MARKER="$STATE/.firstmate-supervisor.teardown-$ID"
+write_teardown_marker "$TEARDOWN_MARKER" || {
+  echo "error: could not record teardown in progress for $ID" >&2
+  exit 1
+}
+
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH"
 fi
@@ -497,11 +527,12 @@ if [ "$KIND" = secondmate ]; then
   remove_secondmate_registry_entry "$ID"
 fi
 rm -f \
-  "$STATE/$ID.meta" \
   "$STATE/$ID.status" \
   "$STATE/$ID.turn-ended" \
   "$STATE/$ID.check.sh" \
   "$STATE/$ID.pi-ext.ts"
+rm -f "$STATE/$ID.meta"
+rm -f "$TEARDOWN_MARKER" 2>/dev/null || true
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

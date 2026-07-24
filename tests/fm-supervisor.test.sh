@@ -115,6 +115,13 @@ if [ "${FM_TEST_FAIL_TASK_STATE_CLEAR:-0}" = 1 ]; then
     esac
   done
 fi
+if [ "${FM_TEST_FAIL_TASK_UNLOCK:-0}" = 1 ]; then
+  for arg in "$@"; do
+    case "$arg" in
+      *".firstmate-supervisor.state.lock/pid") exit 1 ;;
+    esac
+  done
+fi
 exec /bin/rm "$@"
 SH
 chmod +x "$FAKEBIN/rm"
@@ -496,6 +503,95 @@ grep -F $'1\treused-task\tfuture-condition\tinspect stale generation\ttoken-old'
   "$GENERATION_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
   || fail "generation reset discarded pending escalation history"
 
+PROMOTION_HOME="$TMP_ROOT/promotion-home"
+PROMOTION_BOARD="$TMP_ROOT/promotion-board"
+mkdir -p "$PROMOTION_HOME/state" "$PROMOTION_BOARD"
+{
+  printf 'window=\n'
+  printf 'worktree=/immutable-worktree\n'
+  printf 'project=/immutable-project\n'
+  printf 'kind=scout\n'
+} > "$PROMOTION_HOME/state/promoted-task.meta"
+printf 'working: preserve receipt across promotion\n' \
+  > "$PROMOTION_HOME/state/promoted-task.status"
+run_supervisor_home "$PROMOTION_HOME" "$PROMOTION_BOARD" --once \
+  || fail "legacy promotion setup cycle failed"
+promotion_dir=$(task_state_dir "$PROMOTION_HOME" promoted-task)
+promotion_generation=$(cat "$promotion_dir/generation")
+promotion_receipt=$(cksum "$promotion_dir/receipt")
+sed 's/^kind=scout$/kind=ship/' "$PROMOTION_HOME/state/promoted-task.meta" \
+  > "$PROMOTION_HOME/state/promoted-task.meta.next"
+mv "$PROMOTION_HOME/state/promoted-task.meta.next" \
+  "$PROMOTION_HOME/state/promoted-task.meta"
+run_supervisor_home "$PROMOTION_HOME" "$PROMOTION_BOARD" --once \
+  || fail "legacy promoted task cycle failed"
+[ "$(cat "$promotion_dir/generation")" = "$promotion_generation" ] \
+  || fail "task promotion changed the immutable legacy identity"
+[ "$(cksum "$promotion_dir/receipt")" = "$promotion_receipt" ] \
+  || fail "task promotion reset persisted receipt evidence"
+
+EXCLUDED_HOME="$TMP_ROOT/excluded-home"
+EXCLUDED_BOARD="$TMP_ROOT/excluded-board"
+mkdir -p "$EXCLUDED_HOME/state" "$EXCLUDED_BOARD"
+{
+  printf 'window=fm-gone\n'
+  printf 'kind=ship\n'
+  printf 'generation=teardown-generation\n'
+} > "$EXCLUDED_HOME/state/excluded-task.meta"
+printf 'generation:teardown-generation\n' \
+  > "$EXCLUDED_HOME/state/.firstmate-supervisor.teardown-excluded-task"
+run_supervisor_home "$EXCLUDED_HOME" "$EXCLUDED_BOARD" --once \
+  || fail "teardown-excluded task cycle failed"
+if awk -F '\t' '$1 == "task" && $2 == "excluded-task" { found=1 } END { exit !found }' \
+  "$EXCLUDED_HOME/state/firstmate-supervisor.tsv"; then
+  fail "teardown-excluded task remained in the snapshot"
+fi
+[ ! -s "$EXCLUDED_HOME/state/.firstmate-supervisor.escalations" ] \
+  || fail "teardown-excluded task produced a durable escalation"
+
+LEGACY_RETIRE_HOME="$TMP_ROOT/legacy-retire-home"
+LEGACY_RETIRE_BOARD="$TMP_ROOT/legacy-retire-board"
+mkdir -p \
+  "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.retirements" \
+  "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.retirement-intents" \
+  "$LEGACY_RETIRE_BOARD"
+{
+  printf 'window=fm-gone\n'
+  printf 'kind=ship\n'
+  printf 'generation=legacy-retirement\n'
+} > "$LEGACY_RETIRE_HOME/state/legacy-retire.meta"
+printf 'v1\t3\tlegacy-retire\tfailed\tmetadata-cleanup-failed\tretry teardown safely\tretire-token\n' \
+  > "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.retirements/legacy-retire"
+printf 'v1\t2\tlegacy-retire\tpending\t-\tcomplete task retirement\tpending-token\n' \
+  > "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.retirement-intents/legacy-retire"
+run_supervisor_home "$LEGACY_RETIRE_HOME" "$LEGACY_RETIRE_BOARD" --once \
+  || fail "legacy retirement migration cycle failed"
+grep -F $'3\tlegacy-retire\tretirement-metadata-cleanup-failed\tretry teardown safely\tretire-token' \
+  "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
+  || fail "legacy retirement failure was not durably journaled"
+grep -F $'2\tlegacy-retire\tretirement-pending\tcomplete task retirement\tpending-token' \
+  "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
+  || fail "legacy pending retirement was not durably journaled"
+[ ! -e "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.retirements" ] \
+  || fail "legacy retirement records survived migration"
+[ ! -e "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.retirement-intents" ] \
+  || fail "legacy retirement intents survived migration"
+[ -s "$LEGACY_RETIRE_HOME/state/.firstmate-supervisor.teardown-legacy-retire" ] \
+  || fail "legacy retirement did not preserve teardown exclusion"
+
+LEGACY_ESC_HOME="$TMP_ROOT/legacy-escalation-home"
+LEGACY_ESC_BOARD="$TMP_ROOT/legacy-escalation-board"
+mkdir -p "$LEGACY_ESC_HOME/state" "$LEGACY_ESC_BOARD"
+printf 'v2\t4\tlegacy-orphan\tfailed-receipt\tact on legacy failure\tlegacy-token\told\n' \
+  > "$LEGACY_ESC_HOME/state/.firstmate-supervisor.escalated-legacy-orphan-failed-receipt"
+run_supervisor_home "$LEGACY_ESC_HOME" "$LEGACY_ESC_BOARD" --once \
+  || fail "legacy pending escalation migration cycle failed"
+grep -F $'4\tlegacy-orphan\tfailed-receipt\tact on legacy failure\tlegacy-token' \
+  "$LEGACY_ESC_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
+  || fail "legacy pending escalation was not durably journaled"
+[ ! -e "$LEGACY_ESC_HOME/state/.firstmate-supervisor.escalated-legacy-orphan-failed-receipt" ] \
+  || fail "legacy pending escalation marker survived migration"
+
 ORPHAN_HOME="$TMP_ROOT/orphan-home"
 ORPHAN_BOARD="$TMP_ROOT/orphan-board"
 mkdir -p "$ORPHAN_HOME/state" "$ORPHAN_BOARD"
@@ -532,6 +628,25 @@ if awk -F '\t' '$1 == "task" && $2 == "orphan-task" { found=1 } END { exit !foun
   "$ORPHAN_HOME/state/firstmate-supervisor.tsv"; then
   fail "absent task remained in the supervisor snapshot"
 fi
+
+UNLOCK_HOME="$TMP_ROOT/unlock-home"
+UNLOCK_BOARD="$TMP_ROOT/unlock-board"
+mkdir -p "$UNLOCK_HOME/state" "$UNLOCK_BOARD"
+{
+  printf 'window=\n'
+  printf 'kind=ship\n'
+  printf 'generation=unlock-generation\n'
+} > "$UNLOCK_HOME/state/unlock-task.meta"
+if FM_TEST_FAIL_TASK_UNLOCK=1 \
+  run_supervisor_home "$UNLOCK_HOME" "$UNLOCK_BOARD" --once >/dev/null 2>&1; then
+  fail "task-state unlock failure produced a successful cycle"
+fi
+[ ! -e "$UNLOCK_HOME/state/.firstmate-supervisor.heartbeat" ] \
+  || fail "task-state unlock failure published a healthy heartbeat"
+grep -F 'task-state-unlock-failed' "$UNLOCK_HOME/state/.firstmate-supervisor.error" >/dev/null \
+  || fail "task-state unlock failure omitted durable cycle error state"
+/bin/rm -f "$UNLOCK_HOME/state/.firstmate-supervisor.state.lock/pid"
+rmdir "$UNLOCK_HOME/state/.firstmate-supervisor.state.lock"
 
 FAILED_HOME="$TMP_ROOT/failed-home"
 FAILED_BOARD="$TMP_ROOT/failed-board"

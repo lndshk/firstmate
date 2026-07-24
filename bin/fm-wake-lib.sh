@@ -131,8 +131,8 @@ fm_lock_release() {
   current=${BASHPID:-$$}
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 0
-  rm -f "$lockdir/pid" 2>/dev/null || true
-  rmdir "$lockdir" 2>/dev/null || true
+  rm -f "$lockdir/pid" 2>/dev/null || return 1
+  rmdir "$lockdir" 2>/dev/null
 }
 
 fm_wake_clean_field() {
@@ -141,6 +141,7 @@ fm_wake_clean_field() {
 
 fm_wake_append() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
+  local release_status
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
@@ -162,7 +163,12 @@ fm_wake_append() {
   if [ "$status" -eq 0 ]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
   fi
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  if fm_lock_release "$FM_WAKE_QUEUE_LOCK"; then
+    release_status=0
+  else
+    release_status=$?
+  fi
+  [ "$status" -ne 0 ] || status=$release_status
   return "$status"
 }
 
@@ -202,7 +208,7 @@ fm_wake_print_deduped() {
 # it. The always-on supervisor uses this to reconcile wake state while leaving
 # ownership of the real drain with Firstmate and the existing AFK flow.
 fm_wake_peek() {
-  local peek sequence_copy seq_file status
+  local peek sequence_copy seq_file status release_status
   peek="$STATE/.wake-queue.peek.$(fm_current_pid)"
   sequence_copy=${1:-}
   seq_file="$STATE/.wake-queue.seq"
@@ -221,7 +227,12 @@ fm_wake_peek() {
       printf '0\n' > "$sequence_copy" || status=$?
     fi
   fi
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  if fm_lock_release "$FM_WAKE_QUEUE_LOCK"; then
+    release_status=0
+  else
+    release_status=$?
+  fi
+  [ "$status" -ne 0 ] || status=$release_status
 
   if [ "$status" -eq 0 ]; then
     fm_wake_print_deduped "$peek" || status=$?

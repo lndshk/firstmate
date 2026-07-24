@@ -55,7 +55,11 @@ make_case() {
   # run; the ALLOW cases need them so the script can complete cleanly.
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-# `treehouse return --force <wt>`: succeed silently.
+if [ "${FM_TEST_ASSERT_TEARDOWN_MARKER:-0}" = 1 ]; then
+  [ -s "$FM_STATE_OVERRIDE/.firstmate-supervisor.teardown-task-x1" ] || exit 21
+  [ -f "$FM_STATE_OVERRIDE/task-x1.meta" ] || exit 22
+  printf '%s\n' observed > "$FM_STATE_OVERRIDE/teardown-observed"
+fi
 exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
@@ -63,7 +67,22 @@ SH
 # tmux kill-window etc.: succeed silently.
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux"
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_TEST_FAIL_TASK_CLEANUP:-0}" = 1 ]; then
+  for arg in "$@"; do
+    [ "$arg" != "$FM_STATE_OVERRIDE/task-x1.status" ] || exit 23
+  done
+fi
+if [ "${FM_TEST_FAIL_MARKER_CLEAR:-0}" = 1 ]; then
+  for arg in "$@"; do
+    [ "$arg" != "$FM_STATE_OVERRIDE/.firstmate-supervisor.teardown-task-x1" ] \
+      || exit 24
+  done
+fi
+exec /bin/rm "$@"
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/rm"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -250,6 +269,47 @@ test_teardown_leaves_supervisor_state_for_observer() {
   [ -e "$other_dir/receipt" ] \
     || fail "supervisor-state: teardown removed another task's state"
   pass "teardown leaves supervisor-owned state for observer reclamation"
+}
+
+test_teardown_excludes_observer_and_commits_meta_last() {
+  local case_dir rc
+  case_dir=$(make_case teardown-order)
+  write_meta "$case_dir" local-only ship
+  : > "$case_dir/state/task-x1.status"
+  : > "$case_dir/state/task-x1.check.sh"
+
+  FM_TEST_ASSERT_TEARDOWN_MARKER=1 run_teardown "$case_dir" >/dev/null \
+    || fail "teardown-order: teardown failed"
+  [ -s "$case_dir/state/teardown-observed" ] \
+    || fail "teardown-order: destructive cleanup began without an observer exclusion"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "teardown-order: metadata survived successful cleanup"
+  [ ! -e "$case_dir/state/.firstmate-supervisor.teardown-task-x1" ] \
+    || fail "teardown-order: successful cleanup retained its exclusion"
+
+  case_dir=$(make_case teardown-cleanup-failure)
+  write_meta "$case_dir" local-only ship
+  : > "$case_dir/state/task-x1.status"
+  : > "$case_dir/state/task-x1.check.sh"
+  set +e
+  FM_TEST_FAIL_TASK_CLEANUP=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 23 "$rc" "teardown-cleanup-failure"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "teardown-cleanup-failure: metadata retry anchor was removed"
+  [ -s "$case_dir/state/.firstmate-supervisor.teardown-task-x1" ] \
+    || fail "teardown-cleanup-failure: observer exclusion was removed"
+
+  case_dir=$(make_case teardown-marker-clear)
+  write_meta "$case_dir" local-only ship
+  FM_TEST_FAIL_MARKER_CLEAR=1 run_teardown "$case_dir" >/dev/null \
+    || fail "teardown-marker-clear: non-authoritative marker cleanup failed teardown"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "teardown-marker-clear: final metadata removal did not commit"
+  [ -s "$case_dir/state/.firstmate-supervisor.teardown-task-x1" ] \
+    || fail "teardown-marker-clear: marker failure was not exercised"
 }
 
 test_local_only_truly_unpushed_refuses() {
@@ -473,6 +533,7 @@ SH
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_leaves_supervisor_state_for_observer
+test_teardown_excludes_observer_and_commits_meta_last
 test_no_mistakes_ship_aborts_run_on_task_branch
 test_scout_does_not_abort_run
 test_local_only_does_not_abort_run

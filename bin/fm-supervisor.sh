@@ -167,6 +167,11 @@ task_state_dir() {
     "$STATE" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_')"
 }
 
+teardown_marker_path() {
+  printf '%s/.firstmate-supervisor.teardown-%s' \
+    "$STATE" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_')"
+}
+
 ensure_task_state_dir() {
   local dir
   dir=$(task_state_dir "$1") || return 1
@@ -296,7 +301,7 @@ reconcile_task_escalations() { # <id>
 }
 
 meta_generation() {
-  local meta=$1 generation window worktree project kind home signature
+  local meta=$1 generation window worktree project home signature
   generation=$(meta_field "$meta" generation) || return 1
   if [ -n "$generation" ]; then
     generation=$(printf '%s' "$generation" | clean_field)
@@ -306,12 +311,23 @@ meta_generation() {
   window=$(meta_field "$meta" window) || return 1
   worktree=$(meta_field "$meta" worktree) || return 1
   project=$(meta_field "$meta" project) || return 1
-  kind=$(meta_field "$meta" kind) || return 1
   home=$(meta_field "$meta" home) || return 1
-  signature=$(printf '%s\t%s\t%s\t%s\t%s' \
-    "$window" "$worktree" "$project" "$kind" "$home" \
+  signature=$(printf '%s\t%s\t%s\t%s' \
+    "$window" "$worktree" "$project" "$home" \
     | cksum | awk '{ print $1 "-" $2 }') || return 1
   printf 'legacy:%s\n' "$signature"
+}
+
+task_teardown_excluded() { # <meta> <id>
+  local meta=$1 id=$2 marker expected recorded
+  marker=$(teardown_marker_path "$id") || return 2
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    return 1
+  fi
+  [ -f "$marker" ] || return 2
+  expected=$(meta_generation "$meta") || return 2
+  recorded=$(read_optional_file "$marker") || return 2
+  [ "$recorded" = "$expected" ]
 }
 
 write_task_identity() {
@@ -371,12 +387,96 @@ garbage_collect_task_state() {
   done
 }
 
+reconcile_teardown_markers() {
+  local marker id meta expected recorded
+  for marker in "$STATE"/.firstmate-supervisor.teardown-*; do
+    if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+      continue
+    fi
+    [ -f "$marker" ] || return 1
+    id=${marker##*/.firstmate-supervisor.teardown-}
+    case "$id" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+    meta="$STATE/$id.meta"
+    if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
+      rm -f "$marker" || return 1
+      continue
+    fi
+    [ -f "$meta" ] || return 1
+    expected=$(meta_generation "$meta") || return 1
+    recorded=$(read_optional_file "$marker") || return 1
+    if [ "$recorded" != "$expected" ]; then
+      rm -f "$marker" || return 1
+    fi
+  done
+}
+
+legacy_escalation_identity() { # <path>; prints <id><tab><condition>
+  local path=$1 name condition id
+  name=${path##*/.firstmate-supervisor.escalated-}
+  for condition in \
+    invalid-receipt-deadline \
+    missed-receipt-deadline \
+    missing-process \
+    failed-receipt; do
+    case "$name" in
+      *-"$condition")
+        id=${name%-"$condition"}
+        [ -n "$id" ] || return 1
+        printf '%s\t%s\n' "$id" "$condition"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+reconcile_legacy_escalation() {
+  local path=$1 previous identity id condition action epoch token logged_status tab
+  previous=$(read_optional_file "$path") || return 1
+  identity=$(legacy_escalation_identity "$path") || return 1
+  IFS="$(printf '\t')" read -r id condition <<EOF
+$identity
+EOF
+  action=$(escalation_default_action "$condition") || return 1
+  tab=$(printf '\t')
+  case "$previous" in
+    "v2$tab"*)
+      reconcile_escalation_marker "$path" "$id" "$condition" "$action" || return 1
+      ;;
+    "v1$tab"*)
+      reconcile_escalation_marker "$path" "$id" "$condition" "$action" || return 1
+      ;;
+    *)
+      epoch=$(fm_path_mtime "$path") || return 1
+      is_epoch "$epoch" || return 1
+      token=$(printf '%s\t%s\t%s' "$id" "$condition" "$previous" \
+        | cksum | awk '{ print $1 "-" $2 }') || return 1
+      if escalation_logged "$id" "$condition" "$token"; then
+        :
+      else
+        logged_status=$?
+        [ "$logged_status" -eq 1 ] || return 1
+        printf '%s\t%s\t%s\t%s\t%s\n' \
+          "$epoch" "$id" "$condition" "$action" "$token" >> "$ESCALATIONS" \
+          || return 1
+      fi
+      ;;
+  esac
+}
+
 garbage_collect_legacy_task_state() {
   local path
+  for path in "$STATE"/.firstmate-supervisor.escalated-*; do
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+      continue
+    fi
+    [ -f "$path" ] || return 1
+    reconcile_legacy_escalation "$path" || return 1
+    rm -f "$path" || return 1
+  done
   for path in \
     "$STATE"/.firstmate-supervisor.receipt-* \
-    "$STATE"/.firstmate-supervisor.deadline-* \
-    "$STATE"/.firstmate-supervisor.escalated-*; do
+    "$STATE"/.firstmate-supervisor.deadline-*; do
     if [ ! -e "$path" ] && [ ! -L "$path" ]; then
       continue
     fi
@@ -385,10 +485,88 @@ garbage_collect_legacy_task_state() {
   done
 }
 
+write_teardown_marker() { # <meta> <id>
+  local meta=$1 id=$2 marker generation tmp
+  marker=$(teardown_marker_path "$id") || return 1
+  generation=$(meta_generation "$meta") || return 1
+  tmp="$marker.tmp.$$"
+  if ! printf '%s\n' "$generation" > "$tmp" || ! mv -f "$tmp" "$marker"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+reconcile_legacy_retirement_record() { # <path> <root>
+  local path=$1 root=$2 record format epoch id state condition action token
+  local journal_condition logged_status meta
+  [ -f "$path" ] || return 1
+  record=$(read_optional_file "$path") || return 1
+  IFS="$(printf '\t')" read -r \
+    format epoch id state condition action token <<EOF
+$record
+EOF
+  [ "$format" = v1 ] \
+    && is_epoch "$epoch" \
+    && [ -n "$id" ] \
+    && [ "$path" = "$root/$id" ] \
+    && [ -n "$token" ] || return 1
+  case "$state" in
+    pending) journal_condition=retirement-pending ;;
+    failed)
+      [ -n "$condition" ] && [ "$condition" != - ] || return 1
+      journal_condition="retirement-$condition"
+      ;;
+    *) return 1 ;;
+  esac
+  [ -n "$action" ] && [ "$action" != - ] || return 1
+  if escalation_logged "$id" "$journal_condition" "$token"; then
+    :
+  else
+    logged_status=$?
+    [ "$logged_status" -eq 1 ] || return 1
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$epoch" "$id" "$journal_condition" "$action" "$token" >> "$ESCALATIONS" \
+      || return 1
+  fi
+  meta="$STATE/$id.meta"
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    [ -f "$meta" ] || return 1
+    write_teardown_marker "$meta" "$id" || return 1
+  fi
+  rm -f "$path" || return 1
+}
+
+reconcile_legacy_retirements() {
+  local root path
+  for root in \
+    "$STATE/.firstmate-supervisor.retirements" \
+    "$STATE/.firstmate-supervisor.retirement-intents"; do
+    if [ ! -e "$root" ] && [ ! -L "$root" ]; then
+      continue
+    fi
+    [ -d "$root" ] && [ ! -L "$root" ] || return 1
+    for path in "$root"/*; do
+      if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+        continue
+      fi
+      case "$path" in
+        *.tmp.*) rm -f "$path" || return 1; continue ;;
+      esac
+      reconcile_legacy_retirement_record "$path" "$root" || return 1
+    done
+    rmdir "$root" 2>/dev/null || true
+  done
+}
+
 escalate_once() { # <id> <condition> <action> [evidence]
   local id=$1 condition=$2 action=$3 marker legacy evidence="" previous tmp
   local tab format event_epoch saved_id saved_condition saved_action token saved_evidence
-  local token_seed
+  local token_seed teardown_marker
+  teardown_marker=$(teardown_marker_path "$id") || return 1
+  if [ -e "$teardown_marker" ] || [ -L "$teardown_marker" ]; then
+    [ -f "$teardown_marker" ] || return 1
+    return 0
+  fi
   legacy="$STATE/.firstmate-supervisor.escalated-$(escalation_key "$id" "$condition")"
   marker=$(migrate_task_state_file \
     "$id" "$legacy" "escalated-$(escalation_key "$condition" condition)") || return 1
@@ -584,7 +762,7 @@ classify_meta() { # <meta>; prints one TSV task row
   local pane_activity=idle pid_activity=idle receipt_version="" receipt_time=""
   local deadline_status="" deadline_version="-" deadline_time="-"
   local deadline_action="" process_action="" receipt_action="" contract_action=""
-  local satisfaction
+  local satisfaction teardown_marker
   [ -f "$meta" ] || return 1
   id=$(basename "$meta" .meta)
   ensure_task_generation "$meta" "$id" || return 1
@@ -692,6 +870,12 @@ EOF
     fi
   fi
 
+  teardown_marker=$(teardown_marker_path "$id") || return 1
+  if [ -e "$teardown_marker" ] || [ -L "$teardown_marker" ]; then
+    [ -f "$teardown_marker" ] || return 1
+    return 0
+  fi
+
   if [ -n "$process_condition" ]; then
     process_action="inspect or relaunch the recorded direct-report process"
     escalate_once "$id" "$process_condition" "$process_action" || return 1
@@ -780,7 +964,7 @@ wake_snapshot() { # prints: <count><tab><last-seq>
 }
 
 write_snapshot() {
-  local tmp rows meta wake wake_count wake_last_seq status
+  local tmp rows meta id excluded wake wake_count wake_last_seq status
   tmp="$SNAPSHOT.tmp.$$"
   rows="$tmp.rows"
   rm -f "$rows"
@@ -792,6 +976,16 @@ write_snapshot() {
       rm -f "$tmp" "$rows"
       return 1
     }
+    id=$(basename "$meta" .meta)
+    if task_teardown_excluded "$meta" "$id"; then
+      continue
+    else
+      excluded=$?
+      if [ "$excluded" -ne 1 ]; then
+        rm -f "$tmp" "$rows"
+        return 1
+      fi
+    fi
     classify_meta "$meta" >> "$rows" || {
       rm -f "$tmp" "$rows"
       return 1
@@ -865,7 +1059,8 @@ reconcile_task_state() {
     id=$(basename "$meta" .meta)
     ensure_task_generation "$meta" "$id" || return 1
   done
-  garbage_collect_task_state
+  garbage_collect_task_state || return 1
+  reconcile_teardown_markers
 }
 
 last_log_condition() {
@@ -918,6 +1113,10 @@ error_state_is_clear() {
 
 cycle_locked() {
   mkdir -p "$STATE"
+  if ! reconcile_legacy_retirements; then
+    record_error task-state-reconcile-failed
+    return 1
+  fi
   if ! reconcile_task_state; then
     record_error task-state-reconcile-failed
     return 1
@@ -941,6 +1140,26 @@ cycle_locked() {
     record_error board-refresh-failed
     return 1
   fi
+  return 0
+}
+
+cycle() {
+  local status release_status
+  mkdir -p "$STATE" || return 1
+  if ! acquire_task_state_lock; then
+    record_error task-state-lock-failed
+    return 1
+  fi
+  cycle_locked
+  status=$?
+  fm_lock_release "$TASK_STATE_LOCK"
+  release_status=$?
+  if [ "$release_status" -ne 0 ]; then
+    rm -f "$HEARTBEAT" 2>/dev/null || true
+    record_error task-state-unlock-failed
+    return 1
+  fi
+  [ "$status" -eq 0 ] || return "$status"
   if ! clear_error_state; then
     record_error error-clear-failed
     return 1
@@ -954,19 +1173,6 @@ cycle_locked() {
     return 1
   fi
   return 0
-}
-
-cycle() {
-  local status
-  mkdir -p "$STATE" || return 1
-  if ! acquire_task_state_lock; then
-    record_error task-state-lock-failed
-    return 1
-  fi
-  cycle_locked
-  status=$?
-  fm_lock_release "$TASK_STATE_LOCK"
-  return "$status"
 }
 
 run_loop() {
