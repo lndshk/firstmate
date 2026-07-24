@@ -316,6 +316,34 @@ printf '%s\n' "$cadence_stale" | grep -F "supervisor pid $cadence_pid has no fre
   || fail "stale cross-cadence owner did not report heartbeat failure: $cadence_stale"
 kill -CONT "$cadence_pid" 2>/dev/null || fail "could not resume cross-cadence owner"
 
+LONG_CADENCE_HOME="$TMP_ROOT/long-cadence-home"
+LONG_CADENCE_BOARD="$TMP_ROOT/long-cadence-board"
+mkdir -p "$LONG_CADENCE_HOME/state" "$LONG_CADENCE_BOARD"
+FM_SUPERVISOR_INTERVAL=120 run_supervisor_home "$LONG_CADENCE_HOME" "$LONG_CADENCE_BOARD" start >/dev/null \
+  || fail "long-cadence supervisor start failed"
+grep -F ',limit=245,' "$LONG_CADENCE_BOARD/board.html" >/dev/null \
+  || fail "board stale threshold ignored the running owner's cadence"
+FM_BOARD_STALE_AFTER=17 \
+  FM_HOME="$LONG_CADENCE_HOME" \
+  FM_STATE_OVERRIDE="$LONG_CADENCE_HOME/state" \
+  FM_BOARD_DIR="$LONG_CADENCE_BOARD" \
+  "$ROOT/bin/fm-board.sh" --once \
+  || fail "explicit board stale threshold render failed"
+grep -F ',limit=17,' "$LONG_CADENCE_BOARD/board.html" >/dev/null \
+  || fail "explicit board stale threshold was not preserved"
+
+NO_OWNER_HOME="$TMP_ROOT/no-owner-home"
+NO_OWNER_BOARD="$TMP_ROOT/no-owner-board"
+mkdir -p "$NO_OWNER_HOME/state" "$NO_OWNER_BOARD"
+cp "$LONG_CADENCE_HOME/state/firstmate-supervisor.tsv" "$NO_OWNER_HOME/state/firstmate-supervisor.tsv"
+FM_HOME="$NO_OWNER_HOME" \
+  FM_STATE_OVERRIDE="$NO_OWNER_HOME/state" \
+  FM_BOARD_DIR="$NO_OWNER_BOARD" \
+  "$ROOT/bin/fm-board.sh" --once \
+  || fail "no-owner board fallback render failed"
+grep -F ',limit=60,' "$NO_OWNER_BOARD/board.html" >/dev/null \
+  || fail "board without an owner receipt did not use the safe fallback"
+
 OTHER_HOME="$TMP_ROOT/other-home"
 OTHER_BOARD="$TMP_ROOT/other-board"
 mkdir -p "$OTHER_HOME/state" "$OTHER_BOARD"

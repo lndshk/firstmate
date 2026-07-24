@@ -10,8 +10,27 @@ SNAPSHOT="${FM_SUPERVISOR_SNAPSHOT:-$STATE/firstmate-supervisor.tsv}"
 BOARD_DIR="${FM_BOARD_DIR:-$STATE/board}"
 OUT="${FM_BOARD_OUT:-$BOARD_DIR/board.html}"
 HEARTBEAT="$STATE/.firstmate-supervisor.heartbeat"
-STALE_AFTER="${FM_BOARD_STALE_AFTER:-60}"
-case "$STALE_AFTER" in ''|0|*[!0-9]*) STALE_AFTER=60 ;; esac
+PIDFILE="$STATE/.firstmate-supervisor.pid"
+OWNER_RECEIPT="$STATE/.firstmate-supervisor.owner"
+DEFAULT_STALE_AFTER=60
+owner_pid=$(cat "$PIDFILE" 2>/dev/null || true)
+receipt_pid=$(sed -n 's/^pid=//p' "$OWNER_RECEIPT" 2>/dev/null | tail -1)
+owner_interval=$(sed -n 's/^interval=//p' "$OWNER_RECEIPT" 2>/dev/null | tail -1)
+case "$owner_pid" in
+  ''|*[!0-9]*) ;;
+  *)
+    case "$owner_interval" in
+      ''|0|*[!0-9]*) ;;
+      *)
+        if [ "$receipt_pid" = "$owner_pid" ] && kill -0 "$owner_pid" 2>/dev/null; then
+          DEFAULT_STALE_AFTER=$((owner_interval * 2 + 5))
+        fi
+        ;;
+    esac
+    ;;
+esac
+STALE_AFTER="${FM_BOARD_STALE_AFTER:-$DEFAULT_STALE_AFTER}"
+case "$STALE_AFTER" in ''|0|*[!0-9]*) STALE_AFTER=$DEFAULT_STALE_AFTER ;; esac
 
 now_epoch() { date +%s; }
 mtime_epoch() {
