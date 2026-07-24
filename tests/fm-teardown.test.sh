@@ -221,7 +221,7 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
   pass "teardown prompts tasks-axi backlog refresh when compatible"
 }
 
-test_teardown_reclaims_supervisor_task_state() {
+test_teardown_leaves_supervisor_state_for_observer() {
   local case_dir task_dir other_dir
   case_dir=$(make_case supervisor-state)
   write_meta "$case_dir" local-only ship
@@ -239,20 +239,17 @@ test_teardown_reclaims_supervisor_task_state() {
   run_teardown "$case_dir" >/dev/null \
     || fail "supervisor-state: teardown failed"
 
-  [ ! -e "$task_dir" ] \
-    || fail "supervisor-state: per-task supervisor directory survived teardown"
-  [ ! -e "$case_dir/state/.firstmate-supervisor.receipt-task-x1-receipt" ] \
-    || fail "supervisor-state: legacy receipt cursor survived teardown"
-  [ ! -e "$case_dir/state/.firstmate-supervisor.deadline-task-x1-receipt" ] \
-    || fail "supervisor-state: legacy deadline cursor survived teardown"
-  [ ! -e "$case_dir/state/.firstmate-supervisor.escalated-task-x1-failed-receipt" ] \
-    || fail "supervisor-state: legacy escalation marker survived teardown"
-  grep -F $'1\ttask-x1\tfuture-condition\tinspect future condition\ttoken-1' \
-    "$case_dir/state/.firstmate-supervisor.escalations" >/dev/null \
-    || fail "supervisor-state: pending escalation was not journaled before teardown"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "supervisor-state: task metadata survived teardown"
+  [ -e "$task_dir/escalated-future-condition" ] \
+    || fail "supervisor-state: teardown mutated supervisor-owned state"
+  [ -e "$case_dir/state/.firstmate-supervisor.receipt-task-x1-receipt" ] \
+    || fail "supervisor-state: teardown removed legacy supervisor state"
+  [ ! -e "$case_dir/state/.firstmate-supervisor.escalations" ] \
+    || fail "supervisor-state: teardown journaled supervisor evidence"
   [ -e "$other_dir/receipt" ] \
     || fail "supervisor-state: teardown removed another task's state"
-  pass "teardown reclaims current and future per-task supervisor state"
+  pass "teardown leaves supervisor-owned state for observer reclamation"
 }
 
 test_local_only_truly_unpushed_refuses() {
@@ -475,7 +472,7 @@ SH
 
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
-test_teardown_reclaims_supervisor_task_state
+test_teardown_leaves_supervisor_state_for_observer
 test_no_mistakes_ship_aborts_run_on_task_branch
 test_scout_does_not_abort_run
 test_local_only_does_not_abort_run

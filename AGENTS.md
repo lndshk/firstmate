@@ -85,7 +85,7 @@ projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" lines
   <id>.turn-ended    touched by turn-end hooks
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check appends pr=; section 11 covers optional receipt-deadline=)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=, generation=; kind=secondmate also records home= and projects= (fm-pr-check appends pr=; section 11 covers optional receipt-deadline=)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
@@ -537,6 +537,7 @@ bin/fm-supervisor.sh start   # ensure the always-on no-chat owner is live
 **Always-on Firstmate supervisor (main home, no chat).**
 `bin/fm-supervisor.sh` is the deterministic present-mode safety net.
 It continuously reconciles a locked copy of durable wakes without draining them, inspects only this home's recorded `state/*.meta` direct reports, status receipts, pane/process evidence, and explicit receipt deadlines, then atomically refreshes `state/firstmate-supervisor.tsv` and `state/board/board.html`.
+Supervisor-owned per-task evidence is keyed to each metadata generation and reclaimed when its recorded metadata disappears, so reused task ids cannot inherit prior receipt, deadline, or escalation state.
 It is an observer and recorder, not another task scheduler: it never mutates the backlog, sends keys, injects chat, changes AFK state, or replaces Firstmate's brief/artifact reconciliation.
 The AFK daemon retains its existing batching and injection behavior.
 

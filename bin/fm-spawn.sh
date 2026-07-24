@@ -503,6 +503,7 @@ EOF
 fi
 
 mkdir -p "$STATE"
+META_GENERATION="$(date +%s)-$$-${RANDOM:-0}"
 {
   echo "window=$T"
   echo "worktree=$WT"
@@ -511,6 +512,7 @@ mkdir -p "$STATE"
   echo "kind=$KIND"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  echo "generation=$META_GENERATION"
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"

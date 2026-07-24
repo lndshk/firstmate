@@ -40,19 +40,7 @@ FORCE=${2:-}
 case "$ID" in ''|*[!A-Za-z0-9_.-]*) echo "error: invalid task id: $ID" >&2; exit 2 ;; esac
 
 META="$STATE/$ID.meta"
-if [ ! -f "$META" ]; then
-  RETIREMENT_RECORD="$STATE/.firstmate-supervisor.retirements/$ID"
-  RETIREMENT_INTENT="$STATE/.firstmate-supervisor.retirement-intents/$ID"
-  if [ -e "$RETIREMENT_RECORD" ] || [ -L "$RETIREMENT_RECORD" ] \
-    || [ -e "$RETIREMENT_INTENT" ] || [ -L "$RETIREMENT_INTENT" ]; then
-    FM_STATE_OVERRIDE="$STATE" \
-      "$FM_ROOT/bin/fm-supervisor.sh" --retire-task "$ID"
-    echo "teardown $ID retirement recovery complete"
-    exit 0
-  fi
-  echo "error: no meta for task $ID at $META" >&2
-  exit 1
-fi
+[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
@@ -83,16 +71,6 @@ default_branch() {
 meta_value() {
   local meta=$1 key=$2
   grep "^$key=" "$meta" | cut -d= -f2- || true
-}
-
-retire_supervisor_task_state() {
-  FM_STATE_OVERRIDE="$1" \
-    "$FM_ROOT/bin/fm-supervisor.sh" --retire-task "$2"
-}
-
-begin_supervisor_task_retirement() {
-  FM_STATE_OVERRIDE="$1" \
-    "$FM_ROOT/bin/fm-supervisor.sh" --begin-retirement "$2"
 }
 
 backlog_refresh_reminder() {
@@ -384,7 +362,6 @@ cleanup_firstmate_home_children() {
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
-    begin_supervisor_task_retirement "$sub_state" "$child_id"
     if [ -n "$child_t" ]; then
       tmux kill-window -t "$child_t" 2>/dev/null || true
     fi
@@ -404,7 +381,12 @@ cleanup_firstmate_home_children() {
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
-    retire_supervisor_task_state "$sub_state" "$child_id"
+    rm -f \
+      "$sub_state/$child_id.meta" \
+      "$sub_state/$child_id.status" \
+      "$sub_state/$child_id.turn-ended" \
+      "$sub_state/$child_id.check.sh" \
+      "$sub_state/$child_id.pi-ext.ts"
   done
 }
 
@@ -478,8 +460,6 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-begin_supervisor_task_retirement "$STATE" "$ID"
-
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH"
 fi
@@ -516,7 +496,12 @@ if [ "$KIND" = secondmate ]; then
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
   remove_secondmate_registry_entry "$ID"
 fi
-retire_supervisor_task_state "$STATE" "$ID"
+rm -f \
+  "$STATE/$ID.meta" \
+  "$STATE/$ID.status" \
+  "$STATE/$ID.turn-ended" \
+  "$STATE/$ID.check.sh" \
+  "$STATE/$ID.pi-ext.ts"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

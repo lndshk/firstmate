@@ -115,13 +115,6 @@ if [ "${FM_TEST_FAIL_TASK_STATE_CLEAR:-0}" = 1 ]; then
     esac
   done
 fi
-if [ "${FM_TEST_FAIL_RETIRE_META_CLEAR:-0}" = 1 ]; then
-  for arg in "$@"; do
-    case "$arg" in
-      *"/partial-task.meta") exit 1 ;;
-    esac
-  done
-fi
 exec /bin/rm "$@"
 SH
 chmod +x "$FAKEBIN/rm"
@@ -137,14 +130,6 @@ write_meta() { # <id> <window> <deadline>
 task_state_dir() {
   printf '%s/state/.firstmate-supervisor.task-%s\n' \
     "$1" "$(printf '%s' "$2" | tr -c 'A-Za-z0-9_.-' '_')"
-}
-
-retirement_record() {
-  printf '%s/state/.firstmate-supervisor.retirements/%s\n' "$1" "$2"
-}
-
-retirement_intent() {
-  printf '%s/state/.firstmate-supervisor.retirement-intents/%s\n' "$1" "$2"
 }
 
 now=$(date +%s)
@@ -480,223 +465,73 @@ run_supervisor_home "$ERROR_CLEAR_HOME" "$ERROR_CLEAR_BOARD" --once \
   "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.log")" -eq 1 ] \
   || fail "successful complete cycle did not record one recovery"
 
-ORDER_HOME="$TMP_ROOT/order-home"
-ORDER_BOARD="$TMP_ROOT/order-board"
-mkdir -p "$ORDER_HOME/state" "$ORDER_BOARD"
+GENERATION_HOME="$TMP_ROOT/generation-home"
+GENERATION_BOARD="$TMP_ROOT/generation-board"
+mkdir -p "$GENERATION_HOME/state" "$GENERATION_BOARD"
 {
   printf 'window=\n'
   printf 'kind=ship\n'
-} > "$ORDER_HOME/state/order-task.meta"
-printf 'done: complete\n' > "$ORDER_HOME/state/order-task.status"
-mkdir -p "$(task_state_dir "$ORDER_HOME" order-task)"
-printf 'stale receipt evidence\n' > "$(task_state_dir "$ORDER_HOME" order-task)/receipt"
+  printf 'generation=first-generation\n'
+} > "$GENERATION_HOME/state/reused-task.meta"
+run_supervisor_home "$GENERATION_HOME" "$GENERATION_BOARD" --once \
+  || fail "initial generated task cycle failed"
+generation_dir=$(task_state_dir "$GENERATION_HOME" reused-task)
+printf 'stale receipt evidence\n' > "$generation_dir/receipt"
+printf 'v2\t1\treused-task\tfuture-condition\tinspect stale generation\ttoken-old\told\n' \
+  > "$generation_dir/escalated-future-condition"
+{
+  printf 'window=\n'
+  printf 'kind=ship\n'
+  printf 'generation=second-generation\n'
+} > "$GENERATION_HOME/state/reused-task.meta"
+run_supervisor_home "$GENERATION_HOME" "$GENERATION_BOARD" --once \
+  || fail "reused task generation cycle failed"
+grep -Fx 'generation:second-generation' "$generation_dir/generation" >/dev/null \
+  || fail "reused task did not adopt its new generation"
+[ ! -e "$generation_dir/receipt" ] \
+  || fail "reused task inherited stale receipt evidence"
+[ ! -e "$generation_dir/escalated-future-condition" ] \
+  || fail "reused task inherited a stale escalation marker"
+grep -F $'1\treused-task\tfuture-condition\tinspect stale generation\ttoken-old' \
+  "$GENERATION_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
+  || fail "generation reset discarded pending escalation history"
+
+ORPHAN_HOME="$TMP_ROOT/orphan-home"
+ORPHAN_BOARD="$TMP_ROOT/orphan-board"
+mkdir -p "$ORPHAN_HOME/state" "$ORPHAN_BOARD"
+{
+  printf 'window=\n'
+  printf 'kind=ship\n'
+  printf 'generation=orphan-generation\n'
+} > "$ORPHAN_HOME/state/orphan-task.meta"
+run_supervisor_home "$ORPHAN_HOME" "$ORPHAN_BOARD" --once \
+  || fail "orphan setup cycle failed"
+orphan_dir=$(task_state_dir "$ORPHAN_HOME" orphan-task)
+printf 'v2\t2\torphan-task\tfuture-condition\tinspect orphan\ttoken-orphan\torphan\n' \
+  > "$orphan_dir/escalated-future-condition"
+printf 'legacy receipt\n' \
+  > "$ORPHAN_HOME/state/.firstmate-supervisor.receipt-orphan-task-receipt"
+rm -f "$ORPHAN_HOME/state/orphan-task.meta"
 if FM_TEST_FAIL_TASK_STATE_CLEAR=1 \
-  run_supervisor_home "$ORDER_HOME" "$ORDER_BOARD" --retire-task order-task >/dev/null 2>&1; then
-  fail "task retirement succeeded when supervisor state cleanup failed"
+  run_supervisor_home "$ORPHAN_HOME" "$ORPHAN_BOARD" --once >/dev/null 2>&1; then
+  fail "orphan cleanup failure produced a successful cycle"
 fi
-[ -e "$ORDER_HOME/state/order-task.meta" ] \
-  || fail "task retirement deleted metadata before supervisor state cleanup succeeded"
-[ -e "$(task_state_dir "$ORDER_HOME" order-task)/receipt" ] \
-  || fail "failed supervisor state cleanup removed its retry evidence"
-[ -s "$(retirement_record "$ORDER_HOME" order-task)" ] \
-  || fail "failed supervisor state cleanup omitted its retirement tombstone"
-run_supervisor_home "$ORDER_HOME" "$ORDER_BOARD" --retire-task order-task \
-  || fail "task retirement did not recover after state cleanup failure"
-[ ! -e "$ORDER_HOME/state/order-task.meta" ] \
-  || fail "successful retirement retained its metadata retry anchor"
-[ ! -e "$(retirement_record "$ORDER_HOME" order-task)" ] \
-  || fail "successful retirement retained its transaction tombstone"
-[ ! -e "$(retirement_intent "$ORDER_HOME" order-task)" ] \
-  || fail "successful retirement retained its independent exclusion"
-
-PARTIAL_HOME="$TMP_ROOT/partial-home"
-PARTIAL_BOARD="$TMP_ROOT/partial-board"
-mkdir -p "$PARTIAL_HOME/state" "$PARTIAL_BOARD"
-{
-  printf 'window=fm-gone\n'
-  printf 'kind=ship\n'
-  printf 'receipt-deadline=1\n'
-} > "$PARTIAL_HOME/state/partial-task.meta"
-printf 'working: retirement started\n' > "$PARTIAL_HOME/state/partial-task.status"
-mkdir -p "$(task_state_dir "$PARTIAL_HOME" partial-task)"
-printf 'stale receipt evidence\n' > "$(task_state_dir "$PARTIAL_HOME" partial-task)/receipt"
-if FM_TEST_FAIL_RETIRE_META_CLEAR=1 \
-  run_supervisor_home "$PARTIAL_HOME" "$PARTIAL_BOARD" --retire-task partial-task \
-    >/dev/null 2>&1; then
-  fail "partial retirement succeeded when metadata cleanup failed"
+[ -d "$orphan_dir" ] \
+  || fail "failed orphan cleanup lost its retry state"
+rm -f "$ORPHAN_HOME/state/.firstmate-supervisor.heartbeat"
+run_supervisor_home "$ORPHAN_HOME" "$ORPHAN_BOARD" --once \
+  || fail "orphan task state was not reclaimed"
+[ ! -e "$orphan_dir" ] \
+  || fail "absent task retained supervisor-owned state"
+[ ! -e "$ORPHAN_HOME/state/.firstmate-supervisor.receipt-orphan-task-receipt" ] \
+  || fail "absent task retained legacy supervisor state"
+grep -F $'2\torphan-task\tfuture-condition\tinspect orphan\ttoken-orphan' \
+  "$ORPHAN_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
+  || fail "orphan reclamation discarded pending escalation history"
+if awk -F '\t' '$1 == "task" && $2 == "orphan-task" { found=1 } END { exit !found }' \
+  "$ORPHAN_HOME/state/firstmate-supervisor.tsv"; then
+  fail "absent task remained in the supervisor snapshot"
 fi
-[ -e "$PARTIAL_HOME/state/partial-task.meta" ] \
-  || fail "partial retirement lost its metadata retry anchor"
-[ ! -e "$PARTIAL_HOME/state/partial-task.status" ] \
-  || fail "partial retirement did not reach the status cleanup phase"
-[ -s "$(retirement_record "$PARTIAL_HOME" partial-task)" ] \
-  || fail "partial retirement omitted its durable transaction tombstone"
-run_supervisor_home "$PARTIAL_HOME" "$PARTIAL_BOARD" --once \
-  || fail "supervisor could not render a failed retirement transaction"
-grep -F $'task\tpartial-task\tstalled\tretirement failed: metadata-cleanup-failed' \
-  "$PARTIAL_HOME/state/firstmate-supervisor.tsv" >/dev/null \
-  || fail "partial retirement was reclassified from its half-cleaned metadata"
-[ "$(awk -F '\t' '$1 == "task" && $2 == "partial-task" { count++ } END { print count + 0 }' \
-  "$PARTIAL_HOME/state/firstmate-supervisor.tsv")" -eq 1 ] \
-  || fail "partial retirement appeared as both a task and transaction"
-grep -F $'escalation\tpartial-task\tretirement-metadata-cleanup-failed' \
-  "$PARTIAL_HOME/state/firstmate-supervisor.tsv" >/dev/null \
-  || fail "partial retirement failure was absent from the escalation snapshot"
-grep -F 'retirement-metadata-cleanup-failed' "$PARTIAL_BOARD/board.html" >/dev/null \
-  || fail "partial retirement failure was absent from the board"
-grep -F $'\tpartial-task\tretirement-metadata-cleanup-failed\t' \
-  "$PARTIAL_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
-  || fail "partial retirement failure was absent from durable escalation history"
-run_supervisor_home "$PARTIAL_HOME" "$PARTIAL_BOARD" --once \
-  || fail "repeated failed retirement reconciliation failed"
-[ "$(awk -F '\t' \
-  '$2 == "partial-task" && $3 == "retirement-metadata-cleanup-failed" { count++ } END { print count + 0 }' \
-  "$PARTIAL_HOME/state/.firstmate-supervisor.escalations")" -eq 1 ] \
-  || fail "failed retirement was appended to durable history more than once"
-partial_status=$(run_supervisor_home "$PARTIAL_HOME" "$PARTIAL_BOARD" status 2>&1 || true)
-printf '%s\n' "$partial_status" | grep -F 'retirement-failures=1' >/dev/null \
-  || fail "partial retirement failure was absent from supervisor status"
-printf '%s\n' "$partial_status" \
-  | grep -F 'retirement-error=partial-task:metadata-cleanup-failed' >/dev/null \
-  || fail "supervisor status omitted the partial retirement phase"
-run_supervisor_home "$PARTIAL_HOME" "$PARTIAL_BOARD" --retire-task partial-task \
-  || fail "partial retirement did not recover through its durable tombstone"
-[ ! -e "$PARTIAL_HOME/state/partial-task.meta" ] \
-  || fail "recovered partial retirement retained metadata"
-[ ! -e "$(retirement_record "$PARTIAL_HOME" partial-task)" ] \
-  || fail "recovered partial retirement retained its tombstone"
-[ ! -e "$(retirement_intent "$PARTIAL_HOME" partial-task)" ] \
-  || fail "recovered partial retirement retained its independent exclusion"
-
-LOCKED_HOME="$TMP_ROOT/locked-home"
-LOCKED_BOARD="$TMP_ROOT/locked-board"
-mkdir -p "$LOCKED_HOME/state/.firstmate-supervisor.state.lock" "$LOCKED_BOARD"
-printf '%s\n' "$$" > "$LOCKED_HOME/state/.firstmate-supervisor.state.lock/pid"
-{
-  printf 'window=\n'
-  printf 'kind=ship\n'
-} > "$LOCKED_HOME/state/locked-task.meta"
-mkdir -p "$(task_state_dir "$LOCKED_HOME" locked-task)"
-printf 'stale receipt evidence\n' > "$(task_state_dir "$LOCKED_HOME" locked-task)/receipt"
-if locked_retire_error=$(FM_SUPERVISOR_TASK_LOCK_WAIT=1 \
-  run_supervisor_home "$LOCKED_HOME" "$LOCKED_BOARD" --retire-task locked-task 2>&1); then
-  fail "task retirement waited indefinitely for the live cycle-state lock"
-fi
-printf '%s\n' "$locked_retire_error" \
-  | grep -F 'resume retirement with' >/dev/null \
-  || fail "bounded task retirement omitted actionable lock recovery"
-[ -e "$LOCKED_HOME/state/locked-task.meta" ] \
-  || fail "timed-out task retirement removed its metadata retry anchor"
-[ -s "$(retirement_record "$LOCKED_HOME" locked-task)" ] \
-  || fail "timed-out task retirement omitted durable failure evidence"
-rm -f "$LOCKED_HOME/state/.firstmate-supervisor.state.lock/pid"
-rmdir "$LOCKED_HOME/state/.firstmate-supervisor.state.lock"
-run_supervisor_home "$LOCKED_HOME" "$LOCKED_BOARD" --once \
-  || fail "supervisor could not render a task-lock retirement failure"
-grep -F $'escalation\tlocked-task\tretirement-task-state-lock-timeout' \
-  "$LOCKED_HOME/state/firstmate-supervisor.tsv" >/dev/null \
-  || fail "task-lock retirement failure was absent from the escalation snapshot"
-locked_status=$(run_supervisor_home "$LOCKED_HOME" "$LOCKED_BOARD" status 2>&1 || true)
-printf '%s\n' "$locked_status" \
-  | grep -F 'retirement-error=locked-task:task-state-lock-timeout' >/dev/null \
-  || fail "task-lock retirement failure was absent from supervisor status"
-run_supervisor_home "$LOCKED_HOME" "$LOCKED_BOARD" --retire-task locked-task \
-  || fail "locked task retirement failed after bounded retry"
-[ ! -e "$LOCKED_HOME/state/locked-task.meta" ] \
-  || fail "task retirement retained metadata after acquiring the cycle-state lock"
-[ ! -e "$(task_state_dir "$LOCKED_HOME" locked-task)" ] \
-  || fail "task retirement retained supervisor state after acquiring the cycle-state lock"
-[ ! -e "$(retirement_intent "$LOCKED_HOME" locked-task)" ] \
-  || fail "task retirement retained its independent exclusion"
-
-RETIRE_LOCK_HOME="$TMP_ROOT/retire-lock-home"
-RETIRE_LOCK_BOARD="$TMP_ROOT/retire-lock-board"
-mkdir -p \
-  "$RETIRE_LOCK_HOME/state/.firstmate-supervisor.retirement.lock" \
-  "$RETIRE_LOCK_BOARD"
-printf '%s\n' "$$" \
-  > "$RETIRE_LOCK_HOME/state/.firstmate-supervisor.retirement.lock/pid"
-{
-  printf 'window=fm-gone\n'
-  printf 'kind=ship\n'
-  printf 'receipt-deadline=1\n'
-} > "$RETIRE_LOCK_HOME/state/retire-lock-task.meta"
-if FM_SUPERVISOR_TASK_LOCK_WAIT=0 \
-  run_supervisor_home "$RETIRE_LOCK_HOME" "$RETIRE_LOCK_BOARD" \
-    --begin-retirement retire-lock-task >/dev/null 2>&1; then
-  fail "retirement-lock failure did not stop teardown preparation"
-fi
-[ -s "$(retirement_intent "$RETIRE_LOCK_HOME" retire-lock-task)" ] \
-  || fail "retirement-lock failure omitted its independent task exclusion"
-grep -F $'\tfailed\tlock-timeout\t' \
-  "$(retirement_intent "$RETIRE_LOCK_HOME" retire-lock-task)" >/dev/null \
-  || fail "retirement-lock failure omitted actionable durable failure state"
-[ -e "$RETIRE_LOCK_HOME/state/retire-lock-task.meta" ] \
-  || fail "retirement-lock failure removed task metadata"
-rm -f "$RETIRE_LOCK_HOME/state/.firstmate-supervisor.retirement.lock/pid"
-rmdir "$RETIRE_LOCK_HOME/state/.firstmate-supervisor.retirement.lock"
-run_supervisor_home "$RETIRE_LOCK_HOME" "$RETIRE_LOCK_BOARD" --once \
-  || fail "supervisor could not reconcile an independent retirement exclusion"
-grep -F $'task\tretire-lock-task\tstalled\tretirement failed: lock-timeout' \
-  "$RETIRE_LOCK_HOME/state/firstmate-supervisor.tsv" >/dev/null \
-  || fail "retirement-lock exclusion was reclassified from task metadata"
-if grep -F $'escalation\tretire-lock-task\tmissing-process\t' \
-  "$RETIRE_LOCK_HOME/state/firstmate-supervisor.tsv" >/dev/null; then
-  fail "retirement-lock exclusion emitted a false process escalation"
-fi
-grep -F $'escalation\tretire-lock-task\tretirement-lock-timeout\t' \
-  "$RETIRE_LOCK_HOME/state/firstmate-supervisor.tsv" >/dev/null \
-  || fail "retirement-lock failure was absent from the escalation snapshot"
-retire_lock_status=$(run_supervisor_home \
-  "$RETIRE_LOCK_HOME" "$RETIRE_LOCK_BOARD" status 2>&1 || true)
-printf '%s\n' "$retire_lock_status" \
-  | grep -F 'retirement-error=retire-lock-task:lock-timeout' >/dev/null \
-  || fail "retirement-lock failure was absent from supervisor status"
-run_supervisor_home "$RETIRE_LOCK_HOME" "$RETIRE_LOCK_BOARD" \
-  --retire-task retire-lock-task \
-  || fail "retirement-lock failure did not recover through its independent exclusion"
-[ ! -e "$(retirement_intent "$RETIRE_LOCK_HOME" retire-lock-task)" ] \
-  || fail "recovered retirement-lock failure retained its independent exclusion"
-
-ABANDONED_HOME="$TMP_ROOT/abandoned-home"
-ABANDONED_BOARD="$TMP_ROOT/abandoned-board"
-mkdir -p "$ABANDONED_HOME/state" "$ABANDONED_BOARD"
-{
-  printf 'window=\n'
-  printf 'kind=ship\n'
-} > "$ABANDONED_HOME/state/abandoned-task.meta"
-run_supervisor_home "$ABANDONED_HOME" "$ABANDONED_BOARD" \
-  --begin-retirement abandoned-task \
-  || fail "abandoned retirement preparation failed"
-rm -f "$ABANDONED_HOME/state/abandoned-task.meta"
-FM_SUPERVISOR_RETIRE_PENDING_MAX_AGE=0 \
-  run_supervisor_home "$ABANDONED_HOME" "$ABANDONED_BOARD" --once \
-  || fail "supervisor could not reconcile an abandoned pending retirement"
-grep -F $'task\tabandoned-task\tstalled\tretirement failed: abandoned-pending' \
-  "$ABANDONED_HOME/state/firstmate-supervisor.tsv" >/dev/null \
-  || fail "abandoned pending retirement was not surfaced as stalled"
-grep -F $'escalation\tabandoned-task\tretirement-abandoned-pending\t' \
-  "$ABANDONED_HOME/state/firstmate-supervisor.tsv" >/dev/null \
-  || fail "abandoned pending retirement lacked an actionable escalation"
-FM_SUPERVISOR_RETIRE_PENDING_MAX_AGE=0 \
-  run_supervisor_home "$ABANDONED_HOME" "$ABANDONED_BOARD" --once \
-  || fail "abandoned pending retirement dedupe cycle failed"
-[ "$(awk -F '\t' \
-  '$2 == "abandoned-task" && $3 == "retirement-abandoned-pending" { count++ } END { print count + 0 }' \
-  "$ABANDONED_HOME/state/.firstmate-supervisor.escalations")" -eq 1 ] \
-  || fail "abandoned pending retirement was not journaled exactly once"
-abandoned_status=$(FM_SUPERVISOR_RETIRE_PENDING_MAX_AGE=0 \
-  run_supervisor_home "$ABANDONED_HOME" "$ABANDONED_BOARD" status 2>&1 || true)
-printf '%s\n' "$abandoned_status" \
-  | grep -F 'retirement-error=abandoned-task:abandoned-pending' >/dev/null \
-  || fail "abandoned pending retirement was absent from supervisor status"
-run_supervisor_home "$ABANDONED_HOME" "$ABANDONED_BOARD" \
-  --retire-task abandoned-task \
-  || fail "metadata-free pending retirement could not resume"
-[ ! -e "$(retirement_record "$ABANDONED_HOME" abandoned-task)" ] \
-  || fail "metadata-free retirement retained its tombstone"
-[ ! -e "$(retirement_intent "$ABANDONED_HOME" abandoned-task)" ] \
-  || fail "metadata-free retirement retained its independent exclusion"
 
 FAILED_HOME="$TMP_ROOT/failed-home"
 FAILED_BOARD="$TMP_ROOT/failed-board"

@@ -249,6 +249,7 @@ The running cadence is persisted in `state/.firstmate-supervisor.owner` and gove
 These commands are safe to run immediately after merge; `start` is idempotent and `restart` refuses duplicate ownership.
 
 The snapshot is `state/firstmate-supervisor.tsv`, current actionable conditions appear in its escalation records and the generated board, and their durable history appends to `state/.firstmate-supervisor.escalations`.
+Per-task supervisor evidence follows the generation recorded by `fm-spawn` and is reclaimed after task metadata disappears.
 The authoritative state-classification and optional receipt-deadline contract is in the [supervision protocol](AGENTS.md#8-supervision-protocol).
 The supervisor never drains Firstmate's wake queue, changes the backlog, or sends chat, so normal ownership and AFK batching/injection remain unchanged.
 
