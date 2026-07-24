@@ -124,8 +124,8 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
   Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 - **Worktrees, not branches in your checkout** - crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
 - **Two task shapes** - ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
-- **Advisory direct-work target** - firstmate normally keeps at most three active ship/scout crewmates, while persistent secondmates stay outside that count.
-  Additional work remains queued unless the captain explicitly approves exceeding the target; `fm-spawn.sh` itself does not enforce a hard gate.
+- **Bounded direct work** - `fm-spawn.sh` admits at most three live ship/scout crewmates by default, while persistent secondmates stay outside that count.
+  Set `FM_DIRECT_REPORT_LIMIT` to an explicit non-negative integer to change the boundary; excess work remains queued and existing work is never killed to make room.
 - **Optional secondmates** - `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
   `fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same tmux and status-file path as any direct report.
   When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and is not recycled by later `treehouse get` or pruning.
@@ -259,7 +259,7 @@ tests/fm-update.test.sh                   # fast-forward-only self-update, rerea
 tests/fm-secondmate.test.sh               # persistent secondmate routing, seeding, idle charter, backlog handoff, spawn, recovery, teardown, and FM_HOME tests
 tests/fm-teardown.test.sh                 # fm-teardown.sh safety and reminder checks: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, no-mistakes regression, tasks-axi reminder, --force override
 tests/fm-stall-check.test.sh              # stall detector: finished-but-not-advanced, unblocked/date-gated queued, unlanded-work sweep with secondmate/scout/local-only/pr-parked/fork-remote/mid-rebase exemptions, idle-pane stalls, idle-advisor detection with busy/active-child/needs-decision exclusions, terminal-child handling, pr-ready skip, done-archive fallback, and guard pointer
-tests/fm-reliable-ownership.test.sh        # advisory direct-report guidance, durable dispatch ordering, evidence-bearing briefs, and schema-free spawning
+tests/fm-reliable-ownership.test.sh        # bounded direct-report admission, durable dispatch ordering, evidence-bearing briefs, and preflight rejection
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch.sh  # watcher smoke test (prints "heartbeat")

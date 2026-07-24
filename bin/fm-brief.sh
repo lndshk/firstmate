@@ -33,6 +33,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+GENERATED_ORDINARY_MARKER='<!-- firstmate-generated-ordinary-brief -->'
 KIND=ship
 POS=()
 for a in "$@"; do
@@ -118,6 +119,7 @@ REPO=${POS[1]}
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
+$GENERATED_ORDINARY_MARKER
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Objective
@@ -212,6 +214,7 @@ EOF
 esac
 
 cat > "$BRIEF" <<EOF
+$GENERATED_ORDINARY_MARKER
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Objective

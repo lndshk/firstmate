@@ -38,6 +38,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 SUB_HOME_MARKER=".fm-secondmate-home"
+GENERATED_ORDINARY_MARKER='<!-- firstmate-generated-ordinary-brief -->'
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -367,6 +368,13 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+if [ "$KIND" != secondmate ] \
+  && grep -Fxq "$GENERATED_ORDINARY_MARKER" "$BRIEF" \
+  && grep -Eq '\{(OBJECTIVE|SUCCESS_EVIDENCE|REVIEW_OR_DEADLINE_TRIGGER)\}' "$BRIEF"; then
+  echo "error: generated brief contains an unfilled generated contract placeholder: $BRIEF" >&2
+  exit 1
+fi
+
 # Resolve and reject an already-live target before a project-native refresh can
 # mutate the clone beneath that advisor. Outside tmux, do not create the fallback
 # session yet: unsafe sync failures must remain free of tmux launch side effects.
@@ -377,10 +385,153 @@ else
 fi
 W="fm-$ID"
 T="$SES:$W"
+
+tmux_window_is_live() {
+  local target=$1 session window
+  case "$target" in
+    *:*)
+      session=${target%%:*}
+      window=${target#*:}
+      ;;
+    *) return 1 ;;
+  esac
+  [ -n "$session" ] && [ -n "$window" ] || return 1
+  tmux has-session -t "$session" 2>/dev/null \
+    && tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -qxF "$window"
+}
+
+meta_value() {
+  local file=$1 key=$2
+  sed -n "s/^$key=//p" "$file" 2>/dev/null | tail -1
+}
+
+is_registered_secondmate() {
+  local id=$1
+  [ -f "$DATA/secondmates.md" ] \
+    && grep -Eq "^- $id( |$)" "$DATA/secondmates.md"
+}
+
+ordinary_direct_report_snapshot() {
+  local meta kind window live_target live_window id detail
+  local count=0
+  local counted_windows= details=
+
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    kind=$(meta_value "$meta" kind)
+    [ -n "$kind" ] || kind=ship
+    case "$kind" in
+      ship|scout) ;;
+      *) continue ;;
+    esac
+    window=$(meta_value "$meta" window)
+    [ -n "$window" ] || continue
+    if tmux_window_is_live "$window" \
+      && ! printf '%s\n' "$counted_windows" | grep -Fxq "$window"; then
+      counted_windows="${counted_windows}${counted_windows:+$'\n'}$window"
+      count=$((count + 1))
+      id=$(basename "$meta" .meta)
+      detail="$id ($window)"
+      details="${details}${details:+$'\n'}$detail"
+    fi
+  done
+
+  # A live fm-* window whose metadata was never written is recoverable when this
+  # home's durable task data identifies it. Count it so an interrupted spawn
+  # cannot silently open an extra slot. Registered or recorded secondmates remain
+  # outside the ordinary ship/scout boundary.
+  while IFS= read -r live_target; do
+      case "$live_target" in
+        *:fm-*) ;;
+        *) continue ;;
+      esac
+      live_window=${live_target#*:}
+      id=${live_window#fm-}
+      [ -f "$DATA/$id/brief.md" ] || continue
+      meta="$STATE/$id.meta"
+      if [ -f "$meta" ]; then
+        kind=$(meta_value "$meta" kind)
+        [ "$kind" = secondmate ] && continue
+      elif is_registered_secondmate "$id"; then
+        continue
+      fi
+      window=$live_target
+      if ! printf '%s\n' "$counted_windows" | grep -Fxq "$window"; then
+        counted_windows="${counted_windows}${counted_windows:+$'\n'}$window"
+        count=$((count + 1))
+        detail="$id ($window)"
+        details="${details}${details:+$'\n'}$detail"
+      fi
+  done < <(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null || true)
+
+  printf '%s\n' "$count"
+  [ -z "$details" ] || printf '%s\n' "$details"
+}
+
+ADMISSION_LOCK=
+release_admission_lock() {
+  if [ -n "$ADMISSION_LOCK" ]; then
+    rm -f "$ADMISSION_LOCK/pid"
+    rmdir "$ADMISSION_LOCK" 2>/dev/null || true
+    ADMISSION_LOCK=
+  fi
+}
+
+acquire_admission_lock() {
+  local lock=$1 owner attempts=0
+  mkdir -p "$STATE"
+  while ! mkdir "$lock" 2>/dev/null; do
+    owner=$(cat "$lock/pid" 2>/dev/null || true)
+    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+      rm -f "$lock/pid"
+      rmdir "$lock" 2>/dev/null || true
+      continue
+    fi
+    attempts=$((attempts + 1))
+    if [ -z "$owner" ] && [ "$attempts" -ge 10 ]; then
+      rmdir "$lock" 2>/dev/null || true
+      continue
+    fi
+    [ "$attempts" -lt 100 ] || {
+      echo "error: timed out waiting for direct-report admission lock" >&2
+      return 1
+    }
+    sleep 0.1
+  done
+  ADMISSION_LOCK=$lock
+  printf '%s\n' "$$" > "$lock/pid"
+  trap release_admission_lock EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+
+if [ "$KIND" != secondmate ]; then
+  LIMIT=${FM_DIRECT_REPORT_LIMIT:-3}
+  case "$LIMIT" in
+    ''|*[!0-9]*)
+      echo "error: FM_DIRECT_REPORT_LIMIT must be a non-negative integer" >&2
+      exit 1
+      ;;
+  esac
+  acquire_admission_lock "$STATE/.spawn-admission.lock"
+fi
+
 if tmux has-session -t "$SES" 2>/dev/null \
   && tmux list-windows -t "$SES" -F '#{window_name}' | grep -qx "$W"; then
   echo "error: window $T already exists" >&2
   exit 1
+fi
+
+if [ "$KIND" != secondmate ]; then
+  ADMISSION_SNAPSHOT=$(ordinary_direct_report_snapshot)
+  ACTIVE_DIRECT_REPORTS=$(printf '%s\n' "$ADMISSION_SNAPSHOT" | sed -n '1p')
+  [ -n "$ACTIVE_DIRECT_REPORTS" ] || ACTIVE_DIRECT_REPORTS=0
+  if [ "$ACTIVE_DIRECT_REPORTS" -ge "$LIMIT" ]; then
+    echo "error: direct-report admission refused: $ACTIVE_DIRECT_REPORTS active (limit $LIMIT)" >&2
+    printf '%s\n' "$ADMISSION_SNAPSHOT" | sed '1d;s/^/active: /' >&2
+    echo "error: task $ID remains or should remain queued; existing work was left running (set FM_DIRECT_REPORT_LIMIT to override)" >&2
+    exit 1
+  fi
 fi
 
 if [ "$KIND" = secondmate ] && [ -n "$PROJECT_NATIVE_ABS" ]; then

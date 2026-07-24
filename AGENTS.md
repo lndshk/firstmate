@@ -374,13 +374,15 @@ Then classify the shape:
 
 Then classify readiness:
 
-- **Dispatchable:** no overlap with in-flight tasks and fewer than three ordinary direct reports are active, or the captain explicitly approves exceeding that advisory target. Record it durably, then dispatch it.
+- **Dispatchable:** no overlap with in-flight tasks and fewer than the configured ordinary direct-report limit are active. Record it durably, then dispatch it.
 - **Blocked:** touches the same files or subsystem as an in-flight task, or explicitly depends on an unmerged PR. Record it in `data/backlog.md` with `blocked-by: <id>` and tell the captain what work is waiting and why. Scout tasks are read-mostly and almost never block on anything.
-- **Capacity-queued:** otherwise dispatchable, but three ordinary direct reports are already active and the captain has not approved more. Leave it queued and dispatch it when a slot opens.
+- **Capacity-queued:** otherwise dispatchable, but the ordinary direct-report limit is already full. Leave it queued and dispatch it when a slot opens.
 
 Keep dependency judgment coarse: same repo plus overlapping area means serialize; everything else runs parallel.
 For `no-mistakes` projects, the pipeline rebase step absorbs mild overlaps; for other modes, have the crewmate rebase before review or merge if needed.
-Three is an advisory default for direct ship/scout crewmates, not a hard spawn gate; persistent secondmates do not count toward it.
+`bin/fm-spawn.sh` admits at most three live direct ship/scout crewmates by default; set `FM_DIRECT_REPORT_LIMIT` to an explicit non-negative integer to override that boundary.
+Persistent secondmates do not count toward it.
+Admission counts this home's live ordinary metadata plus recoverable live `fm-*` windows identified by this home's task data, ignores dead metadata whose window no longer exists, and refuses only the new spawn without disturbing existing work.
 
 Every incoming work request becomes a durable `data/backlog.md` record before it is dispatched or left queued.
 The sequence is always Queued -> dispatch -> In flight: record the request under Queued, then scaffold and spawn a direct crewmate or steer the selected secondmate, and only after that dispatch succeeds move the existing record to In flight.
@@ -407,7 +409,7 @@ Dispatch several tasks in one call by passing `id=repo` pairs instead of a singl
 If one pair fails, the rest still run and the batch exits non-zero.
 
 The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
-The advisory three-report target is enforced through intake judgment, not by `fm-spawn.sh`.
+Direct ship/scout admission is enforced by `fm-spawn.sh` before tmux, worktree, metadata, or launch side effects; persistent secondmates bypass this boundary.
 For `kind=secondmate`, the same script resolves the registered or explicit persistent home, chooses the first registered project (or `FM_SECONDMATE_PROJECT_NATIVE` override), and refreshes that clone through `fm-fleet-sync.sh` with fetch plus fast-forward-only safety before launch.
 It records `home=` and `projects=` and uses the charter brief as the launch prompt; a selected existing clone that is dirty, diverged, offline, off-default, or otherwise not provably current blocks spawn instead of exposing stale project docs.
 
