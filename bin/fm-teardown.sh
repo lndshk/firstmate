@@ -73,7 +73,8 @@ meta_value() {
 }
 
 backlog_refresh_reminder() {
-  local pr done_cmd report_path
+  local pr done_cmd report_path dispatch_checks
+  dispatch_checks="apply secondmate routing and the advisory three-active-ordinary-report limit before every dispatch unless the captain explicitly overrides that dispatch; never kill, interrupt, or discard existing work to make room."
   if fm_tasks_axi_compatible; then
     case "$KIND" in
       scout)
@@ -96,9 +97,9 @@ backlog_refresh_reminder() {
         fi
         ;;
     esac
-    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and $dispatch_checks"
   else
-    printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
+    printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued for candidates whose blockers are gone and date is due; $dispatch_checks"
   fi
 }
 
