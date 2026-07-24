@@ -380,7 +380,7 @@ FM_SUPERVISOR_INTERVAL=1 \
   "$REVISION_BIN/fm-supervisor.sh" start >/dev/null \
   || fail "revision-test supervisor start failed"
 revision_first_pid=$(cat "$REVISION_HOME/state/.firstmate-supervisor.pid" 2>/dev/null || true)
-printf '\n' >> "$REVISION_BIN/fm-supervisor.sh"
+printf '\n' >> "$REVISION_BIN/fm-wake-lib.sh"
 revision_start=$(FM_SUPERVISOR_INTERVAL=1 \
   PATH="$FAKEBIN:$PATH" \
   FM_TEST_TMUX_LOG="$TMUX_LOG" \
@@ -392,16 +392,64 @@ revision_start=$(FM_SUPERVISOR_INTERVAL=1 \
 revision_second_pid=$(cat "$REVISION_HOME/state/.firstmate-supervisor.pid" 2>/dev/null || true)
 case "$revision_second_pid" in ''|*[!0-9]*) fail "revision replacement did not publish a PID receipt" ;; esac
 [ "$revision_second_pid" != "$revision_first_pid" ] \
-  || fail "start retained the supervisor loaded from the old script revision"
+  || fail "start retained the supervisor loaded with the old wake helper"
 kill -0 "$revision_first_pid" 2>/dev/null \
   && fail "revision replacement left the old supervisor alive"
 kill -0 "$revision_second_pid" 2>/dev/null \
   || fail "revision replacement did not leave a live supervisor"
 printf '%s\n' "$revision_start" | grep -F "supervisor running: pid $revision_second_pid" >/dev/null \
   || fail "revision replacement did not report the new owner"
-revision_expected=$(cksum "$REVISION_BIN/fm-supervisor.sh" | awk '{ print $1 "-" $2 }')
+revision_expected=$(
+  for runtime_file in \
+    "$REVISION_BIN/fm-supervisor.sh" \
+    "$REVISION_BIN/fm-wake-lib.sh" \
+    "$REVISION_BIN/fm-tmux-lib.sh"; do
+    printf '%s\t' "${runtime_file##*/}"
+    cksum < "$runtime_file"
+  done | cksum | awk '{ print $1 "-" $2 }'
+)
 grep -Fx "revision=$revision_expected" "$REVISION_HOME/state/.firstmate-supervisor.owner" >/dev/null \
-  || fail "new owner did not record its loaded script revision"
+  || fail "new owner did not record its complete runtime revision"
+
+printf '\n' >> "$REVISION_BIN/fm-tmux-lib.sh"
+revision_start=$(FM_SUPERVISOR_INTERVAL=1 \
+  PATH="$FAKEBIN:$PATH" \
+  FM_TEST_TMUX_LOG="$TMUX_LOG" \
+  FM_TEST_SLEEP_LOG="$SLEEP_LOG" \
+  FM_HOME="$REVISION_HOME" \
+  FM_BOARD_DIR="$REVISION_BOARD" \
+  "$REVISION_BIN/fm-supervisor.sh" start) \
+  || fail "start did not replace a supervisor with an outdated tmux helper"
+revision_third_pid=$(cat "$REVISION_HOME/state/.firstmate-supervisor.pid" 2>/dev/null || true)
+case "$revision_third_pid" in ''|*[!0-9]*) fail "second helper replacement did not publish a PID receipt" ;; esac
+[ "$revision_third_pid" != "$revision_second_pid" ] \
+  || fail "start retained the supervisor loaded with the old tmux helper"
+kill -0 "$revision_second_pid" 2>/dev/null \
+  && fail "tmux helper replacement left the old supervisor alive"
+kill -0 "$revision_third_pid" 2>/dev/null \
+  || fail "tmux helper replacement did not leave a live supervisor"
+printf '%s\n' "$revision_start" | grep -F "supervisor running: pid $revision_third_pid" >/dev/null \
+  || fail "tmux helper replacement did not report the new owner"
+
+printf '\n' >> "$REVISION_BIN/fm-supervisor.sh"
+revision_start=$(FM_SUPERVISOR_INTERVAL=1 \
+  PATH="$FAKEBIN:$PATH" \
+  FM_TEST_TMUX_LOG="$TMUX_LOG" \
+  FM_TEST_SLEEP_LOG="$SLEEP_LOG" \
+  FM_HOME="$REVISION_HOME" \
+  FM_BOARD_DIR="$REVISION_BOARD" \
+  "$REVISION_BIN/fm-supervisor.sh" start) \
+  || fail "start did not replace an outdated supervisor script"
+revision_fourth_pid=$(cat "$REVISION_HOME/state/.firstmate-supervisor.pid" 2>/dev/null || true)
+case "$revision_fourth_pid" in ''|*[!0-9]*) fail "script replacement did not publish a PID receipt" ;; esac
+[ "$revision_fourth_pid" != "$revision_third_pid" ] \
+  || fail "start retained the supervisor loaded from the old script revision"
+kill -0 "$revision_third_pid" 2>/dev/null \
+  && fail "script replacement left the old supervisor alive"
+kill -0 "$revision_fourth_pid" 2>/dev/null \
+  || fail "script replacement did not leave a live supervisor"
+printf '%s\n' "$revision_start" | grep -F "supervisor running: pid $revision_fourth_pid" >/dev/null \
+  || fail "script replacement did not report the new owner"
 
 CADENCE_HOME="$TMP_ROOT/cadence-home"
 CADENCE_BOARD="$TMP_ROOT/cadence-board"

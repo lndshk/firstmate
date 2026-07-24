@@ -554,7 +554,7 @@ That keeps busy work `active`, unreadable work `active-unverified`, and a late t
 Generated briefs append the receipt epoch as a tab-separated final field so the supervisor can process every receipt version even when several appends occur between cycles; legacy unstamped receipts retain modification-time compatibility.
 
 `start`, `restart`, and `status` are the only operator interface.
-The singleton lock, `state/.firstmate-supervisor.pid`, `state/.firstmate-supervisor.owner` cadence and script-revision receipt, and periodically rewritten `state/.firstmate-supervisor.heartbeat` prove ownership and liveness.
+The singleton lock, `state/.firstmate-supervisor.pid`, `state/.firstmate-supervisor.owner` cadence and loaded-runtime revision receipt, and periodically rewritten `state/.firstmate-supervisor.heartbeat` prove ownership and liveness.
 `start` replaces a verified owner whose loaded script revision no longer matches the current file.
 `restart` stops only the verified current owner and refuses to launch a duplicate if it cannot stop.
 The board is rendered once per successful supervisor cycle and has no separate keepalive or long-running owner.
@@ -780,6 +780,7 @@ The `/updatefirstmate` skill performs that pull in place for the running main fi
 It runs `bin/fm-update.sh`, which fast-forwards this firstmate repo's default branch from origin and then fast-forwards every registered secondmate home (resolved from `state/*.meta` and `data/secondmates.md`) the same way.
 The mechanics mirror `bin/fm-fleet-sync.sh` exactly: fast-forward only, never forcing, never creating a merge commit, never stashing, and skipping with a reported reason anything dirty, diverged, offline, or on a non-default branch, so prime directive #3 holds and no unlanded work is ever discarded.
 A tracked-files fast-forward leaves the gitignored operational dirs untouched, so a secondmate's in-flight work is never disrupted; secondmate homes are leased at a detached HEAD on the default branch and a fast-forward there advances only that worktree's HEAD.
-`bin/fm-update.sh` does only the git mechanics and prints a summary plus two action lines, `reread-firstmate: yes|no` and `nudge-secondmates: <window-targets...>|none`.
+`bin/fm-update.sh` performs the git mechanics, ensures the main home's newly updated or safely current `bin/fm-supervisor.sh` owner is active, and prints a summary plus `supervisor: ...`, `reread-firstmate: yes|no`, and `nudge-secondmates: <window-targets...>|none` action lines.
+Supervisor activation uses the post-update script, is skipped in a marked secondmate home, and makes the update command fail after printing its full summary when activation cannot be confirmed.
 The skill then performs the parts a script cannot: when the running firstmate's instruction surface changed it re-reads `AGENTS.md`, and for each updated live secondmate with metadata it sends a gentle one-line re-read nudge via `bin/fm-send.sh <window-target>` so the whole tree converges on the latest `bin/` and instructions.
 This is a sanctioned self-write to the firstmate repo and its own worktrees only, exactly like the fleet sync, and never touches anything under `projects/`.

@@ -143,7 +143,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 - **Project memory belongs to projects** - durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`, with `CLAUDE.md` as a symlink.
   Ship briefs prompt crewmates to create or update those files through the normal delivery path; `data/projects.md` stays a thin private registry.
 - **Local clones stay fresh** - bootstrap and PR-based teardown refresh remote-backed project clones with clean default-branch fast-forwards when the clone is on the default branch and has no local work, and prune local branches whose remote is gone and that no worktree still needs.
-- **Self-updates stay safe** - `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
+- **Self-updates stay safe** - `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, activates the main home's current deterministic supervisor, then re-reads updated instructions and nudges updated secondmates without touching project clones.
   The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 - **Restart-proof** - all state lives in tmux, status files, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
   Every incoming request is recorded in the local backlog before clarification, routing, or dispatch, so later messages and restarts do not silently drop it.
@@ -244,7 +244,7 @@ FM_SUPERVISOR_INTERVAL=15          # seconds between deterministic snapshot and 
 ### Always-on supervisor runbook
 
 Bootstrap silently starts the main home's supervisor when tmux is available; secondmate homes do not start another owner.
-Use `bin/fm-supervisor.sh start` to ensure it is running after an upgrade or recovery, `restart` to replace a verified stale owner, and `status` to inspect its singleton PID, heartbeat, snapshot freshness, and last error.
+Self-update ensures the post-update main-home supervisor is active; use `bin/fm-supervisor.sh start` to ensure it is running during manual recovery, `restart` to replace a verified stale owner, and `status` to inspect its singleton PID, heartbeat, snapshot freshness, and last error.
 The running cadence is persisted in `state/.firstmate-supervisor.owner` and governs heartbeat health checks.
 These commands are safe to run immediately after merge; `start` is idempotent and `restart` refuses duplicate ownership.
 
@@ -272,7 +272,7 @@ tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of th
 tests/fm-bootstrap.test.sh                # bootstrap dependency and feature-probe tests
 tests/fm-supervisor.test.sh               # always-on wake reconciliation, exact states, escalations, no-chat behavior, and singleton restart
 tests/fm-fleet-sync.test.sh               # canonical symlink-target refresh, clean-FF-only skips, and safe gone-branch pruning
-tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
+tests/fm-update.test.sh                   # fast-forward-only self-update, supervisor activation, reread, nudge, dedup, and skip-safety tests
 tests/fm-secondmate.test.sh               # persistent secondmate routing, seeding, idle charter, backlog handoff, spawn, recovery, teardown, and FM_HOME tests
 tests/fm-teardown.test.sh                 # fm-teardown.sh safety and reminder checks: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, no-mistakes regression, tasks-axi reminder, --force override
 tests/fm-stall-check.test.sh              # stall detector: finished-but-not-advanced, unblocked/date-gated queued, unlanded-work sweep with secondmate/scout/local-only/pr-parked/fork-remote/mid-rebase exemptions, idle-pane stalls, idle-advisor detection with busy/active-child/needs-decision exclusions, terminal-child handling, pr-ready skip, done-archive fallback, and guard pointer

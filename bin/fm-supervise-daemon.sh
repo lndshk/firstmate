@@ -102,6 +102,10 @@ FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_DAEMON_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
+# shellcheck source=bin/fm-wake-lib.sh
+FM_WAKE_LIB_PARSERS_ONLY=1 . "$FM_DAEMON_DIR/fm-wake-lib.sh"
+unset FM_WAKE_LIB_PARSERS_ONLY
+
 # Shared tmux pane primitives (busy/composer detection + verify-retry submit).
 # Sourced at top level so BOTH the executed daemon and the unit tests (which
 # source this file for its pure functions) get the corrected composer detection.
@@ -280,11 +284,12 @@ window_to_task() {
 # summary firstmate would otherwise have to re-read.
 
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
+  local reason=$1 state=$2 f raw last distilled="" rel="" all_seen=1 task seen
   for f in $reason; do
     [ -e "$f" ] || continue
-    last=$(last_status_line "$f")
-    [ -n "$last" ] || continue
+    raw=$(last_status_line "$f")
+    [ -n "$raw" ] || continue
+    last=$(fm_receipt_text "$raw")
     distilled="${distilled}$(basename "$f"): ${last} | "
     status_is_captain_relevant "$last" || continue
     rel=1
@@ -294,7 +299,7 @@ classify_signal() {  # <reason-after-colon> <state>
     # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
     task=$(basename "$f"); task="${task%.status}"
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-    [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
+    [ "$(cat "$seen" 2>/dev/null || true)" = "$raw" ] || all_seen=0
   done
   # strip a trailing " | " separator so the distilled line is clean
   distilled="${distilled% | }"
@@ -313,14 +318,15 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen
+  local win=$1 state=$2 task raw last seen
   task=$(window_to_task "$win")
-  last=$(last_status_line "$state/$task.status")
+  raw=$(last_status_line "$state/$task.status")
+  last=$(fm_receipt_text "$raw")
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
     # Dedupe against the signal path: if this status was already escalated
     # (seen marker matches), self-handle to avoid a duplicate in the digest.
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-    if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
+    if [ "$(cat "$seen" 2>/dev/null || true)" = "$raw" ]; then
       printf 'self|stale + terminal (already escalated by signal): %s' "$last"
       return
     fi
@@ -381,22 +387,24 @@ mark_status_seen() {  # <state> <task> <last-line>
 # seen, so the catch-all scan does not re-escalate the same line within
 # HEARTBEAT_SCAN_SECS. Mirrors classify_signal/classify_stale's relevance test.
 mark_escalated_seen() {  # <kind> <arg> <state>
-  local kind=$1 arg=$2 state=$3 f last task
+  local kind=$1 arg=$2 state=$3 f raw last task
   case "$kind" in
     signal)
       for f in $arg; do
         [ -e "$f" ] || continue
-        last=$(last_status_line "$f")
-        [ -n "$last" ] || continue
+        raw=$(last_status_line "$f")
+        [ -n "$raw" ] || continue
+        last=$(fm_receipt_text "$raw")
         status_is_captain_relevant "$last" || continue
         task=$(basename "$f"); task="${task%.status}"
-        mark_status_seen "$state" "$task" "$last"
+        mark_status_seen "$state" "$task" "$raw"
       done ;;
     stale)
       task=$(window_to_task "$arg")
-      last=$(last_status_line "$state/$task.status")
+      raw=$(last_status_line "$state/$task.status")
+      last=$(fm_receipt_text "$raw")
       [ -n "$last" ] && status_is_captain_relevant "$last" \
-        && mark_status_seen "$state" "$task" "$last" ;;
+        && mark_status_seen "$state" "$task" "$raw" ;;
   esac
 }
 
@@ -483,7 +491,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest
+  local state=$1 now due f key task win marker age raw last max_defer oldest
   now=$(_now)
 
   # (1) batch flush
@@ -543,14 +551,15 @@ housekeeping() {  # <state>
     _now > "$state/.subsuper-last-scan"
     for f in "$state"/*.status; do
       [ -e "$f" ] || continue
-      last=$(last_status_line "$f")
+      raw=$(last_status_line "$f")
+      last=$(fm_receipt_text "$raw")
       status_is_captain_relevant "$last" || continue
       task=$(basename "$f"); task="${task%.status}"
       local seen
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-      [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
+      [ "$(cat "$seen" 2>/dev/null || true)" = "$raw" ] && continue
       escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
-      mark_status_seen "$state" "$task" "$last"
+      mark_status_seen "$state" "$task" "$raw"
     done
   fi
 }
@@ -714,8 +723,6 @@ fm_super_main() {
   STATE="$(_state_root)"
   mkdir -p "$STATE"
 
-  # Source the portable lock helpers (mkdir-based, works on macOS where flock
-  # is absent). Export FM_STATE_OVERRIDE so the lib resolves the same state dir.
   # shellcheck source=bin/fm-wake-lib.sh
   FM_STATE_OVERRIDE="$STATE" . "$FM_DAEMON_DIR/fm-wake-lib.sh"
 

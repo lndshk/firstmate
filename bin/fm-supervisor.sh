@@ -12,7 +12,15 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_REVISION=$(cksum "$SCRIPT_DIR/fm-supervisor.sh" | awk '{ print $1 "-" $2 }')
+SCRIPT_REVISION=$(
+  for runtime_file in \
+    "$SCRIPT_DIR/fm-supervisor.sh" \
+    "$SCRIPT_DIR/fm-wake-lib.sh" \
+    "$SCRIPT_DIR/fm-tmux-lib.sh"; do
+    printf '%s\t' "${runtime_file##*/}"
+    cksum < "$runtime_file"
+  done | cksum | awk '{ print $1 "-" $2 }'
+)
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -53,23 +61,6 @@ snapshot_field() {
 meta_field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -1; }
 last_receipt_raw() { awk 'NF { line=$0 } END { print line }' "$1" 2>/dev/null; }
 last_receipt_line() { awk 'NF { line=NR } END { print line + 0 }' "$1" 2>/dev/null; }
-receipt_explicit_time() {
-  local raw=$1 tab suffix
-  tab=$(printf '\t')
-  suffix=${raw##*"$tab"}
-  [ "$suffix" != "$raw" ] && is_uint "$suffix" || return 1
-  printf '%s\n' "$suffix"
-}
-receipt_text() {
-  local raw=$1 tab suffix
-  tab=$(printf '\t')
-  suffix=${raw##*"$tab"}
-  if [ "$suffix" != "$raw" ] && is_uint "$suffix"; then
-    printf '%s' "${raw%"$tab$suffix"}"
-  else
-    printf '%s' "$raw"
-  fi
-}
 
 terminal_receipt() {
   case "$1" in
@@ -179,11 +170,11 @@ clear_escalation() { # <id> <condition>
 receipt_evidence() { # <id> <status-file> <raw-receipt>; prints <version><tab><time>
   local id=$1 receipt_file=$2 raw=$3 receipt line hash version observed cursor
   local saved_version saved_time tmp
-  receipt=$(receipt_text "$raw")
+  receipt=$(fm_receipt_text "$raw")
   line=$(last_receipt_line "$receipt_file")
   hash=$(printf '%s' "$receipt" | cksum | awk '{ print $1 "-" $2 }')
   version="$line-$hash"
-  observed=$(receipt_explicit_time "$raw" 2>/dev/null || true)
+  observed=$(fm_receipt_explicit_time "$raw" 2>/dev/null || true)
   [ -n "$observed" ] || observed=$(fm_path_mtime "$receipt_file" 2>/dev/null || true)
   is_uint "$observed" || observed=$(now_epoch)
   cursor="$STATE/.firstmate-supervisor.receipt-$(escalation_key "$id" receipt)"
@@ -211,10 +202,10 @@ timestamped_deadline_satisfaction() { # <status-file> <deadline>; prints <versio
   while IFS= read -r raw || [ -n "$raw" ]; do
     line=$((line + 1))
     [ -n "$raw" ] || continue
-    receipt_time=$(receipt_explicit_time "$raw" 2>/dev/null || true)
+    receipt_time=$(fm_receipt_explicit_time "$raw" 2>/dev/null || true)
     is_uint "$receipt_time" || continue
     [ "$receipt_time" -le "$deadline" ] || continue
-    receipt=$(receipt_text "$raw")
+    receipt=$(fm_receipt_text "$raw")
     [ -n "$receipt" ] || continue
     hash=$(printf '%s' "$receipt" | cksum | awk '{ print $1 "-" $2 }')
     printf '%s\t%s\n' "$line-$hash" "$receipt_time"
@@ -273,7 +264,7 @@ classify_meta() { # <meta>; prints one TSV task row
   [ -n "$deadline" ] || deadline=$(meta_field "$meta" deadline)
   receipt_file="$STATE/$id.status"
   receipt_raw=$(last_receipt_raw "$receipt_file")
-  receipt=$(receipt_text "$receipt_raw")
+  receipt=$(fm_receipt_text "$receipt_raw")
   now=$(now_epoch)
 
   if [ -n "$receipt" ]; then

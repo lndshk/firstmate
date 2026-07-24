@@ -16,9 +16,11 @@
 # any other worktree's checkout or the shared `main` branch.
 #
 # It does NOT re-read AGENTS.md or nudge secondmates itself - those are LLM /
-# tmux actions the skill performs. The script's job is the safe git mechanics
-# plus a parseable summary telling the caller what to do next:
+# tmux actions the skill performs. After safely updating or confirming the main
+# home is current, it activates the current deterministic supervisor. The script otherwise provides
+# safe git mechanics plus a parseable summary telling the caller what to do next:
 #   - one status line per target (updated/already current/skipped)
+#   - supervisor: active|unchanged|skipped|activation failed
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - nudge-secondmates: <window-targets...>|none   (updated live secondmates to nudge)
 #
@@ -324,9 +326,24 @@ ff_target() {
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
+supervisor_status="unchanged: firstmate update was skipped"
+update_status=0
 ff_target "$FM_ROOT" "firstmate" no no
 if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
   reread_firstmate="yes"
+fi
+if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
+  supervisor_status="skipped: secondmate home"
+elif [ "$FF_STATUS" = "updated" ] || [ "$FF_STATUS" = "current" ]; then
+  if [ ! -x "$FM_ROOT/bin/fm-supervisor.sh" ]; then
+    supervisor_status="activation failed: current supervisor is not executable"
+    update_status=1
+  elif supervisor_output=$("$FM_ROOT/bin/fm-supervisor.sh" start 2>&1); then
+    supervisor_status="active: $(first_line "$supervisor_output")"
+  else
+    supervisor_status="activation failed: $(first_line "$supervisor_output")"
+    update_status=1
+  fi
 fi
 
 # --- secondmates -----------------------------------------------------------
@@ -386,5 +403,7 @@ fi
 
 # --- caller action summary -------------------------------------------------
 
+echo "supervisor: $supervisor_status"
 echo "reread-firstmate: $reread_firstmate"
 echo "nudge-secondmates:${nudge_windows:- none}"
+exit "$update_status"

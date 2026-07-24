@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
 
+fm_receipt_explicit_time() {
+  local raw=$1 tab suffix
+  tab=$(printf '\t')
+  suffix=${raw##*"$tab"}
+  [ "$suffix" != "$raw" ] || return 1
+  case "$suffix" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$suffix"
+}
+
+fm_receipt_text() {
+  local raw=$1 tab suffix
+  tab=$(printf '\t')
+  suffix=${raw##*"$tab"}
+  if [ "$suffix" != "$raw" ]; then
+    case "$suffix" in
+      ''|*[!0-9]*) ;;
+      *) printf '%s' "${raw%"$tab$suffix"}"; return ;;
+    esac
+  fi
+  printf '%s' "$raw"
+}
+
+[ "${FM_WAKE_LIB_PARSERS_ONLY:-0}" = 1 ] && return 0
+
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_WAKE_DEFAULT_ROOT}}"

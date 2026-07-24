@@ -17,6 +17,8 @@
 #   - Secondmate homes resolve from both state/<id>.meta and the
 #     data/secondmates.md registry, deduped, and the firstmate repo is never
 #     re-processed as one of its own secondmates.
+#   - A main-home fast-forward activates the newly updated deterministic
+#     supervisor; activation failures are reported and secondmate homes skip it.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -78,6 +80,16 @@ new_world() {
   printf 'r1\n' > "$w/seed/README.md"
   mkdir -p "$w/seed/bin" "$w/seed/.agents/skills"
   printf 'echo a\n' > "$w/seed/bin/tool.sh"
+  cat > "$w/seed/bin/fm-supervisor.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'v1 %s\n' "${1:-}" > "$FM_HOME/state/update-supervisor-start"
+if [ "${FM_TEST_SUPERVISOR_FAIL:-0}" = 1 ]; then
+  printf 'fixture activation failed\n' >&2
+  exit 1
+fi
+printf 'supervisor fixture active\n'
+SH
+  chmod +x "$w/seed/bin/fm-supervisor.sh"
   printf 's1\n' > "$w/seed/.agents/skills/note.md"
   git -C "$w/seed" add -A
   git -C "$w/seed" commit -qm c1
@@ -111,6 +123,10 @@ bump_origin() {
   if [ "$mode" = instr ]; then
     printf 'v2\n' > "$w/seed/AGENTS.md"
     printf 'echo b\n' > "$w/seed/bin/tool.sh"
+    sed 's/v1 %s/v2 %s/' "$w/seed/bin/fm-supervisor.sh" \
+      > "$w/seed/bin/fm-supervisor.sh.new"
+    mv "$w/seed/bin/fm-supervisor.sh.new" "$w/seed/bin/fm-supervisor.sh"
+    chmod +x "$w/seed/bin/fm-supervisor.sh"
     printf 's2\n' > "$w/seed/.agents/skills/note.md"
   fi
   git -C "$w/seed" add -A
@@ -133,6 +149,7 @@ test_updates_main_and_secondmate() {
   out=$(run_update "$w")
 
   assert_contains "$out" "firstmate: updated " "firstmate fast-forwarded"
+  assert_contains "$out" "supervisor: active: supervisor fixture active" "updated supervisor activated"
   assert_contains "$out" "secondmate sm1: updated " "secondmate fast-forwarded"
   assert_contains "$out" "reread-firstmate: yes" "instruction change triggers reread"
   assert_contains "$out" "nudge-secondmates: main:fm-sm1" "updated secondmate is nudged"
@@ -147,6 +164,8 @@ test_updates_main_and_secondmate() {
     || fail "firstmate left its default branch"
   git -C "$w/sm1" symbolic-ref -q HEAD >/dev/null \
     && fail "secondmate worktree is no longer detached"
+  grep -Fx 'v2 start' "$w/home/state/update-supervisor-start" >/dev/null \
+    || fail "self-update did not activate the newly updated supervisor script"
   pass "T1 main + secondmate fast-forward, reread + nudge signalled"
 }
 
@@ -227,14 +246,19 @@ test_idempotent_already_current() {
   add_sm "$w" sm1
   bump_origin "$w" instr
   run_update "$w" >/dev/null   # first run advances both
+  rm -f "$w/home/state/update-supervisor-start"
 
   out=$(run_update "$w")       # second run: nothing to do
 
   assert_contains "$out" "firstmate: already current" "firstmate already current"
+  assert_contains "$out" "supervisor: active: supervisor fixture active" \
+    "current main did not recover supervisor activation"
   assert_contains "$out" "secondmate sm1: already current" "secondmate already current"
   assert_contains "$out" "reread-firstmate: no" "no reread when nothing changed"
   assert_contains "$out" "nudge-secondmates: none" "no nudge when nothing advanced"
-  pass "T6 idempotent: a second run is a no-op"
+  grep -Fx 'v2 start' "$w/home/state/update-supervisor-start" >/dev/null \
+    || fail "current main did not activate its supervisor"
+  pass "T6 current update safely reasserts supervisor activation"
 }
 
 # --- T7: registry backstop (secondmates.md, no live meta) ------------------
@@ -332,6 +356,38 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+test_supervisor_activation_failure_is_actionable() {
+  local w out status
+  w=$(new_world t12)
+  bump_origin "$w" instr
+
+  status=0
+  out=$(FM_TEST_SUPERVISOR_FAIL=1 FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$UPDATE" 2>&1) || status=$?
+
+  [ "$status" -ne 0 ] || fail "supervisor activation failure did not fail the update command"
+  assert_contains "$out" "firstmate: updated " "main fast-forward was not reported before activation failure"
+  assert_contains "$out" "supervisor: activation failed: fixture activation failed" \
+    "supervisor activation failure was not surfaced"
+  assert_contains "$out" "reread-firstmate: yes" "activation failure suppressed caller action summary"
+  pass "T12 supervisor activation failure is actionable"
+}
+
+test_secondmate_home_skips_supervisor_activation() {
+  local w out
+  w=$(new_world t13)
+  printf 'sm-active\n' > "$w/home/.fm-secondmate-home"
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "secondmate-context fixture did not fast-forward"
+  assert_contains "$out" "supervisor: skipped: secondmate home" "secondmate context did not skip supervisor"
+  [ ! -e "$w/home/state/update-supervisor-start" ] \
+    || fail "secondmate home activated a deterministic supervisor owner"
+  pass "T13 secondmate home skips supervisor activation"
+}
+
 test_updates_main_and_secondmate
 test_fast_forward_not_merge
 test_reread_gate_is_instruction_only
@@ -343,5 +399,7 @@ test_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_supervisor_activation_failure_is_actionable
+test_secondmate_home_skips_supervisor_activation
 
 echo "# all fm-update tests passed"
