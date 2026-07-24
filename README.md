@@ -115,6 +115,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 ```
 
 - **Event-driven supervision** - a zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet and wakes the first mate only when a crewmate reports, stalls, a PR merges, or an internal heartbeat review is due.
+  A complementary always-on shell supervisor (`bin/fm-supervisor.sh`) reconciles durable wakes without consuming them, classifies recorded direct reports, writes a machine-readable snapshot, and refreshes the Firstmate Board without injecting chat or spending LLM tokens.
   Detected wakes are also written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed one-shot process exit can be recovered by draining the queue.
   Each normal watcher start also ensures one singleton keepalive sidecar is running; the sidecar judges liveness by `state/.last-watcher-beat` age and silently re-arms the one-shot watcher when the beacon goes stale and no live watcher owns the watch lock.
   The sidecar is bound to in-flight work: it only spawns while a task exists (`state/*.meta`), and it stops cleanly and stops re-arming once the fleet empties, so a torn-down or ended session never leaves a task-less watcher enqueueing heartbeats with no consumer.
@@ -169,6 +170,8 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
 | `fm-watch.sh`            | Singleton-safe one-shot watcher; blocks until supervision work is due, queues it durably, then exits with one reason line; `--keepalive` silently re-arms stale/missed one-shot watchers |
 | `fm-supervise-daemon.sh` | Presence-gated sub-supervisor for walk-away (`/afk`) supervision: wraps `fm-watch.sh`, self-handles routine wakes in bash, and escalates only captain-relevant events as one verified, batched, single-line digest prefixed with a sentinel marker |
+| `fm-supervisor.sh`       | Always-on main-home, no-chat supervisor; reconciles wakes, snapshots direct-report contracts, records actionable failures, and refreshes the board |
+| `fm-board.sh`            | Render the Firstmate Board once from the current supervisor snapshot; it has no separate daemon owner |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes before handling supervision work                                              |
 | `fm-send.sh`             | Send one verified literal line (or `--key Escape`) to a crewmate window; exits non-zero when Enter is positively swallowed |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, dim-ghost-aware and border-aware composer detection, Codex safety-prompt clearing, and verified submit retry |
@@ -235,7 +238,19 @@ FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a 
 FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks
 FM_HEARTBEAT_SCAN_SECS=300         # cadence of the catch-all status scan for missed captain verbs
 FM_HOUSEKEEPING_TICK=15            # seconds between batch-flush, stale-recheck, and scan passes
+FM_SUPERVISOR_INTERVAL=15          # seconds between deterministic snapshot and board refresh cycles
 ```
+
+### Always-on supervisor runbook
+
+Bootstrap silently starts the main home's supervisor when tmux is available; secondmate homes do not start another owner.
+Use `bin/fm-supervisor.sh start` to ensure it is running after an upgrade or recovery, `restart` to replace a verified stale owner, and `status` to inspect its singleton PID, heartbeat, snapshot freshness, and last error.
+These commands are safe to run immediately after merge; `start` is idempotent and `restart` refuses duplicate ownership.
+
+The snapshot is `state/firstmate-supervisor.tsv`, actionable conditions append to `state/.firstmate-supervisor.escalations`, and the generated board is `state/board/board.html`.
+Task state is exactly `active`, `active-unverified`, `stalled`, or `terminal`.
+An optional `receipt-deadline=<absolute Unix epoch>` in task meta makes a missing receipt `stalled` only after that deadline; before it, the task remains `active-unverified`, and a live busy pane remains `active`.
+The supervisor never drains Firstmate's wake queue, changes the backlog, or sends chat, so normal ownership and AFK batching/injection remain unchanged.
 
 ## Development
 
@@ -255,6 +270,7 @@ tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only comp
 tests/fm-safety-autoclear.test.sh         # strict Codex safety-dialog detection, Keep waiting key sequence, off switch, and recorded-window watcher wiring
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
 tests/fm-bootstrap.test.sh                # bootstrap dependency and feature-probe tests
+tests/fm-supervisor.test.sh               # always-on wake reconciliation, exact states, escalations, no-chat behavior, and singleton restart
 tests/fm-fleet-sync.test.sh               # canonical symlink-target refresh, clean-FF-only skips, and safe gone-branch pruning
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
 tests/fm-secondmate.test.sh               # persistent secondmate routing, seeding, idle charter, backlog handoff, spawn, recovery, teardown, and FM_HOME tests

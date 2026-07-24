@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+# Always-on deterministic supervisor for one main Firstmate home.
+#
+# Usage: fm-supervisor.sh start|restart|status
+# Test/internal: fm-supervisor.sh --once|--run
+#
+# The process observes durable wakes, state/*.meta, status receipts, declared
+# receipt deadlines, and recorded panes. It writes a machine-readable snapshot,
+# durable actionable escalations, and the existing HTML board. It never sends
+# keys, injects chat, drains the wake queue, schedules work, or changes AFK
+# state.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+INTERVAL="${FM_SUPERVISOR_INTERVAL:-15}"
+START_WAIT="${FM_SUPERVISOR_START_WAIT:-5}"
+case "$INTERVAL" in ''|0|*[!0-9]*) INTERVAL=15 ;; esac
+case "$START_WAIT" in ''|0|*[!0-9]*) START_WAIT=5 ;; esac
+LOCK="$STATE/.firstmate-supervisor.lock"
+CONTROL_LOCK="$STATE/.firstmate-supervisor.control.lock"
+PIDFILE="$STATE/.firstmate-supervisor.pid"
+HEARTBEAT="$STATE/.firstmate-supervisor.heartbeat"
+SNAPSHOT="${FM_SUPERVISOR_SNAPSHOT:-$STATE/firstmate-supervisor.tsv}"
+ESCALATIONS="$STATE/.firstmate-supervisor.escalations"
+LOG="$STATE/.firstmate-supervisor.log"
+ERROR="$STATE/.firstmate-supervisor.error"
+
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$SCRIPT_DIR/fm-tmux-lib.sh"
+
+now_epoch() { date +%s; }
+is_uint() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
+}
+clean_field() { LC_ALL=C tr '\t\r\n' '   '; }
+snapshot_field() {
+  if [ -n "$1" ]; then printf '%s' "$1" | clean_field
+  else printf -- '-'; fi
+}
+meta_field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -1; }
+last_receipt() { awk 'NF { line=$0 } END { print line }' "$1" 2>/dev/null; }
+
+terminal_receipt() {
+  case "$1" in
+    done:*|failed:*|blocked:*|needs-decision:*|result:*|terminal:*|pr-ready:*|merged:*) return 0 ;;
+  esac
+  return 1
+}
+
+failed_receipt() {
+  case "$1" in failed:*|blocked:*|needs-decision:*) return 0 ;; esac
+  return 1
+}
+
+pane_exists() {
+  [ -n "$1" ] && tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1
+}
+
+supervisor_pid_is_ours() {
+  local pid=$1 lock_pid command
+  fm_pid_alive "$pid" || return 1
+  lock_pid=$(cat "$LOCK/pid" 2>/dev/null || true)
+  [ "$lock_pid" = "$pid" ] || return 1
+  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  case "$command" in *"fm-supervisor.sh"*"--run"*) return 0 ;; esac
+  return 1
+}
+
+escalation_key() {
+  printf '%s-%s' "$1" "$2" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+escalate_once() { # <id> <condition> <action>
+  local id=$1 condition=$2 action=$3 marker
+  marker="$STATE/.firstmate-supervisor.escalated-$(escalation_key "$id" "$condition")"
+  [ -e "$marker" ] && return 0
+  printf '%s\t%s\t%s\t%s\n' \
+    "$(now_epoch)" \
+    "$(printf '%s' "$id" | clean_field)" \
+    "$(printf '%s' "$condition" | clean_field)" \
+    "$(printf '%s' "$action" | clean_field)" >> "$ESCALATIONS" || return 1
+  : > "$marker"
+}
+
+clear_escalation() { # <id> <condition>
+  rm -f "$STATE/.firstmate-supervisor.escalated-$(escalation_key "$1" "$2")"
+}
+
+classify_meta() { # <meta>; prints one TSV task row
+  local meta=$1 id window pid deadline receipt receipt_file now
+  local state reason process_condition="" deadline_condition="" receipt_condition=""
+  id=$(basename "$meta" .meta)
+  window=$(meta_field "$meta" window)
+  pid=$(meta_field "$meta" process-pid)
+  [ -n "$pid" ] || pid=$(meta_field "$meta" pid)
+  deadline=$(meta_field "$meta" receipt-deadline)
+  [ -n "$deadline" ] || deadline=$(meta_field "$meta" deadline)
+  receipt_file="$STATE/$id.status"
+  receipt=$(last_receipt "$receipt_file")
+  now=$(now_epoch)
+
+  if terminal_receipt "$receipt"; then
+    state=terminal
+    reason="terminal receipt recorded"
+    if failed_receipt "$receipt"; then
+      receipt_condition=failed-receipt
+    fi
+  else
+    if [ -n "$window" ] && ! pane_exists "$window"; then
+      process_condition=missing-process
+    elif [ -n "$pid" ] && ! fm_pid_alive "$pid"; then
+      process_condition=missing-process
+    fi
+    if [ -z "$receipt" ] && is_uint "$deadline" && [ "$deadline" -le "$now" ]; then
+      deadline_condition=missed-receipt-deadline
+    fi
+
+    if [ -n "$process_condition" ]; then
+      state=stalled
+      reason="recorded process is missing"
+    elif [ -n "$window" ] && fm_pane_is_busy "$window"; then
+      state=active
+      reason="busy pane observed"
+    elif [ -n "$pid" ] && fm_pid_alive "$pid"; then
+      state=active
+      reason="declared process is alive"
+    elif [ -n "$deadline_condition" ]; then
+      state=stalled
+      reason="receipt deadline passed"
+    else
+      state=active-unverified
+      reason="awaiting verifiable activity or receipt"
+    fi
+  fi
+
+  if [ -n "$process_condition" ]; then
+    escalate_once "$id" "$process_condition" \
+      "inspect or relaunch the recorded direct-report process" || return 1
+  else
+    clear_escalation "$id" missing-process
+  fi
+  if [ -n "$deadline_condition" ]; then
+    escalate_once "$id" "$deadline_condition" \
+      "obtain the declared receipt or investigate the direct report" || return 1
+  else
+    clear_escalation "$id" missed-receipt-deadline
+  fi
+  if [ -n "$receipt_condition" ]; then
+    escalate_once "$id" "$receipt_condition" \
+      "act on terminal receipt: $receipt" || return 1
+  else
+    clear_escalation "$id" failed-receipt
+  fi
+
+  printf 'task\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(snapshot_field "$id")" \
+    "$state" \
+    "$(snapshot_field "$reason")" \
+    "$(snapshot_field "$receipt")" \
+    "$(snapshot_field "$deadline")" \
+    "$(snapshot_field "$window")" \
+    "$(snapshot_field "$pid")"
+}
+
+wake_snapshot() { # prints: <count><tab><last-seq>
+  local wakes count last_seq
+  wakes=$(fm_wake_peek 2>/dev/null || true)
+  if [ -z "$wakes" ]; then
+    printf '0\t0\n'
+    return
+  fi
+  count=$(printf '%s\n' "$wakes" | awk 'NF { n++ } END { print n + 0 }')
+  last_seq=$(printf '%s\n' "$wakes" | awk -F '\t' 'NF >= 2 && $2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print max + 0 }')
+  printf '%s\t%s\n' "$count" "$last_seq"
+}
+
+write_snapshot() {
+  local tmp rows meta wake_count wake_last_seq status
+  tmp="$SNAPSHOT.tmp.$$"
+  rows="$tmp.rows"
+  rm -f "$rows"
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    classify_meta "$meta" >> "$rows" || {
+      rm -f "$tmp" "$rows"
+      return 1
+    }
+  done
+  IFS="$(printf '\t')" read -r wake_count wake_last_seq <<EOF
+$(wake_snapshot)
+EOF
+  {
+    printf 'firstmate-supervisor-v1\n'
+    printf 'generated-at\t%s\n' "$(now_epoch)"
+    printf 'wake-count\t%s\n' "$wake_count"
+    printf 'wake-last-seq\t%s\n' "$wake_last_seq"
+    [ ! -f "$rows" ] || LC_ALL=C sort "$rows"
+  } > "$tmp" || {
+    rm -f "$tmp" "$rows"
+    return 1
+  }
+  mv -f "$tmp" "$SNAPSHOT"
+  status=$?
+  rm -f "$rows"
+  return "$status"
+}
+
+write_heartbeat() {
+  local tmp
+  tmp="$HEARTBEAT.tmp.$$"
+  printf '%s\n' "$(now_epoch)" > "$tmp" && mv -f "$tmp" "$HEARTBEAT"
+}
+
+record_error() {
+  printf '%s\t%s\n' "$(now_epoch)" "$1" >> "$LOG" 2>/dev/null || true
+  printf '%s\t%s\n' "$(now_epoch)" "$1" > "$ERROR" 2>/dev/null || true
+}
+
+cycle() {
+  mkdir -p "$STATE"
+  if ! write_snapshot; then
+    record_error snapshot-write-failed
+    return 1
+  fi
+  if ! FM_HOME="$FM_HOME" \
+    FM_STATE_OVERRIDE="$STATE" \
+    FM_SUPERVISOR_SNAPSHOT="$SNAPSHOT" \
+    "$SCRIPT_DIR/fm-board.sh" --once >/dev/null 2>&1; then
+    record_error board-refresh-failed
+    return 1
+  fi
+  if ! write_heartbeat; then
+    record_error heartbeat-write-failed
+    return 1
+  fi
+  rm -f "$ERROR"
+}
+
+run_loop() {
+  mkdir -p "$STATE"
+  if ! fm_lock_try_acquire "$LOCK"; then
+    printf 'supervisor already running%s\n' "${FM_LOCK_HELD_PID:+ (pid $FM_LOCK_HELD_PID)}" >&2
+    return 1
+  fi
+  printf '%s\n' "$$" > "$PIDFILE" || {
+    fm_lock_release "$LOCK"
+    return 1
+  }
+  trap 'rm -f "$PIDFILE"; fm_lock_release "$LOCK"; exit 0' INT TERM EXIT
+  while :; do
+    cycle || true
+    sleep "$INTERVAL"
+  done
+}
+
+wait_for_owner() { # <preferred-child-pid>
+  local child=$1 waited=0 pid
+  while [ "$waited" -lt "$START_WAIT" ]; do
+    pid=$(cat "$PIDFILE" 2>/dev/null || true)
+    if supervisor_pid_is_ours "$pid"; then
+      printf 'supervisor running: pid %s\n' "$pid"
+      return 0
+    fi
+    fm_pid_alive "$child" || break
+    sleep 1
+    waited=$((waited + 1))
+  done
+  pid=$(cat "$PIDFILE" 2>/dev/null || true)
+  if supervisor_pid_is_ours "$pid"; then
+    printf 'supervisor running: pid %s\n' "$pid"
+    return 0
+  fi
+  printf 'error: supervisor failed to publish a live PID receipt\n' >&2
+  return 1
+}
+
+start_unlocked() {
+  local pid child
+  mkdir -p "$STATE"
+  pid=$(cat "$PIDFILE" 2>/dev/null || true)
+  if supervisor_pid_is_ours "$pid"; then
+    printf 'supervisor already running: pid %s\n' "$pid"
+    return 0
+  fi
+  nohup "$SCRIPT_DIR/fm-supervisor.sh" --run >> "$LOG" 2>&1 &
+  child=$!
+  wait_for_owner "$child"
+}
+
+start() {
+  mkdir -p "$STATE"
+  if ! fm_lock_try_acquire "$CONTROL_LOCK"; then
+    printf 'supervisor control operation already in progress%s\n' "${FM_LOCK_HELD_PID:+ (pid $FM_LOCK_HELD_PID)}" >&2
+    return 1
+  fi
+  trap 'fm_lock_release "$CONTROL_LOCK"' EXIT
+  start_unlocked
+}
+
+restart() {
+  local pid waited=0 rc
+  mkdir -p "$STATE"
+  if ! fm_lock_try_acquire "$CONTROL_LOCK"; then
+    printf 'supervisor control operation already in progress%s\n' "${FM_LOCK_HELD_PID:+ (pid $FM_LOCK_HELD_PID)}" >&2
+    return 1
+  fi
+  trap 'fm_lock_release "$CONTROL_LOCK"' EXIT
+  pid=$(cat "$PIDFILE" 2>/dev/null || true)
+  if supervisor_pid_is_ours "$pid"; then
+    kill -TERM "$pid" 2>/dev/null || true
+    while fm_pid_alive "$pid" && [ "$waited" -lt "$START_WAIT" ]; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if fm_pid_alive "$pid"; then
+      printf 'error: supervisor pid %s did not stop; refusing duplicate start\n' "$pid" >&2
+      return 1
+    fi
+  fi
+  start_unlocked
+  rc=$?
+  return "$rc"
+}
+
+status() {
+  local pid beat beat_age snapshot_age error
+  pid=$(cat "$PIDFILE" 2>/dev/null || true)
+  beat=$(cat "$HEARTBEAT" 2>/dev/null || true)
+  beat_age=$(fm_path_age "$HEARTBEAT")
+  snapshot_age=$(fm_path_age "$SNAPSHOT")
+  error=$(cat "$ERROR" 2>/dev/null || true)
+  if supervisor_pid_is_ours "$pid"; then
+    printf 'state=running pid=%s heartbeat=%s heartbeat-age=%s snapshot-age=%s' \
+      "$pid" "${beat:-missing}" "$beat_age" "$snapshot_age"
+    [ -z "$error" ] || printf ' error=%s' "$(printf '%s' "$error" | clean_field)"
+    printf '\n'
+    return 0
+  fi
+  printf 'state=stopped pid=%s heartbeat=%s heartbeat-age=%s snapshot-age=%s' \
+    "${pid:-none}" "${beat:-missing}" "$beat_age" "$snapshot_age"
+  [ -z "$error" ] || printf ' error=%s' "$(printf '%s' "$error" | clean_field)"
+  printf '\n'
+  return 1
+}
+
+case "${1:-status}" in
+  start) start ;;
+  restart) restart ;;
+  status) status ;;
+  --once) cycle ;;
+  --run) run_loop ;;
+  *) printf 'usage: %s start|restart|status\n' "$0" >&2; exit 2 ;;
+esac

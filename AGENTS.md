@@ -94,6 +94,9 @@ state/               volatile runtime signals; gitignored
   .last-watcher-beat watcher liveness beacon, touched every poll; fm-guard.sh reads it
   .watch.keepalive.* keepalive sidecar lock, log, and stderr; never touch
   .subsuper-* .supervise-daemon.*   sub-supervisor internals (stale markers, escalation buffer, inject-wedged marker, seen-status dedup, log, lock, pid); never touch
+  firstmate-supervisor.tsv  generated machine-readable direct-report snapshot; never hand-edit
+  .firstmate-supervisor.*   always-on supervisor lock, PID, heartbeat, escalation, error, and log state; never touch
+  board/             generated Firstmate Board; never hand-edit
 .no-mistakes/        local validation state and evidence; gitignored
 ```
 
@@ -107,6 +110,7 @@ Never install anything the captain has not approved in this session.
 
 Run `bin/fm-bootstrap.sh`.
 Bootstrap also refreshes the fleet via `bin/fm-fleet-sync.sh`: it fetches each remote-backed clone, clean-fast-forwards its local default branch when safe, and prunes local branches whose upstream is gone and that no worktree still needs, best-effort and non-fatal.
+When tmux is available, bootstrap also silently ensures the main home's deterministic supervisor is running; secondmate homes do not start another owner.
 Set `FM_FLEET_PRUNE=0` to temporarily disable that branch pruning.
 Silence means all good: say nothing and move on.
 Otherwise it prints one line per problem or capability fact; handle each:
@@ -238,7 +242,7 @@ Reconcile reality with your records before doing anything else:
 8. If `state/.afk` is present (away-mode was active before the restart): re-enter afk - ensure the daemon is running, do not arm the one-shot watcher (the daemon owns it), and resume away-mode supervision.
 9. Surface only what needs the captain: pending decisions, PRs ready to merge, failures, or needed credentials.
    If there is nothing that needs them, say nothing and resume.
-10. Handle drained wakes, then arm the watcher (section 8) unless afk was re-entered in step 8, in which case the daemon manages the watcher.
+10. Ensure `bin/fm-supervisor.sh start` reports one live main-home owner, handle drained wakes, then arm the watcher (section 8) unless afk was re-entered in step 8, in which case the daemon manages the watcher.
 
 A firstmate restart must be a non-event.
 All truth lives in tmux, state files, data/backlog.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
@@ -526,7 +530,26 @@ Empty polls, elapsed waiting time, and "still no change" are tool bookkeeping, n
 ```sh
 bin/fm-watch.sh   # run in background; exits with: signal|stale|check|heartbeat
 bin/fm-wake-drain.sh   # drain queued wake records at turn start
+bin/fm-supervisor.sh start   # ensure the always-on no-chat owner is live
 ```
+
+**Always-on Firstmate supervisor (main home, no chat).**
+`bin/fm-supervisor.sh` is the deterministic present-mode safety net.
+It continuously reconciles a locked copy of durable wakes without draining them, inspects only this home's recorded `state/*.meta` direct reports, status receipts, pane/process evidence, and explicit receipt deadlines, then atomically refreshes `state/firstmate-supervisor.tsv` and `state/board/board.html`.
+It is an observer and recorder, not another task scheduler: it never mutates the backlog, sends keys, injects chat, changes AFK state, or replaces Firstmate's brief/artifact reconciliation.
+The AFK daemon retains its existing batching and injection behavior.
+
+Every recorded direct report is exactly `active`, `active-unverified`, `stalled`, or `terminal`.
+A visible busy pane or a declared live `process-pid=` is `active`.
+Without verifiable activity or a terminal receipt, it is `active-unverified` until an explicit `receipt-deadline=<Unix epoch>` passes with no receipt, then `stalled`.
+A missing recorded pane/process is `stalled`; a terminal status receipt is `terminal`.
+Missing-process, missed-deadline, and failed/blocked/needs-decision receipt conditions append deduplicated actionable rows to `state/.firstmate-supervisor.escalations`.
+A busy pane remains `active` even when its receipt deadline has passed, while the missed receipt still produces its durable escalation.
+
+`start`, `restart`, and `status` are the only operator interface.
+The singleton lock, `state/.firstmate-supervisor.pid`, and periodically rewritten `state/.firstmate-supervisor.heartbeat` prove ownership and liveness.
+`restart` stops only the verified current owner and refuses to launch a duplicate if it cannot stop.
+The board is rendered once per successful supervisor cycle and has no separate keepalive or long-running owner.
 
 On wake, in order of cheapness:
 
@@ -735,6 +758,8 @@ After seeding, hand the new secondmate's in-scope queued items off from the main
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
 The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
 For an ordinary generated brief, replace `{OBJECTIVE}`, `{SUCCESS_EVIDENCE}`, and `{REVIEW_OR_DEADLINE_TRIGGER}` with a clear objective, evidence that Firstmate can observe to verify success, and the condition or time that requires review, escalation, or follow-up.
+When that trigger includes a receipt deadline that should be enforced mechanically, express it as an absolute Unix epoch and append `receipt-deadline=<epoch>` to the task meta immediately after a successful spawn.
+Do not infer deadlines from prose, and do not add one when the brief deliberately has no timed receipt contract.
 Review the filled brief before spawning; `fm-spawn.sh` does not parse or enforce a brief schema.
 Custom or deviating briefs remain valid when they state the same objective, evidence, and follow-up contract in another shape.
 For a generated secondmate charter that still contains `{TASK}`, replace it with the persistent responsibility and routing scope before seeding.

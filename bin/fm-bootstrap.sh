@@ -104,4 +104,13 @@ crew=
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
 fm_tasks_axi_compatible && echo "TASKS_AXI: available"
 fleet_sync
+
+# The main home's deterministic supervisor is an always-on shell process.
+# Secondmates retain their existing parent-supervised lifecycle, and bootstrap
+# stays silent if startup is unavailable or fails.
+if command -v tmux >/dev/null 2>&1 \
+  && [ ! -f "$FM_HOME/.fm-secondmate-home" ] \
+  && [ -x "$SCRIPT_DIR/fm-supervisor.sh" ]; then
+  "$SCRIPT_DIR/fm-supervisor.sh" start >/dev/null 2>&1 || true
+fi
 exit 0
