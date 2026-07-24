@@ -25,6 +25,14 @@ assert_line() {
   grep -Fx "$line" "$file" >/dev/null || fail "$message"
 }
 
+assert_before() {
+  local file=$1 first=$2 second=$3 message=$4 first_line second_line
+  first_line=$(grep -nF "$first" "$file" | head -n 1 | cut -d: -f1)
+  second_line=$(grep -nF "$second" "$file" | head -n 1 | cut -d: -f1)
+  [ -n "$first_line" ] && [ -n "$second_line" ] && [ "$first_line" -lt "$second_line" ] \
+    || fail "$message"
+}
+
 test_ship_and_scout_templates_name_evidence_contract() {
   local home id brief
   home="$TMP_ROOT/home"
@@ -52,8 +60,12 @@ test_ship_and_scout_templates_name_evidence_contract() {
 }
 
 test_documentation_keeps_advisory_ownership_boundary() {
-  grep -F 'Every incoming work request becomes a durable Queued record before any dispatch or routing message.' "$AGENTS" >/dev/null \
+  grep -F 'Every incoming work request becomes a durable Queued record before any clarification question, dispatch, or routing message.' "$AGENTS" >/dev/null \
     || fail "AGENTS.md omitted record-first durable ownership"
+  assert_before "$AGENTS" \
+    'Every incoming work request becomes a durable Queued record before any clarification question, dispatch, or routing message.' \
+    '5. More than one plausible match, or none: ask a one-line question after the provisional Queued record exists.' \
+    "AGENTS.md asks for clarification before durable intake"
   grep -F 'Three is the default working limit, not a spawn-time lock' "$AGENTS" >/dev/null \
     || fail "AGENTS.md omitted advisory three-report boundary"
   grep -F 'the captain may explicitly override it for a particular dispatch' "$AGENTS" >/dev/null \
@@ -64,6 +76,16 @@ test_documentation_keeps_advisory_ownership_boundary() {
     || fail "AGENTS.md omitted done reconciliation"
   grep -F '`fm-spawn.sh` does not enforce a hard cap.' "$README" >/dev/null \
     || fail "README omitted advisory-only spawn behavior"
+  assert_line "$AGENTS" \
+    'Re-evaluate the queue and apply the Queued dispatch checks above before dispatching each eligible item.' \
+    "ship teardown bypasses queued dispatch checks"
+  grep -F 'then re-evaluate the queue and apply the Queued dispatch checks above before dispatching each eligible item.' "$AGENTS" >/dev/null \
+    || fail "scout completion bypasses queued dispatch checks"
+  grep -F 'treat queued items whose blockers or date gates have cleared as candidates and apply the Queued dispatch checks before dispatch' "$AGENTS" >/dev/null \
+    || fail "stall handling bypasses queued dispatch checks"
+  assert_line "$AGENTS" \
+    'Re-evaluate Queued on every teardown and every heartbeat, then apply the Queued dispatch checks before dispatching each eligible item.' \
+    "heartbeat sweep bypasses queued dispatch checks"
 
   pass "documentation pins record-first ownership and an advisory three-report boundary"
 }
