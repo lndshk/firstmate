@@ -371,10 +371,13 @@ run_loop() {
 owner_cleanup() {
   local status=$1 child_pid
   trap - INT TERM EXIT
-  for child_pid in $(jobs -p); do
+  while IFS= read -r child_pid; do
+    [ -n "$child_pid" ] || continue
     kill "$child_pid" 2>/dev/null || true
     wait "$child_pid" 2>/dev/null || true
-  done
+  done <<EOF
+$(jobs -p)
+EOF
   rm -f "$PIDFILE" "$OWNER_RECEIPT"
   fm_lock_release "$LOCK"
   exit "$status"

@@ -39,7 +39,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   It does not make `data/` tracked.
 - Helper scripts in `bin/` are plain bash.
   Each starts with a usage header comment; keep it accurate when you change behavior.
-  `shellcheck bin/*.sh` must pass, and CI enforces it.
+  `shellcheck bin/*.sh tests/*.sh` must pass, and CI enforces it.
 - Changes to harness adapters (launch templates in `bin/fm-spawn.sh`, the adapter tables in `AGENTS.md`) must be verified empirically against the real harness, never written from documentation alone.
 - In Markdown, put each full sentence on its own line.
 

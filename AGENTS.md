@@ -85,7 +85,7 @@ projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" lines
   <id>.turn-ended    touched by turn-end hooks
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check appends pr=)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, kind=, mode=, yolo=; kind=secondmate also records home= and projects= (fm-pr-check appends pr=; section 11 covers optional receipt-deadline=)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
@@ -540,12 +540,16 @@ It continuously reconciles a locked copy of durable wakes without draining them,
 It is an observer and recorder, not another task scheduler: it never mutates the backlog, sends keys, injects chat, changes AFK state, or replaces Firstmate's brief/artifact reconciliation.
 The AFK daemon retains its existing batching and injection behavior.
 
-Every recorded direct report is exactly `active`, `active-unverified`, `stalled`, or `terminal`.
-A visible busy pane or a declared live `process-pid=` is `active`.
-Without verifiable activity or a terminal receipt, it is `active-unverified` until an explicit `receipt-deadline=<Unix epoch>` passes without an on-time receipt, then `stalled`.
-A missing recorded pane/process is `stalled`; a terminal status receipt is `terminal`.
-Missing-process, missed-deadline, and failed/blocked/needs-decision receipt conditions append deduplicated actionable rows to `state/.firstmate-supervisor.escalations`.
-A busy pane remains `active` even when its receipt deadline has passed, while the missed receipt still produces its durable escalation.
+Every recorded direct report is exactly `active`, `active-unverified`, `stalled`, or `terminal`, using this precedence:
+
+1. A terminal status receipt is `terminal`, including when it arrived after its deadline.
+2. Otherwise, a visible busy pane or declared live process is `active`.
+3. Otherwise, an unreadable recorded pane is `active-unverified`.
+4. Otherwise, a missing recorded pane/process or a missed receipt deadline is `stalled`.
+5. Otherwise, the report is `active-unverified` while it awaits verifiable activity or a receipt.
+
+Missing-process, missed-deadline, and failed/blocked/needs-decision receipt conditions independently append deduplicated actionable rows to `state/.firstmate-supervisor.escalations`.
+That keeps busy work `active`, unreadable work `active-unverified`, and a late terminal receipt `terminal` while still preserving each separate contract breach as an escalation.
 
 `start`, `restart`, and `status` are the only operator interface.
 The singleton lock, `state/.firstmate-supervisor.pid`, `state/.firstmate-supervisor.owner` cadence receipt, and periodically rewritten `state/.firstmate-supervisor.heartbeat` prove ownership and liveness.

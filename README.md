@@ -244,12 +244,12 @@ FM_SUPERVISOR_INTERVAL=15          # seconds between deterministic snapshot and 
 ### Always-on supervisor runbook
 
 Bootstrap silently starts the main home's supervisor when tmux is available; secondmate homes do not start another owner.
-Use `bin/fm-supervisor.sh start` to ensure it is running after an upgrade or recovery, `restart` to replace a verified stale owner, and `status` to inspect its singleton PID, heartbeat, snapshot freshness, and last error. The running cadence is persisted in `state/.firstmate-supervisor.owner` and governs heartbeat health checks.
+Use `bin/fm-supervisor.sh start` to ensure it is running after an upgrade or recovery, `restart` to replace a verified stale owner, and `status` to inspect its singleton PID, heartbeat, snapshot freshness, and last error.
+The running cadence is persisted in `state/.firstmate-supervisor.owner` and governs heartbeat health checks.
 These commands are safe to run immediately after merge; `start` is idempotent and `restart` refuses duplicate ownership.
 
 The snapshot is `state/firstmate-supervisor.tsv`, actionable conditions append to `state/.firstmate-supervisor.escalations`, and the generated board is `state/board/board.html`.
-Task state is exactly `active`, `active-unverified`, `stalled`, or `terminal`.
-An optional `receipt-deadline=<absolute Unix epoch>` in task meta makes a missing or late receipt `stalled` only after that deadline; before it, the task remains `active-unverified`, and a live busy pane remains `active` while the missed receipt is escalated separately.
+The authoritative state-classification and optional receipt-deadline contract is in the [supervision protocol](AGENTS.md#8-supervision-protocol).
 The supervisor never drains Firstmate's wake queue, changes the backlog, or sends chat, so normal ownership and AFK batching/injection remain unchanged.
 
 ## Development
