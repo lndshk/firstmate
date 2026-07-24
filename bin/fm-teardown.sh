@@ -37,9 +37,22 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 FORCE=${2:-}
+case "$ID" in ''|*[!A-Za-z0-9_.-]*) echo "error: invalid task id: $ID" >&2; exit 2 ;; esac
 
 META="$STATE/$ID.meta"
-[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+if [ ! -f "$META" ]; then
+  RETIREMENT_RECORD="$STATE/.firstmate-supervisor.retirements/$ID"
+  RETIREMENT_INTENT="$STATE/.firstmate-supervisor.retirement-intents/$ID"
+  if [ -e "$RETIREMENT_RECORD" ] || [ -L "$RETIREMENT_RECORD" ] \
+    || [ -e "$RETIREMENT_INTENT" ] || [ -L "$RETIREMENT_INTENT" ]; then
+    FM_STATE_OVERRIDE="$STATE" \
+      "$FM_ROOT/bin/fm-supervisor.sh" --retire-task "$ID"
+    echo "teardown $ID retirement recovery complete"
+    exit 0
+  fi
+  echo "error: no meta for task $ID at $META" >&2
+  exit 1
+fi
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
@@ -75,6 +88,11 @@ meta_value() {
 retire_supervisor_task_state() {
   FM_STATE_OVERRIDE="$1" \
     "$FM_ROOT/bin/fm-supervisor.sh" --retire-task "$2"
+}
+
+begin_supervisor_task_retirement() {
+  FM_STATE_OVERRIDE="$1" \
+    "$FM_ROOT/bin/fm-supervisor.sh" --begin-retirement "$2"
 }
 
 backlog_refresh_reminder() {
@@ -366,6 +384,7 @@ cleanup_firstmate_home_children() {
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
+    begin_supervisor_task_retirement "$sub_state" "$child_id"
     if [ -n "$child_t" ]; then
       tmux kill-window -t "$child_t" 2>/dev/null || true
     fi
@@ -417,10 +436,6 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
-  cleanup_firstmate_home_children "$HOME_PATH"
-fi
-
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if [ "$KIND" = secondmate ]; then
     :
@@ -461,6 +476,12 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+fi
+
+begin_supervisor_task_retirement "$STATE" "$ID"
+
+if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
+  cleanup_firstmate_home_children "$HOME_PATH"
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.

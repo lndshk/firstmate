@@ -2,7 +2,7 @@
 # Always-on deterministic supervisor for one main Firstmate home.
 #
 # Usage: fm-supervisor.sh start|restart|status
-# Test/internal: fm-supervisor.sh --once|--run --owner-token=<token>
+# Test/internal: fm-supervisor.sh --once|--begin-retirement <id>|--retire-task <id>
 #
 # The process observes durable wakes, state/*.meta, status receipts, declared
 # receipt deadlines, and recorded panes. It writes a machine-readable snapshot,
@@ -27,14 +27,17 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 INTERVAL="${FM_SUPERVISOR_INTERVAL:-15}"
 START_WAIT="${FM_SUPERVISOR_START_WAIT:-5}"
 TASK_LOCK_WAIT="${FM_SUPERVISOR_TASK_LOCK_WAIT:-5}"
+RETIRE_PENDING_MAX_AGE="${FM_SUPERVISOR_RETIRE_PENDING_MAX_AGE:-300}"
 case "$INTERVAL" in ''|0|*[!0-9]*) INTERVAL=15 ;; esac
 case "$START_WAIT" in ''|0|*[!0-9]*) START_WAIT=5 ;; esac
 case "$TASK_LOCK_WAIT" in ''|*[!0-9]*) TASK_LOCK_WAIT=5 ;; esac
+case "$RETIRE_PENDING_MAX_AGE" in ''|*[!0-9]*) RETIRE_PENDING_MAX_AGE=300 ;; esac
 LOCK="$STATE/.firstmate-supervisor.lock"
 CONTROL_LOCK="$STATE/.firstmate-supervisor.control.lock"
 TASK_STATE_LOCK="$STATE/.firstmate-supervisor.state.lock"
 RETIREMENT_LOCK="$STATE/.firstmate-supervisor.retirement.lock"
 RETIREMENTS="$STATE/.firstmate-supervisor.retirements"
+RETIREMENT_INTENTS="$STATE/.firstmate-supervisor.retirement-intents"
 PIDFILE="$STATE/.firstmate-supervisor.pid"
 OWNER_RECEIPT="$STATE/.firstmate-supervisor.owner"
 HEARTBEAT="$STATE/.firstmate-supervisor.heartbeat"
@@ -171,6 +174,25 @@ task_state_dir() {
 
 retirement_record_path() {
   printf '%s/%s' "$RETIREMENTS" "$1"
+}
+
+retirement_intent_path() {
+  printf '%s/%s' "$RETIREMENT_INTENTS" "$1"
+}
+
+task_retirement_excluded() {
+  local record intent
+  record=$(retirement_record_path "$1") || return 1
+  intent=$(retirement_intent_path "$1") || return 1
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    [ -f "$record" ] || return 2
+    return 0
+  fi
+  if [ -e "$intent" ] || [ -L "$intent" ]; then
+    [ -f "$intent" ] || return 2
+    return 0
+  fi
+  return 1
 }
 
 ensure_task_state_dir() {
@@ -710,14 +732,15 @@ write_snapshot() {
       return 1
     }
     id=$(basename "$meta" .meta)
-    if [ -e "$(retirement_record_path "$id")" ] \
-      || [ -L "$(retirement_record_path "$id")" ]; then
-      [ -f "$(retirement_record_path "$id")" ] || {
+    if task_retirement_excluded "$id"; then
+      continue
+    else
+      status=$?
+      if [ "$status" -ne 1 ]; then
         rm -f "$tmp" "$rows"
         fm_lock_release "$RETIREMENT_LOCK"
         return 1
-      }
-      continue
+      fi
     fi
     classify_meta "$meta" >> "$rows" || {
       rm -f "$tmp" "$rows"
@@ -797,10 +820,70 @@ write_retirement_record_locked() { # <id> <state> <condition> <action> <token> <
   fi
 }
 
-begin_retirement() { # <id>
+write_retirement_intent() {
+  local id=$1 state=$2 condition=$3 action=$4 token=$5 epoch=$6 path tmp
+  path=$(retirement_intent_path "$id") || return 1
+  mkdir -p "$RETIREMENT_INTENTS" || return 1
+  tmp="$path.tmp.$$"
+  if ! printf 'v1\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$epoch" "$id" "$state" "$condition" "$action" "$token" > "$tmp" \
+    || ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+ensure_retirement_intent() {
   local id=$1 path record format epoch saved_id state condition action token
-  local token_seed status=0
-  acquire_retirement_lock || return 1
+  local token_seed tmp
+  path=$(retirement_intent_path "$id") || return 1
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    mkdir -p "$RETIREMENT_INTENTS" || return 1
+    epoch=$(now_epoch)
+    token_seed="$epoch-$$-${RANDOM:-0}"
+    token=$(printf '%s\t%s' "$id" "$token_seed" | cksum | awk '{ print $1 "-" $2 }')
+    tmp="$path.tmp.$$"
+    printf 'v1\t%s\t%s\tpending\t-\tcomplete task retirement\t%s\n' \
+      "$epoch" "$id" "$token" > "$tmp" || {
+      rm -f "$tmp"
+      return 1
+    }
+    if ! ln "$tmp" "$path" 2>/dev/null; then
+      rm -f "$tmp"
+      [ -e "$path" ] || [ -L "$path" ] || return 1
+    else
+      rm -f "$tmp" || return 1
+    fi
+  fi
+  record=$(read_optional_file "$path") || return 1
+  IFS="$(printf '\t')" read -r \
+    format epoch saved_id state condition action token <<EOF
+$record
+EOF
+  [ "$format" = v1 ] \
+    && is_epoch "$epoch" \
+    && [ "$saved_id" = "$id" ] \
+    && { [ "$state" = pending ] || [ "$state" = failed ]; } \
+    && [ -n "$token" ]
+}
+
+begin_retirement() { # <id>
+  local id=$1 path intent_path record format epoch saved_id state condition action token
+  local status=0 failure_action
+  ensure_retirement_intent "$id" || return 1
+  intent_path=$(retirement_intent_path "$id") || return 1
+  record=$(read_optional_file "$intent_path") || return 1
+  IFS="$(printf '\t')" read -r \
+    format epoch saved_id state condition action token <<EOF
+$record
+EOF
+  if ! acquire_retirement_lock; then
+    failure_action="retry teardown after inspecting the retirement lock at $RETIREMENT_LOCK"
+    write_retirement_intent \
+      "$id" failed lock-timeout "$failure_action" "$token" "$(now_epoch)" \
+      || return 1
+    return 1
+  fi
   path=$(retirement_record_path "$id") || status=$?
   if [ "$status" -eq 0 ]; then
     record=$(read_optional_file "$path") || status=$?
@@ -816,10 +899,11 @@ EOF
       && { [ "$state" = pending ] || [ "$state" = failed ]; } \
       && [ -n "$token" ] || status=1
   elif [ "$status" -eq 0 ]; then
-    epoch=$(now_epoch)
-    token_seed="$epoch-$$-${RANDOM:-0}"
-    token=$(printf '%s\t%s' "$id" "$token_seed" | cksum | awk '{ print $1 "-" $2 }')
     write_retirement_record_locked \
+      "$id" pending - "complete task retirement" "$token" "$epoch" || status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    write_retirement_intent \
       "$id" pending - "complete task retirement" "$token" "$epoch" || status=$?
   fi
   fm_lock_release "$RETIREMENT_LOCK"
@@ -827,20 +911,28 @@ EOF
 }
 
 record_retire_failure() { # <id> <condition> <action>
-  local id=$1 condition=$2 action=$3 path record format epoch saved_id state
-  local saved_condition saved_action token status=0
+  local id=$1 condition=$2 action=$3 path intent_path source record format epoch
+  local saved_id state saved_condition saved_action token status=0 failure_epoch
   acquire_retirement_lock || return 1
   path=$(retirement_record_path "$id") || status=$?
+  intent_path=$(retirement_intent_path "$id") || status=$?
   if [ "$status" -eq 0 ] \
     && [ ! -e "$STATE/$id.meta" ] \
     && [ ! -L "$STATE/$id.meta" ] \
     && [ ! -e "$path" ] \
-    && [ ! -L "$path" ]; then
+    && [ ! -L "$path" ] \
+    && [ ! -e "$intent_path" ] \
+    && [ ! -L "$intent_path" ]; then
     fm_lock_release "$RETIREMENT_LOCK"
     return 0
   fi
   if [ "$status" -eq 0 ]; then
-    record=$(read_optional_file "$path") || status=$?
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      source=$path
+    else
+      source=$intent_path
+    fi
+    record=$(read_optional_file "$source") || status=$?
   fi
   if [ "$status" -eq 0 ]; then
     IFS="$(printf '\t')" read -r \
@@ -856,72 +948,103 @@ EOF
   if [ "$status" -eq 0 ]; then
     condition=$(printf '%s' "$condition" | clean_field)
     action=$(printf '%s' "$action" | clean_field)
+    failure_epoch=$(now_epoch)
     write_retirement_record_locked \
-      "$id" failed "$condition" "$action" "$token" "$(now_epoch)" || status=$?
+      "$id" failed "$condition" "$action" "$token" "$failure_epoch" || status=$?
+    if [ "$status" -eq 0 ]; then
+      write_retirement_intent \
+        "$id" failed "$condition" "$action" "$token" "$failure_epoch" || status=$?
+    fi
   fi
   fm_lock_release "$RETIREMENT_LOCK"
   return "$status"
 }
 
 commit_retirement() { # <id>
-  local path status=0
+  local path intent_path status=0
   acquire_retirement_lock || return 1
   path=$(retirement_record_path "$1") || status=$?
+  intent_path=$(retirement_intent_path "$1") || status=$?
   if [ "$status" -eq 0 ]; then
     rm -f "$path" || status=$?
     rmdir "$RETIREMENTS" 2>/dev/null || true
+  fi
+  if [ "$status" -eq 0 ]; then
+    rm -f "$intent_path" || status=$?
+    rmdir "$RETIREMENT_INTENTS" 2>/dev/null || true
   fi
   fm_lock_release "$RETIREMENT_LOCK"
   return "$status"
 }
 
+append_retirement_record() {
+  local path=$1 rows=$2 expected_root=$3 record format epoch id state
+  local condition action token logged_status journal_condition age
+  [ -f "$path" ] || return 1
+  record=$(read_optional_file "$path") || return 1
+  IFS="$(printf '\t')" read -r \
+    format epoch id state condition action token <<EOF
+$record
+EOF
+  [ "$format" = v1 ] \
+    && is_epoch "$epoch" \
+    && [ -n "$id" ] \
+    && [ "$expected_root/$id" = "$path" ] \
+    && [ -n "$token" ] || return 1
+  if [ "$state" = pending ]; then
+    age=$(( $(now_epoch) - epoch ))
+    if [ "$age" -lt "$RETIRE_PENDING_MAX_AGE" ]; then
+      printf 'task\t%s\tactive-unverified\tretirement in progress\t-\t-\t-\t-\n' \
+        "$(snapshot_field "$id")" >> "$rows"
+      return
+    fi
+    condition=abandoned-pending
+    action="resume retirement with $FM_ROOT/bin/fm-supervisor.sh --retire-task $id"
+  elif [ "$state" != failed ]; then
+    return 1
+  fi
+  [ -n "$condition" ] && [ -n "$action" ] || return 1
+  journal_condition="retirement-$condition"
+  if escalation_logged "$id" "$journal_condition" "$token"; then
+    :
+  else
+    logged_status=$?
+    [ "$logged_status" -eq 1 ] || return 1
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$epoch" "$id" "$journal_condition" "$action" "$token" \
+      >> "$ESCALATIONS" || return 1
+  fi
+  printf 'task\t%s\tstalled\t%s\t-\t-\t-\t-\n' \
+    "$(snapshot_field "$id")" \
+    "$(snapshot_field "retirement failed: $condition")" \
+    >> "$rows" || return 1
+  printf 'escalation\t%s\t%s\t%s\n' \
+    "$(snapshot_field "$id")" \
+    "$(snapshot_field "$journal_condition")" \
+    "$(snapshot_field "$action")" >> "$rows"
+}
+
 append_retirement_rows_locked() { # <rows>
-  local rows=$1 path record format epoch id state condition action token
-  local logged_status journal_condition
+  local rows=$1 path id record
   for path in "$RETIREMENTS"/*; do
     if [ ! -e "$path" ] && [ ! -L "$path" ]; then
       continue
     fi
     case "$path" in *.tmp.*) continue ;; esac
-    [ -f "$path" ] || return 1
-    record=$(read_optional_file "$path") || return 1
-    IFS="$(printf '\t')" read -r \
-      format epoch id state condition action token <<EOF
-$record
-EOF
-    [ "$format" = v1 ] \
-      && is_epoch "$epoch" \
-      && [ -n "$id" ] \
-      && [ "$(retirement_record_path "$id")" = "$path" ] \
-      && [ -n "$token" ] || return 1
-    case "$state" in
-      pending)
-        printf 'task\t%s\tactive-unverified\tretirement in progress\t-\t-\t-\t-\n' \
-          "$(snapshot_field "$id")" >> "$rows" || return 1
-        ;;
-      failed)
-        [ -n "$condition" ] && [ -n "$action" ] || return 1
-        journal_condition="retirement-$condition"
-        if escalation_logged "$id" "$journal_condition" "$token"; then
-          :
-        else
-          logged_status=$?
-          [ "$logged_status" -eq 1 ] || return 1
-          printf '%s\t%s\t%s\t%s\t%s\n' \
-            "$epoch" "$id" "$journal_condition" "$action" "$token" \
-            >> "$ESCALATIONS" || return 1
-        fi
-        printf 'task\t%s\tstalled\t%s\t-\t-\t-\t-\n' \
-          "$(snapshot_field "$id")" \
-          "$(snapshot_field "retirement failed: $condition")" \
-          >> "$rows" || return 1
-        printf 'escalation\t%s\t%s\t%s\n' \
-          "$(snapshot_field "$id")" \
-          "$(snapshot_field "$journal_condition")" \
-          "$(snapshot_field "$action")" >> "$rows" || return 1
-        ;;
-      *) return 1 ;;
-    esac
+    append_retirement_record "$path" "$rows" "$RETIREMENTS" || return 1
+  done
+  for path in "$RETIREMENT_INTENTS"/*; do
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+      continue
+    fi
+    case "$path" in *.tmp.*) continue ;; esac
+    id=${path##*/}
+    record=$(retirement_record_path "$id") || return 1
+    if [ -e "$record" ] || [ -L "$record" ]; then
+      [ -f "$record" ] || return 1
+      continue
+    fi
+    append_retirement_record "$path" "$rows" "$RETIREMENT_INTENTS" || return 1
   done
 }
 
@@ -950,7 +1073,7 @@ retire_task() { # <id>
     return 1
   fi
   if ! acquire_task_state_lock; then
-    action="retry teardown after inspecting the task-state lock at $TASK_STATE_LOCK"
+    action="resume retirement with $FM_ROOT/bin/fm-supervisor.sh --retire-task $id after inspecting the task-state lock at $TASK_STATE_LOCK"
     if ! record_retire_failure "$id" task-state-lock-timeout "$action"; then
       printf 'error: could not persist supervisor retirement failure for %s\n' \
         "$id" >&2
@@ -992,7 +1115,7 @@ retire_task() { # <id>
     }
   fi
   if [ "$status" -ne 0 ]; then
-    action="retry teardown after resolving supervisor retirement phase $condition"
+    action="resume retirement with $FM_ROOT/bin/fm-supervisor.sh --retire-task $id after resolving supervisor retirement phase $condition"
     if ! record_retire_failure "$id" "$condition" "$action"; then
       printf 'error: could not persist supervisor retirement failure for %s\n' \
         "$id" >&2
@@ -1314,33 +1437,60 @@ restart() {
   return "$rc"
 }
 
+retirement_failure_identity() {
+  local path=$1 expected_root=$2 record format epoch id state condition action token age
+  [ -f "$path" ] || return 1
+  record=$(read_optional_file "$path") || return 1
+  IFS="$(printf '\t')" read -r \
+    format epoch id state condition action token <<EOF
+$record
+EOF
+  [ "$format" = v1 ] \
+    && is_epoch "$epoch" \
+    && [ -n "$id" ] \
+    && [ "$expected_root/$id" = "$path" ] \
+    && [ -n "$token" ] || return 1
+  if [ "$state" = pending ]; then
+    age=$(( $(now_epoch) - epoch ))
+    [ "$age" -ge "$RETIRE_PENDING_MAX_AGE" ] || return 0
+    condition=abandoned-pending
+  elif [ "$state" = failed ]; then
+    [ -n "$condition" ] && [ -n "$action" ] || return 1
+  else
+    return 1
+  fi
+  printf '%s:%s\n' "$id" "$condition"
+}
+
 retirement_failure_summary() {
-  local path record format epoch id state condition action token count=0 first=""
+  local path id record identity count=0 first=""
   for path in "$RETIREMENTS"/*; do
     if [ ! -e "$path" ] && [ ! -L "$path" ]; then
       continue
     fi
     case "$path" in *.tmp.*) continue ;; esac
-    [ -f "$path" ] || return 1
-    record=$(read_optional_file "$path") || return 1
-    IFS="$(printf '\t')" read -r \
-      format epoch id state condition action token <<EOF
-$record
-EOF
-    [ "$format" = v1 ] \
-      && is_epoch "$epoch" \
-      && [ -n "$id" ] \
-      && [ "$(retirement_record_path "$id")" = "$path" ] \
-      && [ -n "$token" ] || return 1
-    case "$state" in
-      pending) ;;
-      failed)
-        [ -n "$condition" ] && [ -n "$action" ] || return 1
-        count=$((count + 1))
-        [ -n "$first" ] || first="$id:$condition"
-        ;;
-      *) return 1 ;;
-    esac
+    identity=$(retirement_failure_identity "$path" "$RETIREMENTS") || return 1
+    [ -z "$identity" ] || {
+      count=$((count + 1))
+      [ -n "$first" ] || first=$identity
+    }
+  done
+  for path in "$RETIREMENT_INTENTS"/*; do
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+      continue
+    fi
+    case "$path" in *.tmp.*) continue ;; esac
+    id=${path##*/}
+    record=$(retirement_record_path "$id") || return 1
+    if [ -e "$record" ] || [ -L "$record" ]; then
+      [ -f "$record" ] || return 1
+      continue
+    fi
+    identity=$(retirement_failure_identity "$path" "$RETIREMENT_INTENTS") || return 1
+    [ -z "$identity" ] || {
+      count=$((count + 1))
+      [ -n "$first" ] || first=$identity
+    }
   done
   printf '%s\t%s\n' "$count" "$first"
 }
@@ -1393,6 +1543,19 @@ case "${1:-status}" in
   restart) restart ;;
   status) status ;;
   --once) cycle ;;
+  --begin-retirement)
+    [ $# -eq 2 ] || {
+      printf 'error: --begin-retirement requires one task id\n' >&2
+      exit 2
+    }
+    case "$2" in ''|*[!A-Za-z0-9_.-]*) exit 2 ;; esac
+    mkdir -p "$STATE" || exit 1
+    if ! begin_retirement "$2"; then
+      printf 'error: could not prepare durable supervisor retirement for %s; inspect %s\n' \
+        "$2" "$RETIREMENT_LOCK" >&2
+      exit 1
+    fi
+    ;;
   --retire-task)
     [ $# -eq 2 ] || {
       printf 'error: --retire-task requires one task id\n' >&2
