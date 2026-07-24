@@ -344,6 +344,20 @@ FM_HOME="$NO_OWNER_HOME" \
 grep -F ',limit=60,' "$NO_OWNER_BOARD/board.html" >/dev/null \
   || fail "board without an owner receipt did not use the safe fallback"
 
+ROOT_OVERRIDE_HOME="$TMP_ROOT/root-override-home"
+mkdir -p "$ROOT_OVERRIDE_HOME/state"
+cp "$NO_OWNER_HOME/state/firstmate-supervisor.tsv" "$ROOT_OVERRIDE_HOME/state/firstmate-supervisor.tsv"
+FM_ROOT_OVERRIDE="$ROOT_OVERRIDE_HOME" \
+  FM_HOME= \
+  FM_STATE_OVERRIDE= \
+  FM_SUPERVISOR_SNAPSHOT= \
+  FM_BOARD_DIR= \
+  FM_BOARD_OUT= \
+  "$ROOT/bin/fm-board.sh" --once \
+  || fail "root-override board render failed"
+[ -s "$ROOT_OVERRIDE_HOME/state/board/board.html" ] \
+  || fail "standalone board ignored root override"
+
 OTHER_HOME="$TMP_ROOT/other-home"
 OTHER_BOARD="$TMP_ROOT/other-board"
 mkdir -p "$OTHER_HOME/state" "$OTHER_BOARD"
