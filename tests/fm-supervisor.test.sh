@@ -7,6 +7,7 @@ HOME_DIR="$TMP_ROOT/home"
 FAKEBIN="$TMP_ROOT/bin"
 BOARD_DIR="$TMP_ROOT/board"
 TMUX_LOG="$TMP_ROOT/tmux.log"
+SLEEP_LOG="$TMP_ROOT/sleep.log"
 mkdir -p "$HOME_DIR/state" "$FAKEBIN" "$BOARD_DIR"
 
 fail() {
@@ -61,6 +62,13 @@ esac
 SH
 chmod +x "$FAKEBIN/tmux"
 
+cat > "$FAKEBIN/sleep" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_TEST_SLEEP_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TEST_SLEEP_LOG"
+exec /bin/sleep "$@"
+SH
+chmod +x "$FAKEBIN/sleep"
+
 write_meta() { # <id> <window> <deadline>
   {
     printf 'window=%s\n' "$2"
@@ -96,6 +104,7 @@ run_supervisor_home() {
   shift 2
   PATH="$FAKEBIN:$PATH" \
     FM_TEST_TMUX_LOG="$TMUX_LOG" \
+    FM_TEST_SLEEP_LOG="$SLEEP_LOG" \
     FM_HOME="$home" \
     FM_BOARD_DIR="$board" \
     "$ROOT/bin/fm-supervisor.sh" "$@"
@@ -209,6 +218,8 @@ default_second_pid=$(cat "$DEFAULT_HOME/state/.firstmate-supervisor.pid" 2>/dev/
   || fail "default-interval restart retained the old owner"
 [ "$default_restart_elapsed" -le 5 ] \
   || fail "default-interval restart was not responsive: ${default_restart_elapsed}s"
+grep -Fx '15' "$SLEEP_LOG" >/dev/null \
+  || fail "default interval wait was split into one-second processes"
 
 FM_SUPERVISOR_INTERVAL=1 run_supervisor start >/dev/null || fail "supervisor start failed"
 for _ in 1 2 3 4 5; do
