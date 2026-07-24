@@ -12,6 +12,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_REVISION=$(cksum "$SCRIPT_DIR/fm-supervisor.sh" | awk '{ print $1 "-" $2 }')
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -50,8 +51,25 @@ snapshot_field() {
   else printf -- '-'; fi
 }
 meta_field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -1; }
-last_receipt() { awk 'NF { line=$0 } END { print line }' "$1" 2>/dev/null; }
+last_receipt_raw() { awk 'NF { line=$0 } END { print line }' "$1" 2>/dev/null; }
 last_receipt_line() { awk 'NF { line=NR } END { print line + 0 }' "$1" 2>/dev/null; }
+receipt_explicit_time() {
+  local raw=$1 tab suffix
+  tab=$(printf '\t')
+  suffix=${raw##*"$tab"}
+  [ "$suffix" != "$raw" ] && is_uint "$suffix" || return 1
+  printf '%s\n' "$suffix"
+}
+receipt_text() {
+  local raw=$1 tab suffix
+  tab=$(printf '\t')
+  suffix=${raw##*"$tab"}
+  if [ "$suffix" != "$raw" ] && is_uint "$suffix"; then
+    printf '%s' "${raw%"$tab$suffix"}"
+  else
+    printf '%s' "$raw"
+  fi
+}
 
 terminal_receipt() {
   case "$1" in
@@ -81,12 +99,31 @@ supervisor_process_matches_owner() {
   return 2
 }
 
+supervisor_process_matches_revision() {
+  local pid=$1 command
+  fm_pid_alive "$pid" || return 1
+  command=$(ps -ww -p "$pid" -o command= 2>/dev/null) || return 1
+  case "$command" in
+    *"fm-supervisor.sh"*"--run"*"--owner-token=$OWNER_TOKEN"*"--revision=$SCRIPT_REVISION"*) return 0 ;;
+  esac
+  return 1
+}
+
 supervisor_pid_is_ours() {
   local pid=$1 lock_pid
   fm_pid_alive "$pid" || return 1
   lock_pid=$(cat "$LOCK/pid" 2>/dev/null || true)
   [ "$lock_pid" = "$pid" ] || return 1
   supervisor_process_matches_owner "$pid"
+}
+
+supervisor_pid_is_current() {
+  local pid=$1 receipt_pid receipt_revision
+  supervisor_pid_is_ours "$pid" || return 1
+  receipt_pid=$(meta_field "$OWNER_RECEIPT" pid)
+  receipt_revision=$(meta_field "$OWNER_RECEIPT" revision)
+  [ "$receipt_pid" = "$pid" ] && [ "$receipt_revision" = "$SCRIPT_REVISION" ] \
+    && supervisor_process_matches_revision "$pid"
 }
 
 clear_foreign_runtime_lock() {
@@ -139,13 +176,15 @@ clear_escalation() { # <id> <condition>
   rm -f "$STATE/.firstmate-supervisor.escalated-$(escalation_key "$1" "$2")"
 }
 
-receipt_evidence() { # <id> <status-file> <receipt>; prints <version><tab><time>
-  local id=$1 receipt_file=$2 receipt=$3 line hash version observed cursor
+receipt_evidence() { # <id> <status-file> <raw-receipt>; prints <version><tab><time>
+  local id=$1 receipt_file=$2 raw=$3 receipt line hash version observed cursor
   local saved_version saved_time tmp
+  receipt=$(receipt_text "$raw")
   line=$(last_receipt_line "$receipt_file")
   hash=$(printf '%s' "$receipt" | cksum | awk '{ print $1 "-" $2 }')
   version="$line-$hash"
-  observed=$(fm_path_mtime "$receipt_file" 2>/dev/null || true)
+  observed=$(receipt_explicit_time "$raw" 2>/dev/null || true)
+  [ -n "$observed" ] || observed=$(fm_path_mtime "$receipt_file" 2>/dev/null || true)
   is_uint "$observed" || observed=$(now_epoch)
   cursor="$STATE/.firstmate-supervisor.receipt-$(escalation_key "$id" receipt)"
   IFS="$(printf '\t')" read -r saved_version saved_time <<EOF
@@ -166,9 +205,27 @@ clear_receipt_evidence() { # <id>
   rm -f "$STATE/.firstmate-supervisor.receipt-$(escalation_key "$1" receipt)"
 }
 
-deadline_satisfaction() { # <id> <deadline> <receipt-version> <receipt-time>; prints <version><tab><time>
-  local id=$1 deadline=$2 receipt_version=$3 receipt_time=$4 cursor
-  local saved_deadline saved_version saved_time tmp
+timestamped_deadline_satisfaction() { # <status-file> <deadline>; prints <version><tab><time>
+  local receipt_file=$1 deadline=$2 raw receipt receipt_time line=0 hash
+  [ -f "$receipt_file" ] || return 1
+  while IFS= read -r raw || [ -n "$raw" ]; do
+    line=$((line + 1))
+    [ -n "$raw" ] || continue
+    receipt_time=$(receipt_explicit_time "$raw" 2>/dev/null || true)
+    is_uint "$receipt_time" || continue
+    [ "$receipt_time" -le "$deadline" ] || continue
+    receipt=$(receipt_text "$raw")
+    [ -n "$receipt" ] || continue
+    hash=$(printf '%s' "$receipt" | cksum | awk '{ print $1 "-" $2 }')
+    printf '%s\t%s\n' "$line-$hash" "$receipt_time"
+    return 0
+  done < "$receipt_file"
+  return 1
+}
+
+deadline_satisfaction() { # <id> <deadline> <status-file> <receipt-version> <receipt-time>; prints <version><tab><time>
+  local id=$1 deadline=$2 receipt_file=$3 receipt_version=$4 receipt_time=$5 cursor
+  local saved_deadline saved_version saved_time candidate tmp
   cursor="$STATE/.firstmate-supervisor.deadline-$(escalation_key "$id" receipt)"
   IFS="$(printf '\t')" read -r saved_deadline saved_version saved_time <<EOF
 $(cat "$cursor" 2>/dev/null || true)
@@ -178,6 +235,12 @@ EOF
     && is_uint "$saved_time"; then
     printf '%s\t%s\n' "$saved_version" "$saved_time"
     return 0
+  fi
+  candidate=$(timestamped_deadline_satisfaction "$receipt_file" "$deadline" 2>/dev/null || true)
+  if [ -n "$candidate" ]; then
+    IFS="$(printf '\t')" read -r receipt_version receipt_time <<EOF
+$candidate
+EOF
   fi
   if [ -n "$receipt_version" ] \
     && is_uint "$receipt_time" \
@@ -197,7 +260,7 @@ clear_deadline_satisfaction() { # <id>
 }
 
 classify_meta() { # <meta>; prints one TSV task row
-  local meta=$1 id window pid deadline receipt receipt_file now
+  local meta=$1 id window pid deadline receipt receipt_raw receipt_file now
   local state reason process_condition="" deadline_condition="" receipt_condition=""
   local pane_activity=idle pid_activity=idle receipt_version="" receipt_time=""
   local deadline_status="" deadline_version="-" deadline_time="-"
@@ -209,19 +272,20 @@ classify_meta() { # <meta>; prints one TSV task row
   deadline=$(meta_field "$meta" receipt-deadline)
   [ -n "$deadline" ] || deadline=$(meta_field "$meta" deadline)
   receipt_file="$STATE/$id.status"
-  receipt=$(last_receipt "$receipt_file")
+  receipt_raw=$(last_receipt_raw "$receipt_file")
+  receipt=$(receipt_text "$receipt_raw")
   now=$(now_epoch)
 
   if [ -n "$receipt" ]; then
     IFS="$(printf '\t')" read -r receipt_version receipt_time <<EOF
-$(receipt_evidence "$id" "$receipt_file" "$receipt")
+$(receipt_evidence "$id" "$receipt_file" "$receipt_raw")
 EOF
   else
     clear_receipt_evidence "$id"
   fi
   if is_uint "$deadline"; then
     if satisfaction=$(deadline_satisfaction \
-      "$id" "$deadline" "$receipt_version" "$receipt_time"); then
+      "$id" "$deadline" "$receipt_file" "$receipt_version" "$receipt_time"); then
       deadline_status=satisfied
       IFS="$(printf '\t')" read -r deadline_version deadline_time <<EOF
 $satisfaction
@@ -434,6 +498,7 @@ run_loop() {
   if ! {
     printf 'pid=%s\n' "$$"
     printf 'interval=%s\n' "$INTERVAL"
+    printf 'revision=%s\n' "$SCRIPT_REVISION"
   } > "$owner_tmp" || ! mv -f "$owner_tmp" "$OWNER_RECEIPT"; then
     fm_lock_release "$LOCK"
     return 1
@@ -545,7 +610,7 @@ wait_for_owner() { # <preferred-child-pid> <not-before-epoch>
   local child=$1 not_before=$2 waited=0 pid
   while [ "$waited" -lt "$START_WAIT" ]; do
     pid=$(cat "$PIDFILE" 2>/dev/null || true)
-    if supervisor_pid_is_ours "$pid" && heartbeat_is_ready "$not_before"; then
+    if supervisor_pid_is_current "$pid" && heartbeat_is_ready "$not_before"; then
       printf 'supervisor running: pid %s\n' "$pid"
       return 0
     fi
@@ -554,7 +619,7 @@ wait_for_owner() { # <preferred-child-pid> <not-before-epoch>
     waited=$((waited + 1))
   done
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
-  if supervisor_pid_is_ours "$pid" && heartbeat_is_ready "$not_before"; then
+  if supervisor_pid_is_current "$pid" && heartbeat_is_ready "$not_before"; then
     printf 'supervisor running: pid %s\n' "$pid"
     return 0
   fi
@@ -571,6 +636,15 @@ start_unlocked() {
   mkdir -p "$STATE"
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
   if supervisor_pid_is_ours "$pid"; then
+    if ! supervisor_pid_is_current "$pid"; then
+      if ! stop_failed_child "$pid"; then
+        printf 'error: outdated supervisor pid %s could not be replaced safely\n' "$pid" >&2
+        return 1
+      fi
+      pid=
+    fi
+  fi
+  if [ -n "$pid" ] && supervisor_pid_is_current "$pid"; then
     if heartbeat_is_healthy "$pid"; then
       printf 'supervisor already running: pid %s\n' "$pid"
       return 0
@@ -587,7 +661,8 @@ start_unlocked() {
     return 1
   }
   started=$(now_epoch)
-  nohup "$SCRIPT_DIR/fm-supervisor.sh" --run "--owner-token=$OWNER_TOKEN" >> "$LOG" 2>&1 &
+  nohup "$SCRIPT_DIR/fm-supervisor.sh" --run "--owner-token=$OWNER_TOKEN" \
+    "--revision=$SCRIPT_REVISION" >> "$LOG" 2>&1 &
   child=$!
   wait_for_owner "$child" "$started"
 }
@@ -635,7 +710,10 @@ status() {
   snapshot_age=$(fm_path_age "$SNAPSHOT")
   error=$(cat "$ERROR" 2>/dev/null || true)
   if supervisor_pid_is_ours "$pid"; then
-    if heartbeat_is_healthy "$pid"; then
+    if ! supervisor_pid_is_current "$pid"; then
+      state=outdated
+      rc=1
+    elif heartbeat_is_healthy "$pid"; then
       state=running
       rc=0
     else
@@ -664,6 +742,10 @@ case "${1:-status}" in
   --run)
     [ "${2:-}" = "--owner-token=$OWNER_TOKEN" ] || {
       printf 'error: supervisor owner token does not match this home\n' >&2
+      exit 2
+    }
+    [ "${3:-}" = "--revision=$SCRIPT_REVISION" ] || {
+      printf 'error: supervisor revision does not match this script\n' >&2
       exit 2
     }
     run_loop

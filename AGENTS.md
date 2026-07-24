@@ -243,7 +243,7 @@ Reconcile reality with your records before doing anything else:
 8. If `state/.afk` is present (away-mode was active before the restart): re-enter afk - ensure the daemon is running, do not arm the one-shot watcher (the daemon owns it), and resume away-mode supervision.
 9. Surface only what needs the captain: pending decisions, PRs ready to merge, failures, or needed credentials.
    If there is nothing that needs them, say nothing and resume.
-10. Ensure `bin/fm-supervisor.sh start` reports one live main-home owner, handle drained wakes, then arm the watcher (section 8) unless afk was re-entered in step 8, in which case the daemon manages the watcher.
+10. In the main home only, ensure `bin/fm-supervisor.sh start` reports one live owner, handle drained wakes, then arm the watcher (section 8) unless afk was re-entered in step 8, in which case the daemon manages the watcher. A secondmate home skips supervisor startup and proceeds directly to its watcher.
 
 A firstmate restart must be a non-event.
 All truth lives in tmux, state files, data/backlog.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
@@ -550,10 +550,12 @@ Every recorded direct report is exactly `active`, `active-unverified`, `stalled`
 
 Missing-process, missed-deadline, and failed/blocked/needs-decision receipt conditions independently append deduplicated actionable rows to `state/.firstmate-supervisor.escalations` and remain visible as current escalation records in the snapshot and board until resolved.
 That keeps busy work `active`, unreadable work `active-unverified`, and a late terminal receipt `terminal` while still preserving each separate contract breach as an escalation.
-`receipt-deadline=<epoch>` is an any-receipt contract: the first durable status receipt observed at or before the unchanged epoch satisfies it permanently, and the snapshot records the satisfying receipt version.
+`receipt-deadline=<epoch>` is an any-receipt contract: the first durable status receipt recorded at or before the unchanged epoch satisfies it permanently, and the snapshot records the satisfying receipt version.
+Generated briefs append the receipt epoch as a tab-separated final field so the supervisor can process every receipt version even when several appends occur between cycles; legacy unstamped receipts retain modification-time compatibility.
 
 `start`, `restart`, and `status` are the only operator interface.
-The singleton lock, `state/.firstmate-supervisor.pid`, `state/.firstmate-supervisor.owner` cadence receipt, and periodically rewritten `state/.firstmate-supervisor.heartbeat` prove ownership and liveness.
+The singleton lock, `state/.firstmate-supervisor.pid`, `state/.firstmate-supervisor.owner` cadence and script-revision receipt, and periodically rewritten `state/.firstmate-supervisor.heartbeat` prove ownership and liveness.
+`start` replaces a verified owner whose loaded script revision no longer matches the current file.
 `restart` stops only the verified current owner and refuses to launch a duplicate if it cannot stop.
 The board is rendered once per successful supervisor cycle and has no separate keepalive or long-running owner.
 
@@ -762,7 +764,7 @@ The scaffold's definition of done encodes the idle-by-default contract (section 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`; `bin/fm-spawn.sh --secondmate` launches it through the same launch-template path.
 After seeding, hand the new secondmate's in-scope queued items off from the main backlog with `bin/fm-backlog-handoff.sh` (section 6).
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
-The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
+The status-reporting protocol is intentionally sparse: crewmates append status with the generated command's tab-separated receipt epoch only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
 For an ordinary generated brief, replace `{OBJECTIVE}`, `{SUCCESS_EVIDENCE}`, and `{REVIEW_OR_DEADLINE_TRIGGER}` with a clear objective, evidence that Firstmate can observe to verify success, and the condition or time that requires review, escalation, or follow-up.
 When that trigger includes an any-receipt deadline that should be enforced mechanically, express it as an absolute Unix epoch and append `receipt-deadline=<epoch>` to the task meta immediately after a successful spawn.
 Do not infer deadlines from prose, and do not add one when the brief deliberately has no timed receipt contract.

@@ -88,12 +88,25 @@ printf 'process-pid=2147483647\n' >> "$HOME_DIR/state/unreadable-after-deadline.
 write_meta terminal-task fm-gone "$((now + 300))"
 write_meta late-terminal fm-gone 1
 write_meta transitioned-terminal fm-waiting "$((now + 1))"
+write_meta batched-receipts fm-waiting "$((now - 5))"
 write_meta failed-task fm-gone "$((now + 300))"
 write_meta missing-process fm-gone "$((now + 300))"
 printf 'done: PR https://example.test/42 checks green\n' > "$HOME_DIR/state/terminal-task.status"
 printf 'done: late terminal receipt\n' > "$HOME_DIR/state/late-terminal.status"
 printf 'working: on-time receipt\n' > "$HOME_DIR/state/transitioned-terminal.status"
+printf 'working: stamped on-time receipt\t%s\ndone: stamped late receipt\t%s\n' \
+  "$((now - 10))" "$now" > "$HOME_DIR/state/batched-receipts.status"
 printf 'failed: deterministic test failure\n' > "$HOME_DIR/state/failed-task.status"
+
+BRIEF_HOME="$TMP_ROOT/brief-home"
+mkdir -p "$BRIEF_HOME/data" "$BRIEF_HOME/state"
+FM_HOME="$BRIEF_HOME" FM_SECONDMATE_CHARTER=supervision \
+  "$ROOT/bin/fm-brief.sh" receipt-writer --secondmate firstmate >/dev/null \
+  || fail "timestamped status brief generation failed"
+grep -F "printf '%s\\t%s\\n'" "$BRIEF_HOME/data/receipt-writer/brief.md" >/dev/null \
+  || fail "generated brief did not stamp status receipts"
+grep -F 'date +%s' "$BRIEF_HOME/data/receipt-writer/brief.md" >/dev/null \
+  || fail "generated brief omitted the receipt epoch"
 
 run_supervisor() {
   run_supervisor_home "$HOME_DIR" "$BOARD_DIR" "$@"
@@ -166,6 +179,8 @@ grep -F $'task\tunreadable-after-deadline\tactive-unverified\tpane activity coul
   || fail "unreadable pane was falsely stalled"
 grep -F $'task\tlate-terminal\tterminal\tterminal receipt recorded\t' "$SNAPSHOT" >/dev/null \
   || fail "late terminal receipt was not terminal"
+grep -F $'task\tbatched-receipts\tterminal\tterminal receipt recorded\tdone: stamped late receipt\t' "$SNAPSHOT" >/dev/null \
+  || fail "stamped receipt metadata leaked into the task snapshot"
 grep -F $'task\tmissing-process\tstalled\trecorded process is missing\t' "$SNAPSHOT" >/dev/null \
   || fail "missing recorded process was not stalled"
 grep -F $'\tpost-deadline\tmissed-receipt-deadline\tobtain the declared receipt or investigate the direct report' \
@@ -192,6 +207,10 @@ grep -F $'\tfailed-task\tfailed-receipt\tact on terminal receipt: failed: determ
 grep -F $'contract\ttransitioned-terminal\tany-receipt\t' "$SNAPSHOT" \
   | grep -F $'\tsatisfied\t' >/dev/null \
   || fail "on-time receipt satisfaction was not explicit in the snapshot"
+grep -F $'contract\tbatched-receipts\tany-receipt\t' "$SNAPSHOT" \
+  | grep -F $'\tsatisfied\t' \
+  | grep -F $'\t'"$((now - 10))" >/dev/null \
+  || fail "first stamped receipt was lost behind a later receipt before reconciliation"
 grep -F $'escalation\tpost-deadline\tmissed-receipt-deadline\tobtain the declared receipt or investigate the direct report' \
   "$SNAPSHOT" >/dev/null \
   || fail "current missed deadline was not represented in the snapshot"
@@ -345,6 +364,44 @@ printf '%s\n' "$third_start" | grep -F "already running: pid $second_pid" >/dev/
   || fail "idempotent start did not report the singleton owner"
 [ "$(cat "$HOME_DIR/state/.firstmate-supervisor.pid")" = "$second_pid" ] \
   || fail "idempotent start created a duplicate owner"
+
+REVISION_BIN="$TMP_ROOT/revision-bin"
+REVISION_HOME="$TMP_ROOT/revision-home"
+REVISION_BOARD="$TMP_ROOT/revision-board"
+mkdir -p "$REVISION_BIN" "$REVISION_HOME/state" "$REVISION_BOARD"
+cp "$ROOT/bin/fm-supervisor.sh" "$ROOT/bin/fm-board.sh" \
+  "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-tmux-lib.sh" "$REVISION_BIN/"
+FM_SUPERVISOR_INTERVAL=1 \
+  PATH="$FAKEBIN:$PATH" \
+  FM_TEST_TMUX_LOG="$TMUX_LOG" \
+  FM_TEST_SLEEP_LOG="$SLEEP_LOG" \
+  FM_HOME="$REVISION_HOME" \
+  FM_BOARD_DIR="$REVISION_BOARD" \
+  "$REVISION_BIN/fm-supervisor.sh" start >/dev/null \
+  || fail "revision-test supervisor start failed"
+revision_first_pid=$(cat "$REVISION_HOME/state/.firstmate-supervisor.pid" 2>/dev/null || true)
+printf '\n' >> "$REVISION_BIN/fm-supervisor.sh"
+revision_start=$(FM_SUPERVISOR_INTERVAL=1 \
+  PATH="$FAKEBIN:$PATH" \
+  FM_TEST_TMUX_LOG="$TMUX_LOG" \
+  FM_TEST_SLEEP_LOG="$SLEEP_LOG" \
+  FM_HOME="$REVISION_HOME" \
+  FM_BOARD_DIR="$REVISION_BOARD" \
+  "$REVISION_BIN/fm-supervisor.sh" start) \
+  || fail "start did not replace an outdated supervisor revision"
+revision_second_pid=$(cat "$REVISION_HOME/state/.firstmate-supervisor.pid" 2>/dev/null || true)
+case "$revision_second_pid" in ''|*[!0-9]*) fail "revision replacement did not publish a PID receipt" ;; esac
+[ "$revision_second_pid" != "$revision_first_pid" ] \
+  || fail "start retained the supervisor loaded from the old script revision"
+kill -0 "$revision_first_pid" 2>/dev/null \
+  && fail "revision replacement left the old supervisor alive"
+kill -0 "$revision_second_pid" 2>/dev/null \
+  || fail "revision replacement did not leave a live supervisor"
+printf '%s\n' "$revision_start" | grep -F "supervisor running: pid $revision_second_pid" >/dev/null \
+  || fail "revision replacement did not report the new owner"
+revision_expected=$(cksum "$REVISION_BIN/fm-supervisor.sh" | awk '{ print $1 "-" $2 }')
+grep -Fx "revision=$revision_expected" "$REVISION_HOME/state/.firstmate-supervisor.owner" >/dev/null \
+  || fail "new owner did not record its loaded script revision"
 
 CADENCE_HOME="$TMP_ROOT/cadence-home"
 CADENCE_BOARD="$TMP_ROOT/cadence-board"
