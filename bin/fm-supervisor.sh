@@ -30,6 +30,7 @@ case "$INTERVAL" in ''|0|*[!0-9]*) INTERVAL=15 ;; esac
 case "$START_WAIT" in ''|0|*[!0-9]*) START_WAIT=5 ;; esac
 LOCK="$STATE/.firstmate-supervisor.lock"
 CONTROL_LOCK="$STATE/.firstmate-supervisor.control.lock"
+TASK_STATE_LOCK="$STATE/.firstmate-supervisor.state.lock"
 PIDFILE="$STATE/.firstmate-supervisor.pid"
 OWNER_RECEIPT="$STATE/.firstmate-supervisor.owner"
 HEARTBEAT="$STATE/.firstmate-supervisor.heartbeat"
@@ -195,67 +196,176 @@ escalation_logged() { # <id> <condition> <token>
   ' "$ESCALATIONS"
 }
 
+escalation_default_action() {
+  case "$1" in
+    missing-process) printf '%s\n' 'inspect or relaunch the recorded direct-report process' ;;
+    missed-receipt-deadline) printf '%s\n' 'obtain the declared receipt or investigate the direct report' ;;
+    failed-receipt) printf '%s\n' 'act on the previously observed failed terminal receipt' ;;
+    invalid-receipt-deadline) printf '%s\n' 'replace the invalid receipt deadline with an absolute Unix epoch' ;;
+    *) return 1 ;;
+  esac
+}
+
+reconcile_escalation_marker() { # <marker> [id condition action]
+  local marker=$1 fallback_id=${2:-} fallback_condition=${3:-} fallback_action=${4:-}
+  local previous tab format event_epoch id condition action token evidence logged_status
+  previous=$(read_optional_file "$marker") || return 1
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    return 0
+  fi
+  tab=$(printf '\t')
+  case "$previous" in
+    "v2$tab"*)
+      IFS="$tab" read -r \
+        format event_epoch id condition action token evidence <<EOF
+$previous
+EOF
+      [ "$format" = v2 ] \
+        && is_epoch "$event_epoch" \
+        && [ -n "$id" ] \
+        && [ -n "$condition" ] \
+        && [ -n "$action" ] \
+        && [ -n "$token" ] || return 1
+      [ -z "$fallback_id" ] || [ "$id" = "$fallback_id" ] || return 1
+      [ -z "$fallback_condition" ] \
+        || [ "$condition" = "$fallback_condition" ] || return 1
+      ;;
+    "v1$tab"*)
+      [ -n "$fallback_id" ] && [ -n "$fallback_condition" ] || return 0
+      token=${previous#*"${tab}"}
+      token=${token%%"$tab"*}
+      [ -n "$token" ] || return 1
+      event_epoch=$(now_epoch)
+      id=$fallback_id
+      condition=$fallback_condition
+      action=$fallback_action
+      if [ -z "$action" ]; then
+        action=$(escalation_default_action "$condition") || return 1
+      fi
+      ;;
+    *) return 0 ;;
+  esac
+  if escalation_logged "$id" "$condition" "$token"; then
+    return 0
+  else
+    logged_status=$?
+    [ "$logged_status" -eq 1 ] || return 1
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$event_epoch" "$id" "$condition" "$action" "$token" >> "$ESCALATIONS"
+}
+
+reconcile_pending_escalations() {
+  local marker
+  for marker in "$STATE"/.firstmate-supervisor.task-*/escalated-*; do
+    if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+      continue
+    fi
+    case "$marker" in
+      *.tmp.*) rm -f "$marker" || return 1; continue ;;
+    esac
+    reconcile_escalation_marker "$marker" || return 1
+  done
+}
+
+reconcile_task_escalations() { # <id>
+  local id=$1 condition action marker legacy dir
+  dir=$(task_state_dir "$id") || return 1
+  for condition in \
+    missing-process \
+    missed-receipt-deadline \
+    failed-receipt \
+    invalid-receipt-deadline; do
+    action=$(escalation_default_action "$condition") || return 1
+    legacy="$STATE/.firstmate-supervisor.escalated-$(escalation_key "$id" "$condition")"
+    marker=$(migrate_task_state_file \
+      "$id" "$legacy" "escalated-$(escalation_key "$condition" condition)") || return 1
+    reconcile_escalation_marker "$marker" "$id" "$condition" "$action" || return 1
+  done
+  for marker in "$dir"/escalated-*; do
+    if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+      continue
+    fi
+    case "$marker" in
+      *.tmp.*) rm -f "$marker" || return 1; continue ;;
+    esac
+    reconcile_escalation_marker "$marker" || return 1
+  done
+}
+
 escalate_once() { # <id> <condition> <action> [evidence]
   local id=$1 condition=$2 action=$3 marker legacy evidence="" previous tmp
-  local tab token saved_evidence logged_status token_seed
+  local tab format event_epoch saved_id saved_condition saved_action token saved_evidence
+  local token_seed
   legacy="$STATE/.firstmate-supervisor.escalated-$(escalation_key "$id" "$condition")"
   marker=$(migrate_task_state_file \
     "$id" "$legacy" "escalated-$(escalation_key "$condition" condition)") || return 1
   [ $# -lt 4 ] || evidence=$4
+  id=$(printf '%s' "$id" | clean_field)
+  condition=$(printf '%s' "$condition" | clean_field)
+  action=$(printf '%s' "$action" | clean_field)
+  evidence=$(printf '%s' "$evidence" | clean_field)
   previous=$(read_optional_file "$marker") || return 1
   tab=$(printf '\t')
   case "$previous" in
+    "v2$tab"*)
+      IFS="$tab" read -r \
+        format event_epoch saved_id saved_condition saved_action token saved_evidence <<EOF
+$previous
+EOF
+      [ "$format" = v2 ] \
+        && is_epoch "$event_epoch" \
+        && [ "$saved_id" = "$id" ] \
+        && [ "$saved_condition" = "$condition" ] \
+        && [ -n "$saved_action" ] \
+        && [ -n "$token" ] || return 1
+      reconcile_escalation_marker "$marker" "$id" "$condition" "$action" || return 1
+      [ "$saved_evidence" != "$evidence" ] || return 0
+      ;;
     "v1$tab"*)
       token=${previous#*"${tab}"}
       token=${token%%"$tab"*}
       saved_evidence=${previous#*"${tab}"}
       saved_evidence=${saved_evidence#*"${tab}"}
-      if { [ $# -lt 4 ] || [ "$saved_evidence" = "$evidence" ]; } \
-        && [ -n "$token" ]; then
-        if escalation_logged "$id" "$condition" "$token"; then
-          return 0
-        else
-          logged_status=$?
-          [ "$logged_status" -eq 1 ] || return 1
-        fi
-      else
-        token=
-      fi
+      [ -n "$token" ] || return 1
+      reconcile_escalation_marker "$marker" "$id" "$condition" "$action" || return 1
+      [ "$saved_evidence" != "$evidence" ] || return 0
       ;;
     *)
       if [ -e "$marker" ] || [ -L "$marker" ]; then
         [ -f "$marker" ] || return 1
-        if [ $# -lt 4 ] || [ "$previous" = "$evidence" ]; then
-          return 0
-        fi
+        [ "$previous" != "$evidence" ] || return 0
       fi
-      token=
       ;;
   esac
-  if [ -z "${token:-}" ]; then
-    ensure_task_state_dir "$id" || return 1
-    token_seed="$(now_epoch)-$$-${RANDOM:-0}"
-    token=$(printf '%s\t%s\t%s\t%s' \
-      "$id" "$condition" "$evidence" "$token_seed" | cksum | awk '{ print $1 "-" $2 }')
-    tmp="$marker.tmp.$$"
-    printf 'v1\t%s\t%s\n' "$token" "$evidence" > "$tmp" \
-      && mv -f "$tmp" "$marker" || return 1
+  ensure_task_state_dir "$id" || return 1
+  event_epoch=$(now_epoch)
+  token_seed="$event_epoch-$$-${RANDOM:-0}"
+  token=$(printf '%s\t%s\t%s\t%s' \
+    "$id" "$condition" "$evidence" "$token_seed" | cksum | awk '{ print $1 "-" $2 }')
+  tmp="$marker.tmp.$$"
+  if ! printf 'v2\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$event_epoch" "$id" "$condition" "$action" "$token" "$evidence" > "$tmp" \
+    || ! mv -f "$tmp" "$marker"; then
+    rm -f "$tmp"
+    return 1
   fi
-  printf '%s\t%s\t%s\t%s\t%s\n' \
-    "$(now_epoch)" \
-    "$(printf '%s' "$id" | clean_field)" \
-    "$(printf '%s' "$condition" | clean_field)" \
-    "$(printf '%s' "$action" | clean_field)" \
-    "$token" >> "$ESCALATIONS"
+  reconcile_escalation_marker "$marker" "$id" "$condition" "$action"
 }
 
 clear_escalation() { # <id> <condition>
-  local dir
+  local dir marker legacy action status=0
   dir=$(task_state_dir "$1") || return 1
+  legacy="$STATE/.firstmate-supervisor.escalated-$(escalation_key "$1" "$2")"
+  marker=$(migrate_task_state_file \
+    "$1" "$legacy" "escalated-$(escalation_key "$2" condition)") || return 1
+  action=$(escalation_default_action "$2") || return 1
+  reconcile_escalation_marker "$marker" "$1" "$2" "$action" || return 1
   rm -f \
-    "$STATE/.firstmate-supervisor.escalated-$(escalation_key "$1" "$2")" \
-    "$dir/escalated-$(escalation_key "$2" condition)"
+    "$legacy" \
+    "$marker" || status=$?
   rmdir "$dir" 2>/dev/null || true
+  return "$status"
 }
 
 receipt_evidence() { # <id> <status-file> <raw-receipt> <line>; prints <version><tab><time>
@@ -288,12 +398,13 @@ EOF
 }
 
 clear_receipt_evidence() { # <id>
-  local dir
+  local dir status=0
   dir=$(task_state_dir "$1") || return 1
   rm -f \
     "$STATE/.firstmate-supervisor.receipt-$(escalation_key "$1" receipt)" \
-    "$dir/receipt"
+    "$dir/receipt" || status=$?
   rmdir "$dir" 2>/dev/null || true
+  return "$status"
 }
 
 timestamped_deadline_satisfaction() { # <status-file> <deadline>; prints <version><tab><time>
@@ -364,12 +475,13 @@ EOF
 }
 
 clear_deadline_satisfaction() { # <id>
-  local dir
+  local dir status=0
   dir=$(task_state_dir "$1") || return 1
   rm -f \
     "$STATE/.firstmate-supervisor.deadline-$(escalation_key "$1" receipt)" \
-    "$dir/deadline"
+    "$dir/deadline" || status=$?
   rmdir "$dir" 2>/dev/null || true
+  return "$status"
 }
 
 classify_meta() { # <meta>; prints one TSV task row
@@ -621,6 +733,42 @@ write_heartbeat() {
   printf '%s\n' "$(now_epoch)" > "$tmp" && mv -f "$tmp" "$HEARTBEAT"
 }
 
+cleanup_task_state() { # <id>
+  local id=$1 dir status=0
+  dir=$(task_state_dir "$id") || return 1
+  rm -rf "$dir" || status=$?
+  rm -f \
+    "$STATE/.firstmate-supervisor.receipt-$(escalation_key "$id" receipt)" \
+    "$STATE/.firstmate-supervisor.deadline-$(escalation_key "$id" receipt)" \
+    "$STATE/.firstmate-supervisor.escalated-$(escalation_key "$id" missing-process)" \
+    "$STATE/.firstmate-supervisor.escalated-$(escalation_key "$id" missed-receipt-deadline)" \
+    "$STATE/.firstmate-supervisor.escalated-$(escalation_key "$id" failed-receipt)" \
+    "$STATE/.firstmate-supervisor.escalated-$(escalation_key "$id" invalid-receipt-deadline)" \
+    || status=$?
+  return "$status"
+}
+
+retire_task() { # <id>
+  local id=$1 status=0
+  case "$id" in ''|*[!A-Za-z0-9_.-]*) return 2 ;; esac
+  mkdir -p "$STATE" || return 1
+  fm_lock_acquire_wait "$TASK_STATE_LOCK"
+  reconcile_task_escalations "$id" || status=$?
+  if [ "$status" -eq 0 ]; then
+    rm -f \
+      "$STATE/$id.status" \
+      "$STATE/$id.turn-ended" \
+      "$STATE/$id.check.sh" \
+      "$STATE/$id.meta" \
+      "$STATE/$id.pi-ext.ts" || status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    cleanup_task_state "$id" || status=$?
+  fi
+  fm_lock_release "$TASK_STATE_LOCK"
+  return "$status"
+}
+
 last_log_condition() {
   local previous="" tab
   if [ -e "$LOG" ] || [ -L "$LOG" ]; then
@@ -654,8 +802,12 @@ clear_error() {
   rm -f "$ERROR"
 }
 
-cycle() {
+cycle_locked() {
   mkdir -p "$STATE"
+  if ! reconcile_pending_escalations; then
+    record_error escalation-journal-failed
+    return 1
+  fi
   if ! write_snapshot; then
     record_error snapshot-write-failed
     return 1
@@ -667,11 +819,25 @@ cycle() {
     record_error board-refresh-failed
     return 1
   fi
+  if ! clear_error; then
+    record_error error-clear-failed
+    return 1
+  fi
   if ! write_heartbeat; then
     record_error heartbeat-write-failed
     return 1
   fi
-  clear_error
+  return 0
+}
+
+cycle() {
+  local status
+  mkdir -p "$STATE" || return 1
+  fm_lock_acquire_wait "$TASK_STATE_LOCK"
+  cycle_locked
+  status=$?
+  fm_lock_release "$TASK_STATE_LOCK"
+  return "$status"
 }
 
 run_loop() {
@@ -926,6 +1092,13 @@ case "${1:-status}" in
   restart) restart ;;
   status) status ;;
   --once) cycle ;;
+  --retire-task)
+    [ $# -eq 2 ] || {
+      printf 'error: --retire-task requires one task id\n' >&2
+      exit 2
+    }
+    retire_task "$2"
+    ;;
   --run)
     [ "${2:-}" = "--owner-token=$OWNER_TOKEN" ] || {
       printf 'error: supervisor owner token does not match this home\n' >&2

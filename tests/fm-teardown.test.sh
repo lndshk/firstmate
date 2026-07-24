@@ -228,7 +228,8 @@ test_teardown_reclaims_supervisor_task_state() {
   task_dir="$case_dir/state/.firstmate-supervisor.task-task-x1"
   other_dir="$case_dir/state/.firstmate-supervisor.task-task-x10"
   mkdir -p "$task_dir" "$other_dir"
-  : > "$task_dir/escalated-future-condition"
+  printf 'v2\t1\ttask-x1\tfuture-condition\tinspect future condition\ttoken-1\tevidence\n' \
+    > "$task_dir/escalated-future-condition"
   : > "$task_dir/receipt"
   : > "$other_dir/receipt"
   : > "$case_dir/state/.firstmate-supervisor.receipt-task-x1-receipt"
@@ -246,6 +247,9 @@ test_teardown_reclaims_supervisor_task_state() {
     || fail "supervisor-state: legacy deadline cursor survived teardown"
   [ ! -e "$case_dir/state/.firstmate-supervisor.escalated-task-x1-failed-receipt" ] \
     || fail "supervisor-state: legacy escalation marker survived teardown"
+  grep -F $'1\ttask-x1\tfuture-condition\tinspect future condition\ttoken-1' \
+    "$case_dir/state/.firstmate-supervisor.escalations" >/dev/null \
+    || fail "supervisor-state: pending escalation was not journaled before teardown"
   [ -e "$other_dir/receipt" ] \
     || fail "supervisor-state: teardown removed another task's state"
   pass "teardown reclaims current and future per-task supervisor state"

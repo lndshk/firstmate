@@ -8,6 +8,7 @@ FAKEBIN="$TMP_ROOT/bin"
 BOARD_DIR="$TMP_ROOT/board"
 TMUX_LOG="$TMP_ROOT/tmux.log"
 SLEEP_LOG="$TMP_ROOT/sleep.log"
+LOCKED_RETIRE_PID=
 mkdir -p "$HOME_DIR/state" "$FAKEBIN" "$BOARD_DIR"
 
 fail() {
@@ -17,6 +18,7 @@ fail() {
 
 cleanup() {
   local pid_file pid
+  [ -z "$LOCKED_RETIRE_PID" ] || kill "$LOCKED_RETIRE_PID" 2>/dev/null || true
   for pid_file in "$TMP_ROOT"/*/state/.firstmate-supervisor.pid; do
     [ -f "$pid_file" ] || continue
     pid=$(cat "$pid_file" 2>/dev/null || true)
@@ -86,6 +88,26 @@ fi
 exec /bin/mv "$@"
 SH
 chmod +x "$FAKEBIN/mv"
+
+cat > "$FAKEBIN/rm" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_TEST_FAIL_ERROR_CLEAR:-0}" = 1 ]; then
+  for arg in "$@"; do
+    case "$arg" in
+      *".firstmate-supervisor.error") exit 1 ;;
+    esac
+  done
+fi
+if [ "${FM_TEST_FAIL_RECEIPT_CLEAR:-0}" = 1 ]; then
+  for arg in "$@"; do
+    case "$arg" in
+      *".firstmate-supervisor.task-"*"/receipt") exit 1 ;;
+    esac
+  done
+fi
+exec /bin/rm "$@"
+SH
+chmod +x "$FAKEBIN/rm"
 
 write_meta() { # <id> <window> <deadline>
   {
@@ -360,6 +382,93 @@ run_supervisor_home "$ATOMIC_HOME" "$ATOMIC_BOARD" --once \
 [ "$(awk -F '\t' '$2 == "atomic-task" && $3 == "missing-process" { count++ } END { print count + 0 }' \
     "$ATOMIC_HOME/state/.firstmate-supervisor.escalations")" -eq 1 ] \
   || fail "recovered escalation was not journaled exactly once"
+
+PENDING_HOME="$TMP_ROOT/pending-home"
+PENDING_BOARD="$TMP_ROOT/pending-board"
+mkdir -p "$PENDING_HOME/state" "$PENDING_BOARD"
+{
+  printf 'window=fm-gone\n'
+  printf 'kind=ship\n'
+} > "$PENDING_HOME/state/pending-task.meta"
+mkdir "$PENDING_HOME/state/.firstmate-supervisor.escalations"
+if run_supervisor_home "$PENDING_HOME" "$PENDING_BOARD" --once >/dev/null 2>&1; then
+  fail "failed escalation journal append produced a successful cycle"
+fi
+[ -s "$(task_state_dir "$PENDING_HOME" pending-task)/escalated-missing-process-condition" ] \
+  || fail "failed escalation journal append did not preserve its pending record"
+rmdir "$PENDING_HOME/state/.firstmate-supervisor.escalations"
+printf 'done: condition resolved before journal recovery\n' \
+  > "$PENDING_HOME/state/pending-task.status"
+run_supervisor_home "$PENDING_HOME" "$PENDING_BOARD" --once \
+  || fail "resolved escalation did not reconcile its pending journal record"
+[ "$(awk -F '\t' '$2 == "pending-task" && $3 == "missing-process" { count++ } END { print count + 0 }' \
+    "$PENDING_HOME/state/.firstmate-supervisor.escalations")" -eq 1 ] \
+  || fail "resolved pending escalation was not journaled exactly once"
+[ ! -e "$(task_state_dir "$PENDING_HOME" pending-task)/escalated-missing-process-condition" ] \
+  || fail "resolved pending escalation marker was not cleared after journaling"
+
+CLEAR_HOME="$TMP_ROOT/clear-home"
+CLEAR_BOARD="$TMP_ROOT/clear-board"
+mkdir -p "$CLEAR_HOME/state" "$CLEAR_BOARD"
+{
+  printf 'window=\n'
+  printf 'kind=ship\n'
+} > "$CLEAR_HOME/state/clear-task.meta"
+mkdir -p "$(task_state_dir "$CLEAR_HOME" clear-task)"
+printf 'stale receipt evidence\n' > "$(task_state_dir "$CLEAR_HOME" clear-task)/receipt"
+if FM_TEST_FAIL_RECEIPT_CLEAR=1 \
+  run_supervisor_home "$CLEAR_HOME" "$CLEAR_BOARD" --once >/dev/null 2>&1; then
+  fail "receipt evidence removal failure produced a successful cycle"
+fi
+[ ! -e "$CLEAR_HOME/state/.firstmate-supervisor.heartbeat" ] \
+  || fail "receipt evidence removal failure published a heartbeat"
+run_supervisor_home "$CLEAR_HOME" "$CLEAR_BOARD" --once \
+  || fail "supervisor did not recover after receipt evidence removal failure"
+
+ERROR_CLEAR_HOME="$TMP_ROOT/error-clear-home"
+ERROR_CLEAR_BOARD="$TMP_ROOT/error-clear-board"
+mkdir -p "$ERROR_CLEAR_HOME/state" "$ERROR_CLEAR_BOARD"
+printf '1\tsnapshot-write-failed\n' \
+  > "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.log"
+printf '1\tsnapshot-write-failed\n' \
+  > "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.error"
+if FM_TEST_FAIL_ERROR_CLEAR=1 \
+  run_supervisor_home "$ERROR_CLEAR_HOME" "$ERROR_CLEAR_BOARD" --once >/dev/null 2>&1; then
+  fail "error-state removal failure produced a successful cycle"
+fi
+[ ! -e "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.heartbeat" ] \
+  || fail "error-state removal failure published a heartbeat"
+run_supervisor_home "$ERROR_CLEAR_HOME" "$ERROR_CLEAR_BOARD" --once \
+  || fail "supervisor did not recover after error-state removal failure"
+[ -s "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.heartbeat" ] \
+  || fail "successful recovery did not publish its final heartbeat"
+
+LOCKED_HOME="$TMP_ROOT/locked-home"
+LOCKED_BOARD="$TMP_ROOT/locked-board"
+mkdir -p "$LOCKED_HOME/state/.firstmate-supervisor.state.lock" "$LOCKED_BOARD"
+printf '%s\n' "$$" > "$LOCKED_HOME/state/.firstmate-supervisor.state.lock/pid"
+{
+  printf 'window=\n'
+  printf 'kind=ship\n'
+} > "$LOCKED_HOME/state/locked-task.meta"
+mkdir -p "$(task_state_dir "$LOCKED_HOME" locked-task)"
+printf 'stale receipt evidence\n' > "$(task_state_dir "$LOCKED_HOME" locked-task)/receipt"
+run_supervisor_home "$LOCKED_HOME" "$LOCKED_BOARD" --retire-task locked-task &
+locked_retire_pid=$!
+LOCKED_RETIRE_PID=$locked_retire_pid
+/bin/sleep 1
+kill -0 "$locked_retire_pid" 2>/dev/null \
+  || fail "task retirement did not wait for the live cycle-state lock"
+[ -e "$LOCKED_HOME/state/locked-task.meta" ] \
+  || fail "task retirement mutated metadata before acquiring the cycle-state lock"
+rm -f "$LOCKED_HOME/state/.firstmate-supervisor.state.lock/pid"
+rmdir "$LOCKED_HOME/state/.firstmate-supervisor.state.lock"
+wait "$locked_retire_pid" || fail "locked task retirement failed after lock release"
+LOCKED_RETIRE_PID=
+[ ! -e "$LOCKED_HOME/state/locked-task.meta" ] \
+  || fail "task retirement retained metadata after acquiring the cycle-state lock"
+[ ! -e "$(task_state_dir "$LOCKED_HOME" locked-task)" ] \
+  || fail "task retirement retained supervisor state after acquiring the cycle-state lock"
 
 FAILED_HOME="$TMP_ROOT/failed-home"
 FAILED_BOARD="$TMP_ROOT/failed-board"
