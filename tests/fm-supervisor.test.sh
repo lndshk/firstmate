@@ -115,6 +115,13 @@ if [ "${FM_TEST_FAIL_TASK_STATE_CLEAR:-0}" = 1 ]; then
     esac
   done
 fi
+if [ "${FM_TEST_FAIL_RETIRE_META_CLEAR:-0}" = 1 ]; then
+  for arg in "$@"; do
+    case "$arg" in
+      *"/partial-task.meta") exit 1 ;;
+    esac
+  done
+fi
 exec /bin/rm "$@"
 SH
 chmod +x "$FAKEBIN/rm"
@@ -130,6 +137,10 @@ write_meta() { # <id> <window> <deadline>
 task_state_dir() {
   printf '%s/state/.firstmate-supervisor.task-%s\n' \
     "$1" "$(printf '%s' "$2" | tr -c 'A-Za-z0-9_.-' '_')"
+}
+
+retirement_record() {
+  printf '%s/state/.firstmate-supervisor.retirements/%s\n' "$1" "$2"
 }
 
 now=$(date +%s)
@@ -483,10 +494,71 @@ fi
   || fail "task retirement deleted metadata before supervisor state cleanup succeeded"
 [ -e "$(task_state_dir "$ORDER_HOME" order-task)/receipt" ] \
   || fail "failed supervisor state cleanup removed its retry evidence"
+[ -s "$(retirement_record "$ORDER_HOME" order-task)" ] \
+  || fail "failed supervisor state cleanup omitted its retirement tombstone"
 run_supervisor_home "$ORDER_HOME" "$ORDER_BOARD" --retire-task order-task \
   || fail "task retirement did not recover after state cleanup failure"
 [ ! -e "$ORDER_HOME/state/order-task.meta" ] \
   || fail "successful retirement retained its metadata retry anchor"
+[ ! -e "$(retirement_record "$ORDER_HOME" order-task)" ] \
+  || fail "successful retirement retained its transaction tombstone"
+
+PARTIAL_HOME="$TMP_ROOT/partial-home"
+PARTIAL_BOARD="$TMP_ROOT/partial-board"
+mkdir -p "$PARTIAL_HOME/state" "$PARTIAL_BOARD"
+{
+  printf 'window=fm-gone\n'
+  printf 'kind=ship\n'
+  printf 'receipt-deadline=1\n'
+} > "$PARTIAL_HOME/state/partial-task.meta"
+printf 'working: retirement started\n' > "$PARTIAL_HOME/state/partial-task.status"
+mkdir -p "$(task_state_dir "$PARTIAL_HOME" partial-task)"
+printf 'stale receipt evidence\n' > "$(task_state_dir "$PARTIAL_HOME" partial-task)/receipt"
+if FM_TEST_FAIL_RETIRE_META_CLEAR=1 \
+  run_supervisor_home "$PARTIAL_HOME" "$PARTIAL_BOARD" --retire-task partial-task \
+    >/dev/null 2>&1; then
+  fail "partial retirement succeeded when metadata cleanup failed"
+fi
+[ -e "$PARTIAL_HOME/state/partial-task.meta" ] \
+  || fail "partial retirement lost its metadata retry anchor"
+[ ! -e "$PARTIAL_HOME/state/partial-task.status" ] \
+  || fail "partial retirement did not reach the status cleanup phase"
+[ -s "$(retirement_record "$PARTIAL_HOME" partial-task)" ] \
+  || fail "partial retirement omitted its durable transaction tombstone"
+run_supervisor_home "$PARTIAL_HOME" "$PARTIAL_BOARD" --once \
+  || fail "supervisor could not render a failed retirement transaction"
+grep -F $'task\tpartial-task\tstalled\tretirement failed: metadata-cleanup-failed' \
+  "$PARTIAL_HOME/state/firstmate-supervisor.tsv" >/dev/null \
+  || fail "partial retirement was reclassified from its half-cleaned metadata"
+[ "$(awk -F '\t' '$1 == "task" && $2 == "partial-task" { count++ } END { print count + 0 }' \
+  "$PARTIAL_HOME/state/firstmate-supervisor.tsv")" -eq 1 ] \
+  || fail "partial retirement appeared as both a task and transaction"
+grep -F $'escalation\tpartial-task\tretirement-metadata-cleanup-failed' \
+  "$PARTIAL_HOME/state/firstmate-supervisor.tsv" >/dev/null \
+  || fail "partial retirement failure was absent from the escalation snapshot"
+grep -F 'retirement-metadata-cleanup-failed' "$PARTIAL_BOARD/board.html" >/dev/null \
+  || fail "partial retirement failure was absent from the board"
+grep -F $'\tpartial-task\tretirement-metadata-cleanup-failed\t' \
+  "$PARTIAL_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
+  || fail "partial retirement failure was absent from durable escalation history"
+run_supervisor_home "$PARTIAL_HOME" "$PARTIAL_BOARD" --once \
+  || fail "repeated failed retirement reconciliation failed"
+[ "$(awk -F '\t' \
+  '$2 == "partial-task" && $3 == "retirement-metadata-cleanup-failed" { count++ } END { print count + 0 }' \
+  "$PARTIAL_HOME/state/.firstmate-supervisor.escalations")" -eq 1 ] \
+  || fail "failed retirement was appended to durable history more than once"
+partial_status=$(run_supervisor_home "$PARTIAL_HOME" "$PARTIAL_BOARD" status 2>&1 || true)
+printf '%s\n' "$partial_status" | grep -F 'retirement-failures=1' >/dev/null \
+  || fail "partial retirement failure was absent from supervisor status"
+printf '%s\n' "$partial_status" \
+  | grep -F 'retirement-error=partial-task:metadata-cleanup-failed' >/dev/null \
+  || fail "supervisor status omitted the partial retirement phase"
+run_supervisor_home "$PARTIAL_HOME" "$PARTIAL_BOARD" --retire-task partial-task \
+  || fail "partial retirement did not recover through its durable tombstone"
+[ ! -e "$PARTIAL_HOME/state/partial-task.meta" ] \
+  || fail "recovered partial retirement retained metadata"
+[ ! -e "$(retirement_record "$PARTIAL_HOME" partial-task)" ] \
+  || fail "recovered partial retirement retained its tombstone"
 
 LOCKED_HOME="$TMP_ROOT/locked-home"
 LOCKED_BOARD="$TMP_ROOT/locked-board"
@@ -507,10 +579,19 @@ printf '%s\n' "$locked_retire_error" \
   || fail "bounded task retirement omitted actionable lock recovery"
 [ -e "$LOCKED_HOME/state/locked-task.meta" ] \
   || fail "timed-out task retirement removed its metadata retry anchor"
-[ -s "$(task_state_dir "$LOCKED_HOME" locked-task)/retire-error" ] \
+[ -s "$(retirement_record "$LOCKED_HOME" locked-task)" ] \
   || fail "timed-out task retirement omitted durable failure evidence"
 rm -f "$LOCKED_HOME/state/.firstmate-supervisor.state.lock/pid"
 rmdir "$LOCKED_HOME/state/.firstmate-supervisor.state.lock"
+run_supervisor_home "$LOCKED_HOME" "$LOCKED_BOARD" --once \
+  || fail "supervisor could not render a task-lock retirement failure"
+grep -F $'escalation\tlocked-task\tretirement-task-state-lock-timeout' \
+  "$LOCKED_HOME/state/firstmate-supervisor.tsv" >/dev/null \
+  || fail "task-lock retirement failure was absent from the escalation snapshot"
+locked_status=$(run_supervisor_home "$LOCKED_HOME" "$LOCKED_BOARD" status 2>&1 || true)
+printf '%s\n' "$locked_status" \
+  | grep -F 'retirement-error=locked-task:task-state-lock-timeout' >/dev/null \
+  || fail "task-lock retirement failure was absent from supervisor status"
 run_supervisor_home "$LOCKED_HOME" "$LOCKED_BOARD" --retire-task locked-task \
   || fail "locked task retirement failed after bounded retry"
 [ ! -e "$LOCKED_HOME/state/locked-task.meta" ] \
