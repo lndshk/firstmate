@@ -356,12 +356,19 @@ Use these signals in order:
 4. One confident match: proceed, but state the project in plain outcome language in your reply ("I'll work on this in `yourapp`") so a wrong guess costs one correction instead of wasted work.
 5. More than one plausible match, or none: ask a one-line question. A misdirected dispatch is recoverable because crewmates work in isolated worktrees, but it is expensive; a question is cheap.
 
+Every incoming work request becomes a durable Queued record before any dispatch or routing message.
+With compatible `tasks-axi`, use `tasks-axi add` without `--start`; otherwise add it under `## Queued` by hand.
+This record is Firstmate's ownership promise across later captain messages, interruptions, and restarts: the request remains visible until a verified terminal outcome moves it to Done.
+A later urgent request may reprioritize which queued item goes next, but it never erases, replaces, or silently abandons earlier work.
+
 Then resolve the secondmate scope.
 Read `data/secondmates.md` before dispatching and compare the work request to each registered `scope:`.
 Route by the nature of the task, not just the project name.
 A project may appear in several `projects:` clone lists, so choose the secondmate whose natural-language scope actually fits the work, such as triage versus feature development.
 If the resolved project is `local-only`, keep the work with the main firstmate even when a secondmate scope sounds relevant.
 If a secondmate's scope fits, steer that secondmate with one concise instruction via `bin/fm-send.sh fm-<id> '<work request>'` and let it run the normal lifecycle inside its own home.
+Annotate the main Queued record as routed to that secondmate and keep it as a follow-up obligation, not another direct-dispatch candidate, until the secondmate reports a verified terminal outcome.
+This preserves the existing routing path; do not invent a cross-home acknowledgement transaction or claim the handoff is atomic.
 The bare `fm-<id>` target resolves through this home's `state/<id>.meta`; pass `session:window` only when intentionally targeting a window outside this firstmate home.
 Do not spawn a direct crewmate for work that belongs to a secondmate scope unless the secondmate is blocked or the captain explicitly redirects it.
 If no secondmate scope fits, proceed in the main firstmate or create a new secondmate with the captain when that domain should become persistent.
@@ -374,17 +381,13 @@ Then classify the shape:
 
 Then classify readiness:
 
-- **Dispatchable:** no overlap with in-flight tasks and ordinary direct-report capacity is available. Record it durably, then dispatch it.
+- **Dispatchable:** no overlap with in-flight tasks and the advisory ordinary direct-report budget has room. Scaffold and dispatch it, then move its existing Queued record to In flight only after spawn succeeds.
 - **Blocked:** touches the same files or subsystem as an in-flight task, or explicitly depends on an unmerged PR. Record it in `data/backlog.md` with `blocked-by: <id>` and tell the captain what work is waiting and why. Scout tasks are read-mostly and almost never block on anything.
-- **Capacity-queued:** otherwise dispatchable, but the ordinary direct-report limit is full. Leave it queued and dispatch it when a slot opens.
+- **Capacity-queued:** otherwise dispatchable, but three ordinary direct ship/scout reports are already active in this firstmate home. Three is the default working limit, not a spawn-time lock: persistent secondmates do not count, and the captain may explicitly override it for a particular dispatch. Otherwise leave the new item Queued until a slot opens.
 
 Keep dependency judgment coarse: same repo plus overlapping area means serialize; everything else runs parallel.
 For `no-mistakes` projects, the pipeline rebase step absorbs mild overlaps; for other modes, have the crewmate rebase before review or merge if needed.
-
-Every incoming work request becomes a durable `data/backlog.md` record before it is dispatched or left queued.
-Record first, then scaffold and spawn; after a successful spawn, move the record to In flight.
-A later urgent request may change priority or interrupt which queued task goes next, but it never erases, replaces, or silently abandons the earlier task.
-Firstmate owns every accepted request through a verified terminal outcome, including follow-up after later captain messages, context switches, and restarts.
+If existing work is already above the advisory limit, never kill, interrupt, or discard it merely to get back under three; the guidance affects only what starts next.
 
 Write the brief per section 11.
 
@@ -403,11 +406,6 @@ Dispatch several tasks in one call by passing `id=repo` pairs instead of a singl
 If one pair fails, the rest still run and the batch exits non-zero.
 
 The script resolves the harness (`fm-harness.sh crew`), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
-Before creating a tmux window or worktree, it also enforces ordinary direct-report admission.
-The default limit is three active ship/scout reports per firstmate home; set `FM_DIRECT_REPORT_LIMIT` to an explicit non-negative integer to override it.
-Persistent secondmates do not consume this capacity.
-Admission counts this home's live ordinary meta targets plus live `fm-*` windows recoverable from this home's durable briefs; dead meta records are ignored, so stale state cannot hold capacity forever.
-If the home is already at or above its limit, spawn leaves every existing report untouched, refuses the new side effects, lists what is active, and says the new task remains or should remain queued.
 For `kind=secondmate`, the same script resolves the registered or explicit persistent home, chooses the first registered project (or `FM_SECONDMATE_PROJECT_NATIVE` override), and refreshes that clone through `fm-fleet-sync.sh` with fetch plus fast-forward-only safety before launch.
 It records `home=` and `projects=` and uses the charter brief as the launch prompt; a selected existing clone that is dirty, diverged, offline, off-default, or otherwise not provably current blocks spawn instead of exposing stale project docs.
 
@@ -417,7 +415,7 @@ The cwd change is project context only: launch `FM_HOME`, meta `home=`, and ever
 Codex secondmates also receive a per-launch trusted-project override for that cwd, so a first project-native launch cannot park on the directory-trust dialog.
 Project worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
 After spawning, peek the pane to confirm the crewmate is processing the brief (and handle any trust dialog per section 4).
-Add the task to `data/backlog.md` under In flight.
+Move the task's already-durable record from Queued to In flight only after the spawn succeeds (`tasks-axi start <id>` when compatible, otherwise by hand).
 
 ### Supervise
 
@@ -698,8 +696,8 @@ Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1
 The `## In flight` / `## Queued` / `## Done` format above stays the contract: the verbs edit `data/backlog.md` in place, byte-exact, preserving whatever item forms the file already uses - the bold in-flight `- **<id>**` form, the `- [ ]`/`- [x]` queued and done forms, and `blocked-by: <id> - <reason>` - rather than reformatting them.
 Map firstmate's real backlog operations to the approved commands:
 
-- File an item: `tasks-axi add <id> "<one line>" --kind <ship|scout> --repo <name>`, plus `--start` for immediate dispatch (In flight) or the default queue placement, and `--blocked-by <id>` (repeatable) when it waits on another task.
-- Start an existing queued item: `tasks-axi start <id>` before dispatching work from Queued, after checking that blockers are gone and any time/date gate has arrived.
+- File every incoming item in Queued before dispatch: `tasks-axi add <id> "<one line>" --kind <ship|scout> --repo <name>`, plus `--blocked-by <id>` (repeatable) when it waits on another task. Do not combine intake with `--start`.
+- Start an existing queued item: after its spawn succeeds, run `tasks-axi start <id>` to move the durable record to In flight. Check that blockers are gone, any time/date gate has arrived, and the advisory direct-report budget allows the dispatch (or the captain explicitly overrode it) before spawning.
 - Move a finished task to Done: `tasks-axi done <id> --pr <url>` for a PR-based ship, `--report <path>` for a scout, or `--note "local main"` for a local-only merge.
 - Append a status note: `tasks-axi update <id> --append "<note>"`; replace fields with `--title`, `--body`, or `--body-file <path>`.
 - Manage dependencies: `tasks-axi block <id> --by <other>` and `tasks-axi unblock <id> --by <other>`, then `tasks-axi ready` to list queued work with no unresolved blockers.
@@ -731,8 +729,8 @@ After seeding, hand the new secondmate's in-scope queued items off from the main
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
 The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
 For an ordinary generated brief, replace `{OBJECTIVE}`, `{SUCCESS_EVIDENCE}`, and `{REVIEW_OR_DEADLINE_TRIGGER}` with a clear objective, evidence that Firstmate can observe to verify success, and the condition or time that requires review, escalation, or follow-up.
-`bin/fm-spawn.sh` refuses an ordinary generated brief while any of those placeholders (or the legacy `{TASK}` placeholder) remains.
-This is deliberately a reserved-placeholder check, not a brief schema: a custom or deviating brief remains valid when it states the contract in another shape and contains no unfilled generated placeholders.
+Review the filled brief before spawning; `fm-spawn.sh` does not parse or enforce a brief schema.
+Custom or deviating briefs remain valid when they state the same objective, evidence, and follow-up contract in another shape.
 For a generated secondmate charter that still contains `{TASK}`, replace it with the persistent responsibility and routing scope before seeding.
 Adjust the other sections only when the task genuinely deviates from the standard ship-a-new-PR shape (e.g. fixing an existing external PR); the scaffold is the contract, not a suggestion.
 

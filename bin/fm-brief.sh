@@ -25,8 +25,7 @@
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path.
-# Refuses to overwrite an existing brief. fm-spawn rejects any generated
-# contract whose placeholders have not all been filled.
+# Refuses to overwrite an existing brief.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
