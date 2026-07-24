@@ -69,6 +69,19 @@ exec /bin/sleep "$@"
 SH
 chmod +x "$FAKEBIN/sleep"
 
+cat > "$FAKEBIN/mv" <<'SH'
+#!/usr/bin/env bash
+target=
+for arg in "$@"; do target=$arg; done
+if [ "${FM_TEST_FAIL_RECEIPT_CURSOR:-0}" = 1 ]; then
+  case "$target" in
+    *".firstmate-supervisor.receipt-"*) exit 1 ;;
+  esac
+fi
+exec /bin/mv "$@"
+SH
+chmod +x "$FAKEBIN/mv"
+
 write_meta() { # <id> <window> <deadline>
   {
     printf 'window=%s\n' "$2"
@@ -91,6 +104,7 @@ write_meta transitioned-terminal fm-waiting "$((now + 1))"
 write_meta batched-receipts fm-waiting "$((now - 5))"
 write_meta failed-task fm-gone "$((now + 300))"
 write_meta missing-process fm-gone "$((now + 300))"
+write_meta invalid-deadline fm-waiting tomorrow
 printf 'done: PR https://example.test/42 checks green\n' > "$HOME_DIR/state/terminal-task.status"
 printf 'done: late terminal receipt\n' > "$HOME_DIR/state/late-terminal.status"
 printf 'working: on-time receipt\n' > "$HOME_DIR/state/transitioned-terminal.status"
@@ -218,8 +232,54 @@ grep -F 'Current escalation queue' "$BOARD" >/dev/null \
   || fail "board omitted the current escalation queue"
 grep -F 'obtain the declared receipt or investigate the direct report' "$BOARD" >/dev/null \
   || fail "board omitted the current deadline action"
+grep -F $'task\tinvalid-deadline\tstalled\tinvalid receipt deadline declaration\t-\t-\tfm-waiting\t-' \
+  "$SNAPSHOT" >/dev/null \
+  || fail "invalid deadline was not surfaced without a presented due time"
+grep -F $'escalation\tinvalid-deadline\tinvalid-receipt-deadline\treplace the invalid receipt deadline with an absolute Unix epoch' \
+  "$SNAPSHOT" >/dev/null \
+  || fail "invalid deadline did not produce an actionable snapshot escalation"
+if awk -F '\t' '$1 == "contract" && $2 == "invalid-deadline" { found=1 } END { exit !found }' \
+  "$SNAPSHOT"; then
+  fail "invalid deadline was presented as an enforceable contract"
+fi
 [ -s "$HOME_DIR/state/.firstmate-supervisor.receipt-late-terminal-receipt" ] \
   || fail "late terminal receipt timing evidence was not persisted"
+
+snapshot_before_status_error=$(cksum "$SNAPSHOT")
+receipt_before_status_error=$(cksum "$HOME_DIR/state/.firstmate-supervisor.receipt-terminal-task-receipt")
+mv "$HOME_DIR/state/terminal-task.status" "$HOME_DIR/state/terminal-task.status.saved"
+mkdir "$HOME_DIR/state/terminal-task.status"
+if run_supervisor --once >/dev/null 2>&1; then
+  fail "unreadable status path produced a successful snapshot"
+fi
+[ "$(cksum "$SNAPSHOT")" = "$snapshot_before_status_error" ] \
+  || fail "unreadable status path replaced the last valid snapshot"
+[ "$(cksum "$HOME_DIR/state/.firstmate-supervisor.receipt-terminal-task-receipt")" = \
+    "$receipt_before_status_error" ] \
+  || fail "unreadable status path changed persisted receipt evidence"
+snapshot_error_logs=$(awk -F '\t' '$2 == "snapshot-write-failed" { count++ } END { print count + 0 }' \
+  "$HOME_DIR/state/.firstmate-supervisor.log")
+if run_supervisor --once >/dev/null 2>&1; then
+  fail "repeated unreadable status path produced a successful snapshot"
+fi
+[ "$(awk -F '\t' '$2 == "snapshot-write-failed" { count++ } END { print count + 0 }' \
+    "$HOME_DIR/state/.firstmate-supervisor.log")" -eq "$snapshot_error_logs" ] \
+  || fail "identical persistent cycle failure appended another log entry"
+rmdir "$HOME_DIR/state/terminal-task.status"
+mv "$HOME_DIR/state/terminal-task.status.saved" "$HOME_DIR/state/terminal-task.status"
+run_supervisor --once || fail "supervisor did not recover after status read failure"
+
+write_meta cursor-write fm-waiting "$((now + 300))"
+printf 'working: cursor persistence must succeed\n' > "$HOME_DIR/state/cursor-write.status"
+snapshot_before_cursor_error=$(cksum "$SNAPSHOT")
+if FM_TEST_FAIL_RECEIPT_CURSOR=1 run_supervisor --once >/dev/null 2>&1; then
+  fail "receipt cursor write failure produced a successful snapshot"
+fi
+[ "$(cksum "$SNAPSHOT")" = "$snapshot_before_cursor_error" ] \
+  || fail "receipt cursor write failure replaced the last valid snapshot"
+rm -f "$HOME_DIR/state/cursor-write.meta" "$HOME_DIR/state/cursor-write.status" \
+  "$HOME_DIR/state/.firstmate-supervisor.receipt-cursor-write-receipt.tmp."*
+run_supervisor --once || fail "supervisor did not recover after receipt cursor write failure"
 
 transitioned_version=$(cut -f2 "$HOME_DIR/state/.firstmate-supervisor.deadline-transitioned-terminal-receipt")
 sleep 2

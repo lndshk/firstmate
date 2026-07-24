@@ -32,6 +32,10 @@ This touches only the firstmate repo and its own worktrees, never anything under
 2. **Re-read AGENTS.md if your own instructions changed.**
    When the updater printed `reread-firstmate: yes`, the tracked instruction surface (AGENTS.md, bin/, or skills) just advanced under you.
    **Read `AGENTS.md` now** (CLAUDE.md is a symlink to it) to refresh your operating instructions before doing anything else, so you are acting on the new instructions rather than the stale ones you were started with.
+   After the re-read, inspect the updater output for a `supervisor:` line.
+   If that line is absent, the update began with a legacy updater that could fast-forward the new supervisor files but could not activate them.
+   Run `bin/fm-update.sh --activate-supervisor` once and surface any failure before continuing.
+   This compatibility action performs no fetch or fast-forward; it only activates the current post-update main-home supervisor and safely skips a secondmate home.
    When it printed `reread-firstmate: no`, nothing changed for you - skip the re-read.
 
 3. **Nudge each updated live secondmate.**

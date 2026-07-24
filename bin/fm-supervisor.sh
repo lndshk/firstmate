@@ -53,14 +53,24 @@ now_epoch() { date +%s; }
 is_uint() {
   case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
 }
+is_epoch() {
+  is_uint "$1" && [ "${#1}" -le 10 ]
+}
 clean_field() { LC_ALL=C tr '\t\r\n' '   '; }
 snapshot_field() {
   if [ -n "$1" ]; then printf '%s' "$1" | clean_field
   else printf -- '-'; fi
 }
 meta_field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -1; }
-last_receipt_raw() { awk 'NF { line=$0 } END { print line }' "$1" 2>/dev/null; }
-last_receipt_line() { awk 'NF { line=NR } END { print line + 0 }' "$1" 2>/dev/null; }
+last_receipt_record() {
+  awk 'NF { number=NR; line=$0 } END { printf "%d\t%s\n", number + 0, line }' "$1"
+}
+read_optional_file() {
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    [ -f "$1" ] || return 1
+    cat "$1"
+  fi
+}
 
 terminal_receipt() {
   case "$1" in
@@ -144,10 +154,13 @@ escalate_once() { # <id> <condition> <action> [evidence]
   local id=$1 condition=$2 action=$3 marker evidence previous tmp
   marker="$STATE/.firstmate-supervisor.escalated-$(escalation_key "$id" "$condition")"
   if [ $# -lt 4 ]; then
-    [ -e "$marker" ] && return 0
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      [ -f "$marker" ] || return 1
+      return 0
+    fi
   else
     evidence=$4
-    previous=$(cat "$marker" 2>/dev/null || true)
+    previous=$(read_optional_file "$marker") || return 1
     [ "$previous" = "$evidence" ] && return 0
   fi
   printf '%s\t%s\t%s\t%s\n' \
@@ -167,24 +180,26 @@ clear_escalation() { # <id> <condition>
   rm -f "$STATE/.firstmate-supervisor.escalated-$(escalation_key "$1" "$2")"
 }
 
-receipt_evidence() { # <id> <status-file> <raw-receipt>; prints <version><tab><time>
-  local id=$1 receipt_file=$2 raw=$3 receipt line hash version observed cursor
-  local saved_version saved_time tmp
+receipt_evidence() { # <id> <status-file> <raw-receipt> <line>; prints <version><tab><time>
+  local id=$1 receipt_file=$2 raw=$3 line=$4 receipt hash version observed cursor
+  local saved saved_version saved_time tmp
   receipt=$(fm_receipt_text "$raw")
-  line=$(last_receipt_line "$receipt_file")
   hash=$(printf '%s' "$receipt" | cksum | awk '{ print $1 "-" $2 }')
   version="$line-$hash"
   observed=$(fm_receipt_explicit_time "$raw" 2>/dev/null || true)
-  [ -n "$observed" ] || observed=$(fm_path_mtime "$receipt_file" 2>/dev/null || true)
-  is_uint "$observed" || observed=$(now_epoch)
+  if [ -z "$observed" ]; then
+    observed=$(fm_path_mtime "$receipt_file") || return 1
+  fi
+  is_epoch "$observed" || return 1
   cursor="$STATE/.firstmate-supervisor.receipt-$(escalation_key "$id" receipt)"
+  saved=$(read_optional_file "$cursor") || return 1
   IFS="$(printf '\t')" read -r saved_version saved_time <<EOF
-$(cat "$cursor" 2>/dev/null || true)
+$saved
 EOF
-  if [ "$saved_version" = "$version" ] && is_uint "$saved_time"; then
+  if [ "$saved_version" = "$version" ] && is_epoch "$saved_time"; then
     observed=$saved_time
   fi
-  if [ "$saved_version" != "$version" ] || ! is_uint "$saved_time"; then
+  if [ "$saved_version" != "$version" ] || ! is_epoch "$saved_time"; then
     tmp="$cursor.tmp.$$"
     printf '%s\t%s\n' "$version" "$observed" > "$tmp" \
       && mv -f "$tmp" "$cursor" || return 1
@@ -197,44 +212,59 @@ clear_receipt_evidence() { # <id>
 }
 
 timestamped_deadline_satisfaction() { # <status-file> <deadline>; prints <version><tab><time>
-  local receipt_file=$1 deadline=$2 raw receipt receipt_time line=0 hash
-  [ -f "$receipt_file" ] || return 1
-  while IFS= read -r raw || [ -n "$raw" ]; do
-    line=$((line + 1))
-    [ -n "$raw" ] || continue
-    receipt_time=$(fm_receipt_explicit_time "$raw" 2>/dev/null || true)
-    is_uint "$receipt_time" || continue
-    [ "$receipt_time" -le "$deadline" ] || continue
-    receipt=$(fm_receipt_text "$raw")
-    [ -n "$receipt" ] || continue
-    hash=$(printf '%s' "$receipt" | cksum | awk '{ print $1 "-" $2 }')
-    printf '%s\t%s\n' "$line-$hash" "$receipt_time"
-    return 0
-  done < "$receipt_file"
-  return 1
+  local receipt_file=$1 deadline=$2 candidate line raw receipt receipt_time hash tab
+  if [ ! -e "$receipt_file" ] && [ ! -L "$receipt_file" ]; then
+    return 1
+  fi
+  [ -f "$receipt_file" ] || return 2
+  candidate=$(awk -F '\t' -v deadline="$deadline" '
+    NF && $NF ~ /^[0-9]+$/ && length($NF) <= 10 && $NF <= deadline {
+      text=$0
+      sub(/\t[0-9]+$/, "", text)
+      if (length(text) > 0) {
+        print NR "\t" $0
+        exit
+      }
+    }
+  ' "$receipt_file") || return 2
+  [ -n "$candidate" ] || return 1
+  tab=$(printf '\t')
+  line=${candidate%%"$tab"*}
+  raw=${candidate#*"$tab"}
+  receipt_time=$(fm_receipt_explicit_time "$raw") || return 1
+  is_epoch "$receipt_time" || return 1
+  receipt=$(fm_receipt_text "$raw")
+  [ -n "$receipt" ] || return 1
+  hash=$(printf '%s' "$receipt" | cksum | awk '{ print $1 "-" $2 }')
+  printf '%s\t%s\n' "$line-$hash" "$receipt_time"
 }
 
 deadline_satisfaction() { # <id> <deadline> <status-file> <receipt-version> <receipt-time>; prints <version><tab><time>
   local id=$1 deadline=$2 receipt_file=$3 receipt_version=$4 receipt_time=$5 cursor
-  local saved_deadline saved_version saved_time candidate tmp
+  local saved saved_deadline saved_version saved_time candidate candidate_status tmp
   cursor="$STATE/.firstmate-supervisor.deadline-$(escalation_key "$id" receipt)"
+  saved=$(read_optional_file "$cursor") || return 2
   IFS="$(printf '\t')" read -r saved_deadline saved_version saved_time <<EOF
-$(cat "$cursor" 2>/dev/null || true)
+$saved
 EOF
   if [ "$saved_deadline" = "$deadline" ] \
     && [ -n "$saved_version" ] \
-    && is_uint "$saved_time"; then
+    && is_epoch "$saved_time"; then
     printf '%s\t%s\n' "$saved_version" "$saved_time"
     return 0
   fi
-  candidate=$(timestamped_deadline_satisfaction "$receipt_file" "$deadline" 2>/dev/null || true)
-  if [ -n "$candidate" ]; then
+  candidate_status=0
+  candidate=$(timestamped_deadline_satisfaction "$receipt_file" "$deadline") \
+    || candidate_status=$?
+  if [ "$candidate_status" -eq 2 ]; then
+    return 2
+  elif [ "$candidate_status" -eq 0 ] && [ -n "$candidate" ]; then
     IFS="$(printf '\t')" read -r receipt_version receipt_time <<EOF
 $candidate
 EOF
   fi
   if [ -n "$receipt_version" ] \
-    && is_uint "$receipt_time" \
+    && is_epoch "$receipt_time" \
     && [ "$receipt_time" -le "$deadline" ]; then
     tmp="$cursor.tmp.$$"
     printf '%s\t%s\t%s\n' "$deadline" "$receipt_version" "$receipt_time" > "$tmp" \
@@ -242,7 +272,7 @@ EOF
     printf '%s\t%s\n' "$receipt_version" "$receipt_time"
     return 0
   fi
-  [ "$saved_deadline" = "$deadline" ] || rm -f "$cursor"
+  [ "$saved_deadline" = "$deadline" ] || rm -f "$cursor" || return 2
   return 1
 }
 
@@ -251,30 +281,49 @@ clear_deadline_satisfaction() { # <id>
 }
 
 classify_meta() { # <meta>; prints one TSV task row
-  local meta=$1 id window pid deadline receipt receipt_raw receipt_file now
+  local meta=$1 id window pid deadline raw_deadline receipt receipt_raw receipt_record
+  local receipt_line receipt_file now tab evidence
   local state reason process_condition="" deadline_condition="" receipt_condition=""
+  local contract_condition=""
   local pane_activity=idle pid_activity=idle receipt_version="" receipt_time=""
   local deadline_status="" deadline_version="-" deadline_time="-"
-  local deadline_action="" process_action="" receipt_action="" satisfaction
+  local deadline_action="" process_action="" receipt_action="" contract_action=""
+  local satisfaction
   id=$(basename "$meta" .meta)
   window=$(meta_field "$meta" window)
   pid=$(meta_field "$meta" process-pid)
   [ -n "$pid" ] || pid=$(meta_field "$meta" pid)
-  deadline=$(meta_field "$meta" receipt-deadline)
-  [ -n "$deadline" ] || deadline=$(meta_field "$meta" deadline)
+  raw_deadline=$(meta_field "$meta" receipt-deadline)
+  [ -n "$raw_deadline" ] || raw_deadline=$(meta_field "$meta" deadline)
+  deadline=$raw_deadline
+  if [ -n "$deadline" ] && ! is_epoch "$deadline"; then
+    contract_condition=invalid-receipt-deadline
+    deadline=
+  fi
   receipt_file="$STATE/$id.status"
-  receipt_raw=$(last_receipt_raw "$receipt_file")
+  if [ -e "$receipt_file" ] || [ -L "$receipt_file" ]; then
+    [ -f "$receipt_file" ] || return 1
+    receipt_record=$(last_receipt_record "$receipt_file") || return 1
+    tab=$(printf '\t')
+    receipt_line=${receipt_record%%"$tab"*}
+    receipt_raw=${receipt_record#*"$tab"}
+  else
+    receipt_line=0
+    receipt_raw=
+  fi
   receipt=$(fm_receipt_text "$receipt_raw")
   now=$(now_epoch)
 
   if [ -n "$receipt" ]; then
+    evidence=$(receipt_evidence \
+      "$id" "$receipt_file" "$receipt_raw" "$receipt_line") || return 1
     IFS="$(printf '\t')" read -r receipt_version receipt_time <<EOF
-$(receipt_evidence "$id" "$receipt_file" "$receipt_raw")
+$evidence
 EOF
   else
-    clear_receipt_evidence "$id"
+    clear_receipt_evidence "$id" || return 1
   fi
-  if is_uint "$deadline"; then
+  if is_epoch "$deadline"; then
     if satisfaction=$(deadline_satisfaction \
       "$id" "$deadline" "$receipt_file" "$receipt_version" "$receipt_time"); then
       deadline_status=satisfied
@@ -290,7 +339,7 @@ EOF
       deadline_status=pending
     fi
   else
-    clear_deadline_satisfaction "$id"
+    clear_deadline_satisfaction "$id" || return 1
   fi
 
   if terminal_receipt "$receipt"; then
@@ -332,6 +381,9 @@ EOF
     elif [ -n "$deadline_condition" ]; then
       state=stalled
       reason="receipt deadline passed"
+    elif [ -n "$contract_condition" ]; then
+      state=stalled
+      reason="invalid receipt deadline declaration"
     else
       state=active-unverified
       reason="awaiting verifiable activity or receipt"
@@ -342,19 +394,26 @@ EOF
     process_action="inspect or relaunch the recorded direct-report process"
     escalate_once "$id" "$process_condition" "$process_action" || return 1
   else
-    clear_escalation "$id" missing-process
+    clear_escalation "$id" missing-process || return 1
   fi
   if [ -n "$deadline_condition" ]; then
     deadline_action="obtain the declared receipt or investigate the direct report"
     escalate_once "$id" "$deadline_condition" "$deadline_action" || return 1
   else
-    clear_escalation "$id" missed-receipt-deadline
+    clear_escalation "$id" missed-receipt-deadline || return 1
   fi
   if [ -n "$receipt_condition" ]; then
     receipt_action="act on terminal receipt: $receipt"
     escalate_once "$id" "$receipt_condition" "$receipt_action" "$receipt_version" || return 1
   else
-    clear_escalation "$id" failed-receipt
+    clear_escalation "$id" failed-receipt || return 1
+  fi
+  if [ -n "$contract_condition" ]; then
+    contract_action="replace the invalid receipt deadline with an absolute Unix epoch"
+    escalate_once \
+      "$id" "$contract_condition" "$contract_action" "$raw_deadline" || return 1
+  else
+    clear_escalation "$id" invalid-receipt-deadline || return 1
   fi
 
   printf 'task\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -365,7 +424,7 @@ EOF
     "$(snapshot_field "$deadline")" \
     "$(snapshot_field "$window")" \
     "$(snapshot_field "$pid")"
-  if is_uint "$deadline"; then
+  if is_epoch "$deadline"; then
     printf 'contract\t%s\tany-receipt\t%s\t%s\t%s\t%s\n' \
       "$(snapshot_field "$id")" \
       "$deadline" \
@@ -390,6 +449,12 @@ EOF
       "$(snapshot_field "$id")" \
       "$receipt_condition" \
       "$(snapshot_field "$receipt_action")"
+  fi
+  if [ -n "$contract_condition" ]; then
+    printf 'escalation\t%s\t%s\t%s\n' \
+      "$(snapshot_field "$id")" \
+      "$contract_condition" \
+      "$(snapshot_field "$contract_action")"
   fi
 }
 
@@ -454,6 +519,11 @@ write_heartbeat() {
 }
 
 record_error() {
+  local previous
+  previous=$(read_optional_file "$ERROR" 2>/dev/null || true)
+  case "$previous" in
+    *"$(printf '\t')$1") return ;;
+  esac
   printf '%s\t%s\n' "$(now_epoch)" "$1" >> "$LOG" 2>/dev/null || true
   printf '%s\t%s\n' "$(now_epoch)" "$1" > "$ERROR" 2>/dev/null || true
 }

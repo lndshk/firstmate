@@ -388,6 +388,30 @@ test_secondmate_home_skips_supervisor_activation() {
   pass "T13 secondmate home skips supervisor activation"
 }
 
+test_legacy_update_activation_bridge() {
+  local w out before
+  w=$(new_world t14)
+  bump_origin "$w" instr
+  git -C "$w/main" fetch -q origin
+  git -C "$w/main" merge -q --ff-only origin/main
+  before=$(git -C "$w/main" rev-parse HEAD)
+  rm -f "$w/home/state/update-supervisor-start"
+
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$UPDATE" --activate-supervisor 2>&1)
+
+  assert_contains "$out" "supervisor: active: supervisor fixture active" \
+    "legacy-update compatibility action did not activate the current supervisor"
+  grep -Fx 'v2 start' "$w/home/state/update-supervisor-start" >/dev/null \
+    || fail "legacy-update compatibility action did not use the post-update supervisor"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "activation-only compatibility action changed repository HEAD"
+  grep -F 'run `bin/fm-update.sh --activate-supervisor` once before doing anything else' \
+    "$ROOT/AGENTS.md" >/dev/null \
+    || fail "post-update AGENTS re-read does not route legacy updater output to the bridge"
+  pass "T14 legacy updater rollout activates the post-update supervisor"
+}
+
 test_updates_main_and_secondmate
 test_fast_forward_not_merge
 test_reread_gate_is_instruction_only
@@ -401,5 +425,6 @@ test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 test_supervisor_activation_failure_is_actionable
 test_secondmate_home_skips_supervisor_activation
+test_legacy_update_activation_bridge
 
 echo "# all fm-update tests passed"
