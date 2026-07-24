@@ -172,6 +172,18 @@ expect_code() {
   [ "$actual" = "$expected" ] || fail "$label: expected exit $expected, got $actual"
 }
 
+assert_queued_dispatch_checks() {
+  local out=$1 label=$2
+  printf '%s\n' "$out" | grep -F 'apply secondmate routing' >/dev/null \
+    || fail "$label: teardown reminder omitted secondmate routing: $out"
+  printf '%s\n' "$out" | grep -F 'advisory three-active-ordinary-report limit before every dispatch' >/dev/null \
+    || fail "$label: teardown reminder omitted advisory capacity check: $out"
+  printf '%s\n' "$out" | grep -F 'unless the captain explicitly overrides that dispatch' >/dev/null \
+    || fail "$label: teardown reminder omitted explicit captain override: $out"
+  printf '%s\n' "$out" | grep -F 'never kill, interrupt, or discard existing work to make room' >/dev/null \
+    || fail "$label: teardown reminder could displace existing work: $out"
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -203,6 +215,7 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
     || fail "teardown did not prompt tasks-axi ready: $out"
   printf '%s\n' "$out" | grep -F 'check date gates' >/dev/null \
     || fail "teardown did not preserve date-gate check: $out"
+  assert_queued_dispatch_checks "$out" "tasks-axi reminder"
   printf '%s\n' "$out" | grep -F 'keep Done to the 10 most recent' >/dev/null \
     && fail "teardown kept manual Done pruning in compatible tasks-axi prompt: $out"
   pass "teardown prompts tasks-axi backlog refresh when compatible"
@@ -265,6 +278,7 @@ test_no_mistakes_origin_remote_allows() {
   ! grep -q REFUSED "$case_dir/stderr" || fail "nm-origin: teardown printed a REFUSED line"
   grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
     || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
+  assert_queued_dispatch_checks "$(cat "$case_dir/stdout")" "manual reminder"
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
 }
 

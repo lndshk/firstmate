@@ -345,6 +345,14 @@ If `no-mistakes doctor` reports problems, fix the environment (auth, daemon) bef
 
 ### Intake
 
+**Record the request first.**
+Every incoming work request becomes a durable Queued record before any clarification question, dispatch, or routing message.
+Create the record from the request as received even when the project, task shape, or route is unresolved; mark unknown details as provisional.
+With compatible `tasks-axi`, use `tasks-axi add` without `--start` and include only fields already known; otherwise add it under `## Queued` by hand.
+After clarification, enrich that same record instead of creating a replacement.
+This record is Firstmate's ownership promise across later captain messages, interruptions, and restarts: the request remains visible until a verified terminal outcome moves it to Done.
+A later urgent request may reprioritize which queued item goes next, but it never erases, replaces, or silently abandons earlier work.
+
 **Resolve the project first.**
 The captain will rarely name the project explicitly, and may juggle several projects across messages.
 Resolve each message independently; never assume the last-discussed project out of habit.
@@ -354,7 +362,7 @@ Use these signals in order:
 2. A clear follow-up ("also add tests for that", a reply to a PR you reported) inherits the project of the thing it refers to.
 3. Otherwise, match the message content against what you know: project names under `projects/`, in-flight tasks in `data/backlog.md`, and the projects' own code and READMEs (read them; that is what your read access is for). A mentioned feature, file, stack trace, or technology usually points at exactly one project.
 4. One confident match: proceed, but state the project in plain outcome language in your reply ("I'll work on this in `yourapp`") so a wrong guess costs one correction instead of wasted work.
-5. More than one plausible match, or none: ask a one-line question. A misdirected dispatch is recoverable because crewmates work in isolated worktrees, but it is expensive; a question is cheap.
+5. More than one plausible match, or none: ask a one-line question after the provisional Queued record exists. A misdirected dispatch is recoverable because crewmates work in isolated worktrees, but it is expensive; a question is cheap.
 
 Then resolve the secondmate scope.
 Read `data/secondmates.md` before dispatching and compare the work request to each registered `scope:`.
@@ -362,6 +370,8 @@ Route by the nature of the task, not just the project name.
 A project may appear in several `projects:` clone lists, so choose the secondmate whose natural-language scope actually fits the work, such as triage versus feature development.
 If the resolved project is `local-only`, keep the work with the main firstmate even when a secondmate scope sounds relevant.
 If a secondmate's scope fits, steer that secondmate with one concise instruction via `bin/fm-send.sh fm-<id> '<work request>'` and let it run the normal lifecycle inside its own home.
+Annotate the main Queued record as routed to that secondmate and keep it as a follow-up obligation, not another direct-dispatch candidate, until the secondmate reports a verified terminal outcome.
+This preserves the existing routing path; do not invent a cross-home acknowledgement transaction or claim the handoff is atomic.
 The bare `fm-<id>` target resolves through this home's `state/<id>.meta`; pass `session:window` only when intentionally targeting a window outside this firstmate home.
 Do not spawn a direct crewmate for work that belongs to a secondmate scope unless the secondmate is blocked or the captain explicitly redirects it.
 If no secondmate scope fits, proceed in the main firstmate or create a new secondmate with the captain when that domain should become persistent.
@@ -374,11 +384,16 @@ Then classify the shape:
 
 Then classify readiness:
 
-- **Dispatchable:** no overlap with in-flight tasks. Dispatch immediately. There is no concurrency cap.
+- **Dispatchable:** no overlap with in-flight tasks and the advisory ordinary direct-report budget has room. Scaffold and dispatch it, then move its existing Queued record to In flight only after spawn succeeds.
 - **Blocked:** touches the same files or subsystem as an in-flight task, or explicitly depends on an unmerged PR. Record it in `data/backlog.md` with `blocked-by: <id>` and tell the captain what work is waiting and why. Scout tasks are read-mostly and almost never block on anything.
+- **Capacity-queued:** otherwise dispatchable, but three ordinary direct ship/scout reports are already active in this firstmate home. Three is the default working limit, not a spawn-time lock: persistent secondmates do not count, and the captain may explicitly override it for a particular dispatch. Otherwise leave the new item Queued until a slot opens.
+
+These are the **Queued dispatch checks**, and every path that starts ordinary work from Queued applies all of them immediately before spawn: resolve secondmate scope and exclude records routed to a secondmate unless that secondmate is blocked or the captain explicitly redirects the work; confirm blockers are gone and any time/date gate has arrived; and confirm the advisory ordinary direct-report budget has room unless the captain explicitly overrides it for that particular dispatch.
+Queue listings and stall-check output identify candidates only; they never bypass these checks.
 
 Keep dependency judgment coarse: same repo plus overlapping area means serialize; everything else runs parallel.
 For `no-mistakes` projects, the pipeline rebase step absorbs mild overlaps; for other modes, have the crewmate rebase before review or merge if needed.
+If existing work is already above the advisory limit, never kill, interrupt, or discard it merely to get back under three; the guidance affects only what starts next.
 
 Write the brief per section 11.
 
@@ -406,7 +421,7 @@ The cwd change is project context only: launch `FM_HOME`, meta `home=`, and ever
 Codex secondmates also receive a per-launch trusted-project override for that cwd, so a first project-native launch cannot park on the directory-trust dialog.
 Project worktrees start at detached HEAD on a clean default branch; ship briefs tell the crewmate to create its branch, while scout briefs keep the worktree scratch.
 After spawning, peek the pane to confirm the crewmate is processing the brief (and handle any trust dialog per section 4).
-Add the task to `data/backlog.md` under In flight.
+Move the task's already-durable record from Queued to In flight only after the spawn succeeds (`tasks-axi start <id>` when compatible, otherwise by hand).
 
 ### Supervise
 
@@ -417,7 +432,7 @@ Its charter retargets escalation to the main firstmate's status file, so routine
 
 ### Delivery modes and yolo
 
-A ship task's path from `done` to landed on `main` is set by the project's `mode` (recorded in meta; section 6); `yolo` decides who approves. The Validate / PR ready / Ship teardown stages below are written for the `no-mistakes` path; the other modes diverge:
+After reconciling each `done` claim against its brief and artifacts as required by section 8, a ship task's path to landed on `main` is set by the project's `mode` (recorded in meta; section 6); `yolo` decides who approves. The Validate / PR ready / Ship teardown stages below are written for the `no-mistakes` path; the other modes diverge:
 
 - **no-mistakes** - the stages below as written: no-mistakes validation pipeline -> PR -> captain merge.
 - **direct-PR** - no pipeline. The crewmate pushes and opens the PR itself (its brief says so) and reports `done: PR <url>`. Skip the Validate step and go straight to PR ready (run `fm-pr-check`, relay the PR). Teardown uses the normal pushed-branch check.
@@ -430,7 +445,7 @@ Pooled clones keep their local default refs frozen at clone time and can lag `or
 
 ### Validate
 
-For `no-mistakes`-mode ship tasks, when a crewmate's status says `done`, trigger validation using the crew's harness from `state/<id>.meta`.
+For `no-mistakes`-mode ship tasks, after reconciling the crewmate's `done` claim as required by section 8, trigger validation using the crew's harness from `state/<id>.meta`.
 Use `/no-mistakes` for claude, `$no-mistakes` for codex; natural language also works.
 For example, with claude:
 
@@ -462,7 +477,7 @@ The script refuses if the worktree holds unpushed work; treat a refusal as a sto
 Known benign case: after an external-PR task, a squash merge leaves the branch commits reachable only on the contributor's fork; add the fork as a remote and fetch (`git remote add fork <fork url> && git fetch fork`), then retry - never reach for `--force`.
 After a successful PR-based teardown, it also runs `bin/fm-fleet-sync.sh` for that project, best-effort, so the clone's local default catches up to the merge and the just-merged branch, now gone on the remote and free of its worktree, is pruned immediately.
 Then update the backlog using the teardown reminder: run `tasks-axi done` when the compatible tool is available, otherwise move the task to Done in `data/backlog.md` manually with the full `https://...` PR URL or local merge note and date and keep Done to the 10 most recent.
-Re-evaluate the queue and dispatch only queued work whose blockers are gone and whose time/date gate, if any, has arrived.
+Re-evaluate the queue and apply the Queued dispatch checks above before dispatching each eligible item.
 
 ### Secondmate teardown (explicit only)
 
@@ -479,10 +494,10 @@ With `--force`, teardown is the explicit discard path: it kills child windows, d
 
 A scout task follows Intake, Spawn, and Supervise exactly as above - scaffold the brief with `bin/fm-brief.sh <id> <repo> --scout`, spawn with `--scout` - then diverges after the work:
 
-- There is no Validate or PR-ready stage. When the crewmate's status says `done`, read `data/<id>/report.md`.
+- There is no Validate or PR-ready stage. When the crewmate's status says `done`, read `data/<id>/report.md` and reconcile the claim as required by section 8.
 - Relay the findings to the captain: plain chat for a focused answer, lavish-axi when the report has structure worth a visual (multiple findings, options, a plan).
 - Tear down immediately - no merge gate. `bin/fm-teardown.sh` allows a scout worktree's scratch commits and dirty files once the report exists; if the report is missing, it refuses, because the findings are the work product.
-- Record it in Done with the report path instead of a PR link using `tasks-axi done` when compatible tasks-axi is available, otherwise hand-edit `data/backlog.md` and keep Done to the 10 most recent, then re-evaluate the queue and dispatch only queued work whose blockers are gone and whose time/date gate, if any, has arrived.
+- Record it in Done with the report path instead of a PR link using `tasks-axi done` when compatible tasks-axi is available, otherwise hand-edit `data/backlog.md` and keep Done to the 10 most recent, then re-evaluate the queue and apply the Queued dispatch checks above before dispatching each eligible item.
 
 **Promotion.** When a scout's findings reveal shippable work (a reproduced bug with a clear fix) and the captain wants it shipped, promote the task in place instead of respawning: run `bin/fm-promote.sh <id>` (flips `kind=` to ship in meta, restoring teardown's full protection), then send the crewmate its ship instructions - inventory scratch state, reset to a clean default-branch base, carry over only intended fix changes, create branch `fm/<id>`, implement, and report `done` according to the project's delivery mode.
 The crewmate keeps its worktree, loaded context, and repro, but the ship branch must start from a clean base with only intended changes; scratch commits and debug edits from the scout phase never ride along.
@@ -494,6 +509,8 @@ From there the task is an ordinary ship task through its mode-specific validatio
 The watcher is the backbone.
 Whenever at least one task is in flight, `bin/fm-watch.sh` must be running as a background task.
 It costs zero tokens while running and exits with one reason line when something needs you.
+It is a mechanical exception alarm, not another manager and not an interpreter of task semantics.
+It wakes on objective state changes and deadlines already encoded in status, tmux, checks, and heartbeat timing; Firstmate reads the brief and decides what those signals mean.
 It also writes each detected wake to the durable queue at `state/.wake-queue` before advancing suppression markers such as `.seen-*`, `.stale-*`, `.last-check`, or `.last-heartbeat`.
 At the start of every wake-handling turn and every recovery turn, run `bin/fm-wake-drain.sh` before peeking panes, reading status files beyond the reason line, or starting new work.
 The printed one-shot reason line is still useful, but the drained queue is the lossless backlog.
@@ -522,7 +539,7 @@ On wake, in order of cheapness:
 
 Run `bin/fm-stall-check.sh` at every heartbeat and every wake-handling turn, immediately after draining queued wakes and before deciding the fleet is quiet.
 It is a read-only, pull-based sweep over the same backlog/state/tmux surfaces firstmate already consumes, and prints nothing when all clear.
-Act on every emitted line: advance finished-but-still-in-flight tasks into validation/PR/teardown/next-task handling, dispatch queued items whose blockers or date gates have cleared, and investigate `stall?:` idle candidates by peeking the pane and applying the stuck-crewmate playbook if needed.
+Act on every emitted line: advance finished-but-still-in-flight tasks into validation/PR/teardown/next-task handling, treat queued items whose blockers or date gates have cleared as candidates and apply the Queued dispatch checks before dispatch, and investigate `stall?:` idle candidates by peeking the pane and applying the stuck-crewmate playbook if needed.
 It also emits `advisor-idle?:` when a live `kind=secondmate` pane has been idle past `FM_ADVISOR_IDLE_STALL_SECS` (default 1800s), has no genuinely active child work in its own home, and its last status is terminal rather than captain-gated; route its next program step or confirm it is intentionally parked.
 It also emits `unlanded?:` when an in-flight push-based crew's worktree holds commits reachable from no remote-tracking branch - committed work living only in a disposable worktree that teardown would discard; push the branch, or, if it is a squash-merged branch whose remote copy was deleted, confirm it already landed. Like `stall?:`, this is a verify-candidate, not an assertion. Secondmate, scout, and `local-only` tasks are exempt (a scout ships a report, `local-only` has no remote by design), and PR-parked tasks are skipped because the merge poll already tracks them.
 `bin/fm-guard.sh` also warns when the stall detector has any finding, so the next supervision script invocation surfaces dormant work mechanically.
@@ -555,6 +572,9 @@ Background that work so watcher wakes can interleave with it and the supervision
 Token discipline: status files before panes; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
 The context-% shown in a peek is not actionable as crew health; ignore it and intervene only on real signals (`signal`, `stale`, `needs-decision`, `blocked`), looping or confusion in the pane, or a question the brief already answers.
 Silence is the correct state while a healthy background watcher is waiting.
+Status is evidence only to the degree it is independently observable: `working` is a crewmate report, never proof that progress occurred or that work completed.
+Treat `done` as a completion claim.
+Before delivery, validation, merge, or teardown, reconcile that claim against the brief's named success evidence and the actual report, diff, tests, PR, or other artifact.
 
 ### Sub-supervisor (presence-gated via `/afk`)
 
@@ -671,7 +691,7 @@ Update it on every dispatch, completion, and decision.
 - [x] <id> - <one line> - data/<id>/report.md (reported <date>)
 ```
 
-Re-evaluate Queued on every teardown and every heartbeat: anything whose blocker is gone and whose time/date gate, if any, has arrived gets dispatched.
+Re-evaluate Queued on every teardown and every heartbeat, then apply the Queued dispatch checks before dispatching each eligible item.
 
 Keep Done to the 10 most recent entries; prune older ones whenever you add to the section.
 Every finished PR-based ship task lives on as its GitHub PR, every local-only ship task lives on in local `main`, and every scout task lives on as its report file, so pruning loses nothing; the retained tail exists only as cheap recent context for recovery and heartbeats.
@@ -682,8 +702,8 @@ Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1
 The `## In flight` / `## Queued` / `## Done` format above stays the contract: the verbs edit `data/backlog.md` in place, byte-exact, preserving whatever item forms the file already uses - the bold in-flight `- **<id>**` form, the `- [ ]`/`- [x]` queued and done forms, and `blocked-by: <id> - <reason>` - rather than reformatting them.
 Map firstmate's real backlog operations to the approved commands:
 
-- File an item: `tasks-axi add <id> "<one line>" --kind <ship|scout> --repo <name>`, plus `--start` for immediate dispatch (In flight) or the default queue placement, and `--blocked-by <id>` (repeatable) when it waits on another task.
-- Start an existing queued item: `tasks-axi start <id>` before dispatching work from Queued, after checking that blockers are gone and any time/date gate has arrived.
+- File every incoming item in Queued before clarification, routing, or dispatch: `tasks-axi add <id> "<one line>"`, adding `--kind <ship|scout>`, `--repo <name>`, and repeatable `--blocked-by <id>` only when those details are known. Do not combine intake with `--start`; enrich the same provisional item after clarification.
+- Start an existing queued item: after its spawn succeeds, run `tasks-axi start <id>` to move the durable record to In flight. Check that blockers are gone, any time/date gate has arrived, and the advisory direct-report budget allows the dispatch (or the captain explicitly overrode it) before spawning.
 - Move a finished task to Done: `tasks-axi done <id> --pr <url>` for a PR-based ship, `--report <path>` for a scout, or `--note "local main"` for a local-only merge.
 - Append a status note: `tasks-axi update <id> --append "<note>"`; replace fields with `--title`, `--body`, or `--body-file <path>`.
 - Manage dependencies: `tasks-axi block <id> --by <other>` and `tasks-axi unblock <id> --by <other>`, then `tasks-axi ready` to list queued work with no unresolved blockers.
@@ -698,7 +718,7 @@ Secondmates inherit this automatically: each secondmate home carries the same `A
 
 ## 11. Crewmate briefs
 
-Scaffold with `bin/fm-brief.sh <id> <repo-name>` - it writes `data/<id>/brief.md` with the standard contract (branch setup, status-reporting protocol, push/merge rules, definition of done) and all paths filled in.
+Scaffold with `bin/fm-brief.sh <id> <repo-name>` - it writes `data/<id>/brief.md` with the standard contract (objective, observable success evidence, review/deadline trigger, branch setup, status-reporting protocol, push/merge rules, definition of done) and all paths filled in.
 For a ship task the definition of done is shaped by the project's delivery mode (section 6): `no-mistakes` ends in the harness-appropriate no-mistakes validation pipeline, `direct-PR` has the crewmate push and open the PR itself, `local-only` has it stop at "ready in branch" for firstmate to review and merge locally.
 The scaffold reads the mode via `fm-project-mode.sh`, so you do not pass it.
 Ship briefs also include the project-memory contract: run `bin/fm-ensure-agents-md.sh` when the project already has agent-memory files or when the task produced durable project-intrinsic knowledge, then record proportionate learnings in `AGENTS.md`.
@@ -714,7 +734,10 @@ The scaffold's definition of done encodes the idle-by-default contract (section 
 After seeding, hand the new secondmate's in-scope queued items off from the main backlog with `bin/fm-backlog-handoff.sh` (section 6).
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
 The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
-For any generated brief that still contains `{TASK}`, replace it with a clear task description, acceptance criteria, and any constraints or context the crewmate needs before spawning or seeding.
+For an ordinary generated brief, replace `{OBJECTIVE}`, `{SUCCESS_EVIDENCE}`, and `{REVIEW_OR_DEADLINE_TRIGGER}` with a clear objective, evidence that Firstmate can observe to verify success, and the condition or time that requires review, escalation, or follow-up.
+Review the filled brief before spawning; `fm-spawn.sh` does not parse or enforce a brief schema.
+Custom or deviating briefs remain valid when they state the same objective, evidence, and follow-up contract in another shape.
+For a generated secondmate charter that still contains `{TASK}`, replace it with the persistent responsibility and routing scope before seeding.
 Adjust the other sections only when the task genuinely deviates from the standard ship-a-new-PR shape (e.g. fixing an existing external PR); the scaffold is the contract, not a suggestion.
 
 ## 12. Self-update
