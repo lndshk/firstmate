@@ -5,7 +5,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)", "NEEDS_GH_AUTH",
 #                 "CREW_HARNESS_OVERRIDE: <name>", "FLEET_SYNC: <repo>: skipped: <reason>",
-#                 "TASKS_AXI: available".
+#                 "TASKS_AXI: available", "SUPERVISOR: startup failed: <reason>".
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          tasks-axi is an OPTIONAL backlog-management capability reported only
@@ -106,11 +106,15 @@ fm_tasks_axi_compatible && echo "TASKS_AXI: available"
 fleet_sync
 
 # The main home's deterministic supervisor is an always-on shell process.
-# Secondmates retain their existing parent-supervised lifecycle, and bootstrap
-# stays silent if startup is unavailable or fails.
+# Secondmates retain their existing parent-supervised lifecycle.
 if command -v tmux >/dev/null 2>&1 \
   && [ ! -f "$FM_HOME/.fm-secondmate-home" ] \
   && [ -x "$SCRIPT_DIR/fm-supervisor.sh" ]; then
-  "$SCRIPT_DIR/fm-supervisor.sh" start >/dev/null 2>&1 || true
+  supervisor_output=$("$SCRIPT_DIR/fm-supervisor.sh" start 2>&1)
+  supervisor_status=$?
+  if [ "$supervisor_status" -ne 0 ]; then
+    supervisor_output=$(printf '%s' "$supervisor_output" | LC_ALL=C tr '\t\r\n' '   ')
+    printf 'SUPERVISOR: startup failed: %s\n' "${supervisor_output:-unknown error}"
+  fi
 fi
 exit 0

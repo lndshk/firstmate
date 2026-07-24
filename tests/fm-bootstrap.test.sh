@@ -94,6 +94,22 @@ test_bootstrap_starts_main_home_supervisor() {
   pass "bootstrap starts the main-home supervisor"
 }
 
+test_bootstrap_reports_supervisor_startup_failure() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/supervisor-startup-failure"
+  mkdir -p "$case_dir/home/state/.firstmate-supervisor.control.lock"
+  printf '%s\n' "$$" > "$case_dir/home/state/.firstmate-supervisor.control.lock/pid"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$case_dir/home" FM_BOARD_DIR="$case_dir/board" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F \
+    "SUPERVISOR: startup failed: supervisor control operation already in progress (pid $$)" >/dev/null \
+    || fail "bootstrap suppressed supervisor startup failure: $out"
+  pass "bootstrap reports supervisor startup failure"
+}
+
 test_bootstrap_accepts_treehouse_lease_support() {
   local case_dir fakebin out
   case_dir="$TMP_ROOT/lease-supported"
@@ -161,3 +177,4 @@ test_bootstrap_reports_treehouse_without_lease_support
 test_bootstrap_reports_tasks_axi_when_available
 test_bootstrap_ignores_incompatible_tasks_axi
 test_bootstrap_starts_main_home_supervisor
+test_bootstrap_reports_supervisor_startup_failure

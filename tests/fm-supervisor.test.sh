@@ -15,9 +15,12 @@ fail() {
 }
 
 cleanup() {
-  local pid
-  pid=$(cat "$HOME_DIR/state/.firstmate-supervisor.pid" 2>/dev/null || true)
-  case "$pid" in ''|*[!0-9]*) ;; *) kill "$pid" 2>/dev/null || true ;; esac
+  local pid_file pid
+  for pid_file in "$TMP_ROOT"/*/state/.firstmate-supervisor.pid; do
+    [ -f "$pid_file" ] || continue
+    pid=$(cat "$pid_file" 2>/dev/null || true)
+    case "$pid" in ''|*[!0-9]*) ;; *) kill "$pid" 2>/dev/null || true ;; esac
+  done
   rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT
@@ -68,10 +71,16 @@ printf 'done: PR https://example.test/42 checks green\n' > "$HOME_DIR/state/term
 printf 'failed: deterministic test failure\n' > "$HOME_DIR/state/failed-task.status"
 
 run_supervisor() {
+  run_supervisor_home "$HOME_DIR" "$BOARD_DIR" "$@"
+}
+
+run_supervisor_home() {
+  local home=$1 board=$2
+  shift 2
   PATH="$FAKEBIN:$PATH" \
     FM_TEST_TMUX_LOG="$TMUX_LOG" \
-    FM_HOME="$HOME_DIR" \
-    FM_BOARD_DIR="$BOARD_DIR" \
+    FM_HOME="$home" \
+    FM_BOARD_DIR="$board" \
     "$ROOT/bin/fm-supervisor.sh" "$@"
 }
 
@@ -137,5 +146,29 @@ printf '%s\n' "$third_start" | grep -F "already running: pid $second_pid" >/dev/
   || fail "idempotent start did not report the singleton owner"
 [ "$(cat "$HOME_DIR/state/.firstmate-supervisor.pid")" = "$second_pid" ] \
   || fail "idempotent start created a duplicate owner"
+
+OTHER_HOME="$TMP_ROOT/other-home"
+OTHER_BOARD="$TMP_ROOT/other-board"
+mkdir -p "$OTHER_HOME/state" "$OTHER_BOARD"
+FM_SUPERVISOR_INTERVAL=1 run_supervisor_home "$OTHER_HOME" "$OTHER_BOARD" start >/dev/null \
+  || fail "other-home supervisor start failed"
+other_pid=$(cat "$OTHER_HOME/state/.firstmate-supervisor.pid" 2>/dev/null || true)
+case "$other_pid" in ''|*[!0-9]*) fail "other-home supervisor did not publish a PID receipt" ;; esac
+kill "$second_pid" 2>/dev/null || fail "could not stop current-home supervisor for ownership test"
+for _ in 1 2 3 4 5; do
+  kill -0 "$second_pid" 2>/dev/null || break
+  sleep 1
+done
+kill -0 "$second_pid" 2>/dev/null && fail "current-home supervisor did not stop for ownership test"
+mkdir -p "$HOME_DIR/state/.firstmate-supervisor.lock"
+printf '%s\n' "$other_pid" > "$HOME_DIR/state/.firstmate-supervisor.lock/pid"
+printf '%s\n' "$other_pid" > "$HOME_DIR/state/.firstmate-supervisor.pid"
+FM_SUPERVISOR_INTERVAL=1 run_supervisor restart >/dev/null \
+  || fail "restart did not recover from another home's reused PID"
+own_pid=$(cat "$HOME_DIR/state/.firstmate-supervisor.pid" 2>/dev/null || true)
+case "$own_pid" in ''|*[!0-9]*) fail "ownership-safe restart did not publish a PID receipt" ;; esac
+[ "$own_pid" != "$other_pid" ] || fail "restart accepted another home's supervisor as owner"
+kill -0 "$other_pid" 2>/dev/null || fail "restart terminated another home's supervisor"
+kill -0 "$own_pid" 2>/dev/null || fail "ownership-safe restart did not leave a live owner"
 
 printf 'ok - supervisor reconciles wakes, classifies contracts, escalates failures, stays no-chat, and restarts singleton-safe\n'

@@ -120,6 +120,7 @@ Otherwise it prints one line per problem or capability fact; handle each:
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
 - `CREW_HARNESS_OVERRIDE: <name>` - record and use the override silently; surface a harness fact only if it actually blocks work or the captain asks.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - bootstrap continued; investigate only if the dirty, diverged, or offline clone blocks work.
+- `SUPERVISOR: startup failed: <reason>` - bootstrap continued without the main-home observer; resolve the reported lock, state, or launch failure and rerun bootstrap.
 - `TASKS_AXI: available` - an optional capability fact, not a problem; record it silently and never surface it to the captain.
   Bootstrap prints this only after the `tasks-axi` compatibility probe passes for version 0.1.1 or newer.
   When a compatible `tasks-axi` is on PATH, firstmate routes routine `data/backlog.md` mutations through its verbs instead of hand-editing the file, exactly as section 10 describes.

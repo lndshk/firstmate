@@ -2,7 +2,7 @@
 # Always-on deterministic supervisor for one main Firstmate home.
 #
 # Usage: fm-supervisor.sh start|restart|status
-# Test/internal: fm-supervisor.sh --once|--run
+# Test/internal: fm-supervisor.sh --once|--run --owner-token=<token>
 #
 # The process observes durable wakes, state/*.meta, status receipts, declared
 # receipt deadlines, and recorded panes. It writes a machine-readable snapshot,
@@ -27,6 +27,8 @@ SNAPSHOT="${FM_SUPERVISOR_SNAPSHOT:-$STATE/firstmate-supervisor.tsv}"
 ESCALATIONS="$STATE/.firstmate-supervisor.escalations"
 LOG="$STATE/.firstmate-supervisor.log"
 ERROR="$STATE/.firstmate-supervisor.error"
+OWNER_HOME=$(cd "$FM_HOME" 2>/dev/null && pwd -P || printf '%s' "$FM_HOME")
+OWNER_TOKEN=$(printf '%s' "$OWNER_HOME" | cksum | awk '{ print $1 "-" $2 }')
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -61,14 +63,43 @@ pane_exists() {
   [ -n "$1" ] && tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1
 }
 
+supervisor_process_matches_owner() {
+  local pid=$1 command
+  fm_pid_alive "$pid" || return 1
+  command=$(ps -ww -p "$pid" -o command= 2>/dev/null) || return 2
+  [ -n "$command" ] || return 2
+  case "$command" in
+    *"fm-supervisor.sh"*"--run"*"--owner-token=$OWNER_TOKEN"*) return 0 ;;
+    *"fm-supervisor.sh"*"--run"*"--owner-token="*) return 1 ;;
+  esac
+  return 2
+}
+
 supervisor_pid_is_ours() {
-  local pid=$1 lock_pid command
+  local pid=$1 lock_pid
   fm_pid_alive "$pid" || return 1
   lock_pid=$(cat "$LOCK/pid" 2>/dev/null || true)
   [ "$lock_pid" = "$pid" ] || return 1
-  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
-  case "$command" in *"fm-supervisor.sh"*"--run"*) return 0 ;; esac
-  return 1
+  supervisor_process_matches_owner "$pid"
+}
+
+clear_foreign_runtime_lock() {
+  local lock_pid match
+  lock_pid=$(cat "$LOCK/pid" 2>/dev/null || true)
+  fm_pid_alive "$lock_pid" || return 0
+  if supervisor_process_matches_owner "$lock_pid"; then
+    printf 'error: supervisor runtime lock is held by owner pid %s without a valid PID receipt\n' "$lock_pid" >&2
+    return 1
+  else
+    match=$?
+  fi
+  if [ "$match" -eq 2 ]; then
+    printf 'error: supervisor runtime lock is held by unverified pid %s; inspect it before retrying\n' "$lock_pid" >&2
+    return 1
+  fi
+  [ "$(cat "$LOCK/pid" 2>/dev/null || true)" = "$lock_pid" ] || return 1
+  rm -f "$LOCK/pid" 2>/dev/null || return 1
+  rmdir "$LOCK" 2>/dev/null
 }
 
 escalation_key() {
@@ -287,7 +318,11 @@ start_unlocked() {
     printf 'supervisor already running: pid %s\n' "$pid"
     return 0
   fi
-  nohup "$SCRIPT_DIR/fm-supervisor.sh" --run >> "$LOG" 2>&1 &
+  clear_foreign_runtime_lock || {
+    printf 'error: could not clear a foreign supervisor lock\n' >&2
+    return 1
+  }
+  nohup "$SCRIPT_DIR/fm-supervisor.sh" --run "--owner-token=$OWNER_TOKEN" >> "$LOG" 2>&1 &
   child=$!
   wait_for_owner "$child"
 }
@@ -353,6 +388,12 @@ case "${1:-status}" in
   restart) restart ;;
   status) status ;;
   --once) cycle ;;
-  --run) run_loop ;;
+  --run)
+    [ "${2:-}" = "--owner-token=$OWNER_TOKEN" ] || {
+      printf 'error: supervisor owner token does not match this home\n' >&2
+      exit 2
+    }
+    run_loop
+    ;;
   *) printf 'usage: %s start|restart|status\n' "$0" >&2; exit 2 ;;
 esac
