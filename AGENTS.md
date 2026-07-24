@@ -548,7 +548,7 @@ Missing-process, missed-deadline, and failed/blocked/needs-decision receipt cond
 A busy pane remains `active` even when its receipt deadline has passed, while the missed receipt still produces its durable escalation.
 
 `start`, `restart`, and `status` are the only operator interface.
-The singleton lock, `state/.firstmate-supervisor.pid`, and periodically rewritten `state/.firstmate-supervisor.heartbeat` prove ownership and liveness.
+The singleton lock, `state/.firstmate-supervisor.pid`, `state/.firstmate-supervisor.owner` cadence receipt, and periodically rewritten `state/.firstmate-supervisor.heartbeat` prove ownership and liveness.
 `restart` stops only the verified current owner and refuses to launch a duplicate if it cannot stop.
 The board is rendered once per successful supervisor cycle and has no separate keepalive or long-running owner.
 

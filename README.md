@@ -244,7 +244,7 @@ FM_SUPERVISOR_INTERVAL=15          # seconds between deterministic snapshot and 
 ### Always-on supervisor runbook
 
 Bootstrap silently starts the main home's supervisor when tmux is available; secondmate homes do not start another owner.
-Use `bin/fm-supervisor.sh start` to ensure it is running after an upgrade or recovery, `restart` to replace a verified stale owner, and `status` to inspect its singleton PID, heartbeat, snapshot freshness, and last error.
+Use `bin/fm-supervisor.sh start` to ensure it is running after an upgrade or recovery, `restart` to replace a verified stale owner, and `status` to inspect its singleton PID, heartbeat, snapshot freshness, and last error. The running cadence is persisted in `state/.firstmate-supervisor.owner` and governs heartbeat health checks.
 These commands are safe to run immediately after merge; `start` is idempotent and `restart` refuses duplicate ownership.
 
 The snapshot is `state/firstmate-supervisor.tsv`, actionable conditions append to `state/.firstmate-supervisor.escalations`, and the generated board is `state/board/board.html`.

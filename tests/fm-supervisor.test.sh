@@ -73,7 +73,10 @@ now=$(date +%s)
 write_meta pre-deadline fm-waiting "$((now + 300))"
 write_meta post-deadline fm-waiting 1
 write_meta busy-after-deadline fm-busy 1
+write_meta busy-dead-pid fm-busy 1
+printf 'process-pid=2147483647\n' >> "$HOME_DIR/state/busy-dead-pid.meta"
 write_meta unreadable-after-deadline fm-unreadable 1
+printf 'process-pid=2147483647\n' >> "$HOME_DIR/state/unreadable-after-deadline.meta"
 write_meta terminal-task fm-gone "$((now + 300))"
 write_meta late-terminal fm-gone 1
 write_meta transitioned-terminal fm-waiting "$((now + 300))"
@@ -111,6 +114,8 @@ grep -F $'task\tterminal-task\tterminal\tterminal receipt recorded\t' "$SNAPSHOT
   || fail "terminal receipt was not terminal"
 grep -F $'task\tbusy-after-deadline\tactive\tbusy pane observed\t' "$SNAPSHOT" >/dev/null \
   || fail "live busy task was falsely stalled"
+grep -F $'task\tbusy-dead-pid\tactive\tbusy pane observed\t' "$SNAPSHOT" >/dev/null \
+  || fail "busy pane was stalled by a dead declared PID"
 grep -F $'task\tunreadable-after-deadline\tactive-unverified\tpane activity could not be verified\t' "$SNAPSHOT" >/dev/null \
   || fail "unreadable pane was falsely stalled"
 grep -F $'task\tlate-terminal\tterminal\tterminal receipt recorded\t' "$SNAPSHOT" >/dev/null \
@@ -123,6 +128,12 @@ grep -F $'\tpost-deadline\tmissed-receipt-deadline\tobtain the declared receipt 
 grep -F $'\tmissing-process\tmissing-process\tinspect or relaunch the recorded direct-report process' \
   "$HOME_DIR/state/.firstmate-supervisor.escalations" >/dev/null \
   || fail "missing process did not produce an actionable durable escalation"
+grep -F $'\tbusy-dead-pid\tmissing-process\tinspect or relaunch the recorded direct-report process' \
+  "$HOME_DIR/state/.firstmate-supervisor.escalations" >/dev/null \
+  || fail "busy pane suppressed dead-PID escalation"
+grep -F $'\tunreadable-after-deadline\tmissing-process\tinspect or relaunch the recorded direct-report process' \
+  "$HOME_DIR/state/.firstmate-supervisor.escalations" >/dev/null \
+  || fail "unreadable pane suppressed dead-PID escalation"
 grep -F $'\tunreadable-after-deadline\tmissed-receipt-deadline\tobtain the declared receipt or investigate the direct report' \
   "$HOME_DIR/state/.firstmate-supervisor.escalations" >/dev/null \
   || fail "unreadable pane suppressed missed-receipt escalation"
@@ -182,6 +193,22 @@ printf '%s\n' "$failed_retry" \
   || fail "failed retry retained its PID receipt"
 [ ! -d "$FAILED_HOME/state/.firstmate-supervisor.lock" ] \
   || fail "failed retry retained its ownership lock"
+
+DEFAULT_HOME="$TMP_ROOT/default-home"
+DEFAULT_BOARD="$TMP_ROOT/default-board"
+mkdir -p "$DEFAULT_HOME/state" "$DEFAULT_BOARD"
+run_supervisor_home "$DEFAULT_HOME" "$DEFAULT_BOARD" start >/dev/null \
+  || fail "default-interval supervisor start failed"
+default_first_pid=$(cat "$DEFAULT_HOME/state/.firstmate-supervisor.pid" 2>/dev/null || true)
+default_restart_started=$(date +%s)
+run_supervisor_home "$DEFAULT_HOME" "$DEFAULT_BOARD" restart >/dev/null \
+  || fail "default-interval supervisor restart exceeded its stop budget"
+default_restart_elapsed=$(( $(date +%s) - default_restart_started ))
+default_second_pid=$(cat "$DEFAULT_HOME/state/.firstmate-supervisor.pid" 2>/dev/null || true)
+[ "$default_second_pid" != "$default_first_pid" ] \
+  || fail "default-interval restart retained the old owner"
+[ "$default_restart_elapsed" -le 5 ] \
+  || fail "default-interval restart was not responsive: ${default_restart_elapsed}s"
 
 FM_SUPERVISOR_INTERVAL=1 run_supervisor start >/dev/null || fail "supervisor start failed"
 for _ in 1 2 3 4 5; do
@@ -252,6 +279,31 @@ printf '%s\n' "$third_start" | grep -F "already running: pid $second_pid" >/dev/
   || fail "idempotent start did not report the singleton owner"
 [ "$(cat "$HOME_DIR/state/.firstmate-supervisor.pid")" = "$second_pid" ] \
   || fail "idempotent start created a duplicate owner"
+
+CADENCE_HOME="$TMP_ROOT/cadence-home"
+CADENCE_BOARD="$TMP_ROOT/cadence-board"
+mkdir -p "$CADENCE_HOME/state" "$CADENCE_BOARD"
+FM_SUPERVISOR_INTERVAL=3 FM_SUPERVISOR_START_WAIT=1 \
+  run_supervisor_home "$CADENCE_HOME" "$CADENCE_BOARD" start >/dev/null \
+  || fail "cross-cadence supervisor start failed"
+cadence_pid=$(cat "$CADENCE_HOME/state/.firstmate-supervisor.pid" 2>/dev/null || true)
+grep -Fx 'interval=3' "$CADENCE_HOME/state/.firstmate-supervisor.owner" >/dev/null \
+  || fail "running owner did not persist its actual interval"
+kill -STOP "$cadence_pid" 2>/dev/null || fail "could not pause cross-cadence owner"
+printf '%s\n' "$(( $(date +%s) - 4 ))" > "$CADENCE_HOME/state/.firstmate-supervisor.heartbeat"
+cadence_start=$(FM_SUPERVISOR_INTERVAL=1 FM_SUPERVISOR_START_WAIT=1 \
+  run_supervisor_home "$CADENCE_HOME" "$CADENCE_BOARD" start) \
+  || fail "short-cadence caller rejected healthy longer-cadence owner"
+printf '%s\n' "$cadence_start" | grep -F "already running: pid $cadence_pid" >/dev/null \
+  || fail "cross-cadence health check did not retain the owner"
+printf '%s\n' "$(( $(date +%s) - 20 ))" > "$CADENCE_HOME/state/.firstmate-supervisor.heartbeat"
+if cadence_stale=$(FM_SUPERVISOR_INTERVAL=30 FM_SUPERVISOR_START_WAIT=1 \
+  run_supervisor_home "$CADENCE_HOME" "$CADENCE_BOARD" start 2>&1); then
+  fail "long-cadence caller accepted owner stale under its actual cadence"
+fi
+printf '%s\n' "$cadence_stale" | grep -F "supervisor pid $cadence_pid has no fresh heartbeat" >/dev/null \
+  || fail "stale cross-cadence owner did not report heartbeat failure: $cadence_stale"
+kill -CONT "$cadence_pid" 2>/dev/null || fail "could not resume cross-cadence owner"
 
 OTHER_HOME="$TMP_ROOT/other-home"
 OTHER_BOARD="$TMP_ROOT/other-board"

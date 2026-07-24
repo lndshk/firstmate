@@ -22,6 +22,7 @@ case "$START_WAIT" in ''|0|*[!0-9]*) START_WAIT=5 ;; esac
 LOCK="$STATE/.firstmate-supervisor.lock"
 CONTROL_LOCK="$STATE/.firstmate-supervisor.control.lock"
 PIDFILE="$STATE/.firstmate-supervisor.pid"
+OWNER_RECEIPT="$STATE/.firstmate-supervisor.owner"
 HEARTBEAT="$STATE/.firstmate-supervisor.heartbeat"
 SNAPSHOT="${FM_SUPERVISOR_SNAPSHOT:-$STATE/firstmate-supervisor.tsv}"
 ESCALATIONS="$STATE/.firstmate-supervisor.escalations"
@@ -168,7 +169,7 @@ clear_receipt_evidence() { # <id>
 classify_meta() { # <meta>; prints one TSV task row
   local meta=$1 id window pid deadline receipt receipt_file now
   local state reason process_condition="" deadline_condition="" receipt_condition=""
-  local pane_activity=idle receipt_version="" receipt_time=""
+  local pane_activity=idle pid_activity=idle receipt_version="" receipt_time=""
   id=$(basename "$meta" .meta)
   window=$(meta_field "$meta" window)
   pid=$(meta_field "$meta" process-pid)
@@ -199,27 +200,35 @@ EOF
       receipt_condition=failed-receipt
     fi
   else
-    if [ -n "$window" ] && ! pane_exists "$window"; then
-      process_condition=missing-process
-    elif [ -n "$pid" ] && ! fm_pid_alive "$pid"; then
-      process_condition=missing-process
+    if [ -n "$window" ]; then
+      if pane_exists "$window"; then
+        pane_activity=$(fm_pane_busy_state "$window")
+      else
+        pane_activity=missing
+        process_condition=missing-process
+      fi
     fi
-    if [ -n "$window" ] && [ -z "$process_condition" ]; then
-      pane_activity=$(fm_pane_busy_state "$window")
+    if [ -n "$pid" ]; then
+      if fm_pid_alive "$pid"; then
+        pid_activity=active
+      else
+        pid_activity=missing
+        process_condition=missing-process
+      fi
     fi
 
-    if [ -n "$process_condition" ]; then
-      state=stalled
-      reason="recorded process is missing"
-    elif [ "$pane_activity" = busy ]; then
+    if [ "$pane_activity" = busy ]; then
       state=active
       reason="busy pane observed"
-    elif [ -n "$pid" ] && fm_pid_alive "$pid"; then
+    elif [ "$pid_activity" = active ]; then
       state=active
       reason="declared process is alive"
     elif [ "$pane_activity" = unknown ]; then
       state=active-unverified
       reason="pane activity could not be verified"
+    elif [ -n "$process_condition" ]; then
+      state=stalled
+      reason="recorded process is missing"
     elif [ -n "$deadline_condition" ]; then
       state=stalled
       reason="receipt deadline passed"
@@ -332,19 +341,37 @@ cycle() {
 }
 
 run_loop() {
+  local owner_tmp
   mkdir -p "$STATE"
   if ! fm_lock_try_acquire "$LOCK"; then
     printf 'supervisor already running%s\n' "${FM_LOCK_HELD_PID:+ (pid $FM_LOCK_HELD_PID)}" >&2
     return 1
   fi
-  printf '%s\n' "$$" > "$PIDFILE" || {
+  owner_tmp="$OWNER_RECEIPT.tmp.$$"
+  {
+    printf 'pid=%s\n' "$$"
+    printf 'interval=%s\n' "$INTERVAL"
+  } > "$owner_tmp" && mv -f "$owner_tmp" "$OWNER_RECEIPT" || {
     fm_lock_release "$LOCK"
     return 1
   }
-  trap 'rm -f "$PIDFILE"; fm_lock_release "$LOCK"; exit 0' INT TERM EXIT
+  printf '%s\n' "$$" > "$PIDFILE" || {
+    rm -f "$OWNER_RECEIPT"
+    fm_lock_release "$LOCK"
+    return 1
+  }
+  trap 'rm -f "$PIDFILE" "$OWNER_RECEIPT"; fm_lock_release "$LOCK"; exit 0' INT TERM EXIT
   while :; do
     cycle || true
-    sleep "$INTERVAL"
+    sleep_interval
+  done
+}
+
+sleep_interval() {
+  local remaining=$INTERVAL
+  while [ "$remaining" -gt 0 ]; do
+    sleep 1
+    remaining=$((remaining - 1))
   done
 }
 
@@ -354,12 +381,22 @@ heartbeat_is_ready() { # <not-before-epoch>
   is_uint "$beat" && [ "$beat" -ge "$not_before" ]
 }
 
-heartbeat_is_healthy() {
-  local beat age max_age
+owner_interval() { # <pid>
+  local pid=$1 receipt_pid receipt_interval
+  receipt_pid=$(meta_field "$OWNER_RECEIPT" pid)
+  receipt_interval=$(meta_field "$OWNER_RECEIPT" interval)
+  [ "$receipt_pid" = "$pid" ] || return 1
+  is_uint "$receipt_interval" && [ "$receipt_interval" -gt 0 ] || return 1
+  printf '%s\n' "$receipt_interval"
+}
+
+heartbeat_is_healthy() { # <pid>
+  local pid=$1 beat age max_age receipt_interval
   beat=$(cat "$HEARTBEAT" 2>/dev/null || true)
   is_uint "$beat" || return 1
+  receipt_interval=$(owner_interval "$pid") || return 1
   age=$(( $(now_epoch) - beat ))
-  max_age=$((INTERVAL * 2 + START_WAIT))
+  max_age=$((receipt_interval * 2 + 5))
   [ "$age" -ge 0 ] && [ "$age" -le "$max_age" ]
 }
 
@@ -372,9 +409,11 @@ child_has_exited() {
 }
 
 clear_child_ownership() {
-  local child=$1 lock_pid receipt_pid
+  local child=$1 lock_pid receipt_pid owner_pid
   receipt_pid=$(cat "$PIDFILE" 2>/dev/null || true)
   [ "$receipt_pid" != "$child" ] || rm -f "$PIDFILE"
+  owner_pid=$(meta_field "$OWNER_RECEIPT" pid)
+  [ "$owner_pid" != "$child" ] || rm -f "$OWNER_RECEIPT"
   lock_pid=$(cat "$LOCK/pid" 2>/dev/null || true)
   if [ "$lock_pid" = "$child" ]; then
     rm -f "$LOCK/pid" 2>/dev/null || return 1
@@ -436,7 +475,7 @@ start_unlocked() {
   mkdir -p "$STATE"
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
   if supervisor_pid_is_ours "$pid"; then
-    if heartbeat_is_healthy; then
+    if heartbeat_is_healthy "$pid"; then
       printf 'supervisor already running: pid %s\n' "$pid"
       return 0
     fi
