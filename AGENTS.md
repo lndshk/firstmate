@@ -548,8 +548,9 @@ Every recorded direct report is exactly `active`, `active-unverified`, `stalled`
 4. Otherwise, a missing recorded pane/process or a missed receipt deadline is `stalled`.
 5. Otherwise, the report is `active-unverified` while it awaits verifiable activity or a receipt.
 
-Missing-process, missed-deadline, and failed/blocked/needs-decision receipt conditions independently append deduplicated actionable rows to `state/.firstmate-supervisor.escalations`.
+Missing-process, missed-deadline, and failed/blocked/needs-decision receipt conditions independently append deduplicated actionable rows to `state/.firstmate-supervisor.escalations` and remain visible as current escalation records in the snapshot and board until resolved.
 That keeps busy work `active`, unreadable work `active-unverified`, and a late terminal receipt `terminal` while still preserving each separate contract breach as an escalation.
+`receipt-deadline=<epoch>` is an any-receipt contract: the first durable status receipt observed at or before the unchanged epoch satisfies it permanently, and the snapshot records the satisfying receipt version.
 
 `start`, `restart`, and `status` are the only operator interface.
 The singleton lock, `state/.firstmate-supervisor.pid`, `state/.firstmate-supervisor.owner` cadence receipt, and periodically rewritten `state/.firstmate-supervisor.heartbeat` prove ownership and liveness.
@@ -763,7 +764,7 @@ After seeding, hand the new secondmate's in-scope queued items off from the main
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
 The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes or `needs-decision`/`blocked`/`done`/`failed`, because every append wakes firstmate.
 For an ordinary generated brief, replace `{OBJECTIVE}`, `{SUCCESS_EVIDENCE}`, and `{REVIEW_OR_DEADLINE_TRIGGER}` with a clear objective, evidence that Firstmate can observe to verify success, and the condition or time that requires review, escalation, or follow-up.
-When that trigger includes a receipt deadline that should be enforced mechanically, express it as an absolute Unix epoch and append `receipt-deadline=<epoch>` to the task meta immediately after a successful spawn.
+When that trigger includes an any-receipt deadline that should be enforced mechanically, express it as an absolute Unix epoch and append `receipt-deadline=<epoch>` to the task meta immediately after a successful spawn.
 Do not infer deadlines from prose, and do not add one when the brief deliberately has no timed receipt contract.
 Review the filled brief before spawning; `fm-spawn.sh` does not parse or enforce a brief schema.
 Custom or deviating briefs remain valid when they state the same objective, evidence, and follow-up contract in another shape.

@@ -166,10 +166,42 @@ clear_receipt_evidence() { # <id>
   rm -f "$STATE/.firstmate-supervisor.receipt-$(escalation_key "$1" receipt)"
 }
 
+deadline_satisfaction() { # <id> <deadline> <receipt-version> <receipt-time>; prints <version><tab><time>
+  local id=$1 deadline=$2 receipt_version=$3 receipt_time=$4 cursor
+  local saved_deadline saved_version saved_time tmp
+  cursor="$STATE/.firstmate-supervisor.deadline-$(escalation_key "$id" receipt)"
+  IFS="$(printf '\t')" read -r saved_deadline saved_version saved_time <<EOF
+$(cat "$cursor" 2>/dev/null || true)
+EOF
+  if [ "$saved_deadline" = "$deadline" ] \
+    && [ -n "$saved_version" ] \
+    && is_uint "$saved_time"; then
+    printf '%s\t%s\n' "$saved_version" "$saved_time"
+    return 0
+  fi
+  if [ -n "$receipt_version" ] \
+    && is_uint "$receipt_time" \
+    && [ "$receipt_time" -le "$deadline" ]; then
+    tmp="$cursor.tmp.$$"
+    printf '%s\t%s\t%s\n' "$deadline" "$receipt_version" "$receipt_time" > "$tmp" \
+      && mv -f "$tmp" "$cursor" || return 2
+    printf '%s\t%s\n' "$receipt_version" "$receipt_time"
+    return 0
+  fi
+  [ "$saved_deadline" = "$deadline" ] || rm -f "$cursor"
+  return 1
+}
+
+clear_deadline_satisfaction() { # <id>
+  rm -f "$STATE/.firstmate-supervisor.deadline-$(escalation_key "$1" receipt)"
+}
+
 classify_meta() { # <meta>; prints one TSV task row
   local meta=$1 id window pid deadline receipt receipt_file now
   local state reason process_condition="" deadline_condition="" receipt_condition=""
   local pane_activity=idle pid_activity=idle receipt_version="" receipt_time=""
+  local deadline_status="" deadline_version="-" deadline_time="-"
+  local deadline_action="" process_action="" receipt_action="" satisfaction
   id=$(basename "$meta" .meta)
   window=$(meta_field "$meta" window)
   pid=$(meta_field "$meta" process-pid)
@@ -187,10 +219,23 @@ EOF
   else
     clear_receipt_evidence "$id"
   fi
-  if is_uint "$deadline" && [ "$deadline" -le "$now" ]; then
-    if [ -z "$receipt" ] || ! is_uint "$receipt_time" || [ "$receipt_time" -gt "$deadline" ]; then
+  if is_uint "$deadline"; then
+    if satisfaction=$(deadline_satisfaction \
+      "$id" "$deadline" "$receipt_version" "$receipt_time"); then
+      deadline_status=satisfied
+      IFS="$(printf '\t')" read -r deadline_version deadline_time <<EOF
+$satisfaction
+EOF
+    elif [ "$?" -eq 2 ]; then
+      return 1
+    elif [ "$deadline" -le "$now" ]; then
+      deadline_status=missed
       deadline_condition=missed-receipt-deadline
+    else
+      deadline_status=pending
     fi
+  else
+    clear_deadline_satisfaction "$id"
   fi
 
   if terminal_receipt "$receipt"; then
@@ -239,20 +284,20 @@ EOF
   fi
 
   if [ -n "$process_condition" ]; then
-    escalate_once "$id" "$process_condition" \
-      "inspect or relaunch the recorded direct-report process" || return 1
+    process_action="inspect or relaunch the recorded direct-report process"
+    escalate_once "$id" "$process_condition" "$process_action" || return 1
   else
     clear_escalation "$id" missing-process
   fi
   if [ -n "$deadline_condition" ]; then
-    escalate_once "$id" "$deadline_condition" \
-      "obtain the declared receipt or investigate the direct report" || return 1
+    deadline_action="obtain the declared receipt or investigate the direct report"
+    escalate_once "$id" "$deadline_condition" "$deadline_action" || return 1
   else
     clear_escalation "$id" missed-receipt-deadline
   fi
   if [ -n "$receipt_condition" ]; then
-    escalate_once "$id" "$receipt_condition" \
-      "act on terminal receipt: $receipt" "$receipt_version" || return 1
+    receipt_action="act on terminal receipt: $receipt"
+    escalate_once "$id" "$receipt_condition" "$receipt_action" "$receipt_version" || return 1
   else
     clear_escalation "$id" failed-receipt
   fi
@@ -265,6 +310,32 @@ EOF
     "$(snapshot_field "$deadline")" \
     "$(snapshot_field "$window")" \
     "$(snapshot_field "$pid")"
+  if is_uint "$deadline"; then
+    printf 'contract\t%s\tany-receipt\t%s\t%s\t%s\t%s\n' \
+      "$(snapshot_field "$id")" \
+      "$deadline" \
+      "$deadline_status" \
+      "$deadline_version" \
+      "$deadline_time"
+  fi
+  if [ -n "$process_condition" ]; then
+    printf 'escalation\t%s\t%s\t%s\n' \
+      "$(snapshot_field "$id")" \
+      "$process_condition" \
+      "$(snapshot_field "$process_action")"
+  fi
+  if [ -n "$deadline_condition" ]; then
+    printf 'escalation\t%s\t%s\t%s\n' \
+      "$(snapshot_field "$id")" \
+      "$deadline_condition" \
+      "$(snapshot_field "$deadline_action")"
+  fi
+  if [ -n "$receipt_condition" ]; then
+    printf 'escalation\t%s\t%s\t%s\n' \
+      "$(snapshot_field "$id")" \
+      "$receipt_condition" \
+      "$(snapshot_field "$receipt_action")"
+  fi
 }
 
 wake_snapshot() { # prints: <count><tab><last-seq>
@@ -557,18 +628,26 @@ restart() {
 }
 
 status() {
-  local pid beat beat_age snapshot_age error
+  local pid beat beat_age snapshot_age error state rc
   pid=$(cat "$PIDFILE" 2>/dev/null || true)
   beat=$(cat "$HEARTBEAT" 2>/dev/null || true)
   beat_age=$(fm_path_age "$HEARTBEAT")
   snapshot_age=$(fm_path_age "$SNAPSHOT")
   error=$(cat "$ERROR" 2>/dev/null || true)
   if supervisor_pid_is_ours "$pid"; then
-    printf 'state=running pid=%s heartbeat=%s heartbeat-age=%s snapshot-age=%s' \
+    if heartbeat_is_healthy "$pid"; then
+      state=running
+      rc=0
+    else
+      state=unhealthy
+      rc=1
+    fi
+    printf 'state=%s pid=%s heartbeat=%s heartbeat-age=%s snapshot-age=%s' \
+      "$state" \
       "$pid" "${beat:-missing}" "$beat_age" "$snapshot_age"
     [ -z "$error" ] || printf ' error=%s' "$(printf '%s' "$error" | clean_field)"
     printf '\n'
-    return 0
+    return "$rc"
   fi
   printf 'state=stopped pid=%s heartbeat=%s heartbeat-age=%s snapshot-age=%s' \
     "${pid:-none}" "${beat:-missing}" "$beat_age" "$snapshot_age"

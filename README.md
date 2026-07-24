@@ -248,7 +248,7 @@ Use `bin/fm-supervisor.sh start` to ensure it is running after an upgrade or rec
 The running cadence is persisted in `state/.firstmate-supervisor.owner` and governs heartbeat health checks.
 These commands are safe to run immediately after merge; `start` is idempotent and `restart` refuses duplicate ownership.
 
-The snapshot is `state/firstmate-supervisor.tsv`, actionable conditions append to `state/.firstmate-supervisor.escalations`, and the generated board is `state/board/board.html`.
+The snapshot is `state/firstmate-supervisor.tsv`, current actionable conditions appear in its escalation records and the generated board, and their durable history appends to `state/.firstmate-supervisor.escalations`.
 The authoritative state-classification and optional receipt-deadline contract is in the [supervision protocol](AGENTS.md#8-supervision-protocol).
 The supervisor never drains Firstmate's wake queue, changes the backlog, or sends chat, so normal ownership and AFK batching/injection remain unchanged.
 

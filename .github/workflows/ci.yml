@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - run: shellcheck bin/*.sh tests/*.sh
 
   tests:
@@ -22,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - run: |
           set -eu
           for test_script in tests/*.test.sh; do
@@ -33,6 +37,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - run: |
           set -eu
           version=$(/bin/bash -c 'printf "%s.%s\n" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"')
@@ -40,13 +46,21 @@ jobs:
             echo "::error::Expected /bin/bash 3.2, found $version"
             exit 1
           }
-          /bin/bash tests/fm-supervisor.test.sh
+          bash_guard="$RUNNER_TEMP/require-system-bash"
+          printf '%s\n' \
+            'case "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}" in' \
+            '  3.2) ;;' \
+            '  *) printf "Expected Bash 3.2 child, found %s.%s\n" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" >&2; exit 97 ;;' \
+            'esac' > "$bash_guard"
+          PATH=/bin:/usr/bin BASH_ENV="$bash_guard" /bin/bash tests/fm-supervisor.test.sh
 
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Symlinks must stay intact
         run: |
           set -eu

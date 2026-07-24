@@ -68,7 +68,8 @@ task_kind() {
 }
 
 render_row() {
-  local id=$1 state=$2 reason=$3 receipt=$4 deadline=$5 window=$6 pid=$7 kind contract
+  local id=$1 state=$2 reason=$3 receipt=$4 deadline=$5 window=$6 pid=$7
+  local kind contract contract_row contract_kind contract_state contract_version contract_time
   [ "$receipt" != - ] || receipt=""
   [ "$deadline" != - ] || deadline=""
   [ "$window" != - ] || window=""
@@ -76,8 +77,20 @@ render_row() {
   kind=$(task_kind "$id")
   [ -n "$kind" ] || kind=task
   [ -n "$receipt" ] || receipt="No durable receipt yet"
+  contract_row=$(awk -F '\t' -v id="$id" \
+    '$1 == "contract" && $2 == id { print $3 "\t" $5 "\t" $6 "\t" $7; exit }' \
+    "$SNAPSHOT" 2>/dev/null)
+  IFS="$(printf '\t')" read -r contract_kind contract_state contract_version contract_time <<EOF
+$contract_row
+EOF
   if [ -n "$deadline" ]; then
-    contract="Receipt due at Unix $deadline"
+    contract="${contract_kind:-any-receipt} due at Unix $deadline"
+    if [ -n "$contract_state" ]; then
+      contract="$contract · $contract_state"
+    fi
+    if [ "$contract_state" = satisfied ] && [ -n "$contract_version" ]; then
+      contract="$contract by $contract_version at $contract_time"
+    fi
   else
     contract="No receipt deadline declared"
   fi
@@ -95,6 +108,21 @@ render_row() {
     "$(printf '%s' "$receipt" | cut -c1-220 | escape_html)" \
     "$(printf '%s' "$reason" | escape_html)" \
     "$(printf '%s' "$contract" | escape_html)"
+}
+
+render_escalation_rows() {
+  local record id condition action any=0
+  while IFS="$(printf '\t')" read -r record id condition action; do
+    [ "$record" = escalation ] || continue
+    printf '<tr><td><code>%s</code></td><td>%s</td><td>%s</td></tr>\n' \
+      "$(printf '%s' "$id" | escape_html)" \
+      "$(printf '%s' "$condition" | escape_html)" \
+      "$(printf '%s' "$action" | escape_html)"
+    any=1
+  done < "$SNAPSHOT"
+  if [ "$any" -eq 0 ]; then
+    printf '<tr><td colspan="3" class="empty">No current supervisor escalations.</td></tr>\n'
+  fi
 }
 
 render_rows() {
@@ -152,6 +180,7 @@ h1{font-size:clamp(28px,4vw,44px);line-height:1.05;letter-spacing:-.04em;margin:
 .metric strong{display:block;font:700 26px/1 ui-monospace,SFMono-Regular,Menlo,monospace;margin-bottom:7px}
 .metric span{color:var(--muted);font-size:12px}.metric.stalled strong{color:var(--red)}.metric.active strong{color:var(--green)}.metric.unverified strong{color:var(--amber)}.metric.terminal strong{color:var(--blue)}
 .panel{border:1px solid var(--line);background:rgba(17,26,36,.94);border-radius:12px;overflow:hidden}
+.panel + .panel{margin-top:14px}
 .panel-head{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:13px 15px;border-bottom:1px solid var(--line)}
 .panel-head h2{font-size:13px;margin:0;letter-spacing:.04em}.panel-head span{color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
 .table-wrap{overflow-x:auto;max-width:100%}
@@ -168,6 +197,7 @@ code,small{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}small{display
   tbody,tr,td{display:block;width:100%}tbody tr{padding:12px 14px;border-bottom:1px solid var(--line)}tbody tr:last-child{border-bottom:0}
   td,td:nth-child(n){border:0;padding:5px 0;width:100%}td::before{display:block;color:var(--muted);font:600 9px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.08em;text-transform:uppercase;margin-bottom:3px}
   td:nth-child(1)::before{content:"Task"}td:nth-child(2)::before{content:"State"}td:nth-child(3)::before{content:"Last receipt"}td:nth-child(4)::before{content:"Evidence / action"}
+  .escalations td:nth-child(2)::before{content:"Condition"}.escalations td:nth-child(3)::before{content:"Action"}
   td.empty::before{content:""}
 }
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
@@ -191,6 +221,14 @@ code,small{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}small{display
   <div class="table-wrap"><table><thead><tr><th>Task</th><th>State</th><th>Last receipt</th><th>Evidence / action</th></tr></thead><tbody>
 HTML
     render_rows
+    cat <<HTML
+  </tbody></table></div>
+</section>
+<section class="panel">
+  <div class="panel-head"><h2>Current escalation queue</h2><span>Durable · no chat injection</span></div>
+  <div class="table-wrap"><table class="escalations"><thead><tr><th>Task</th><th>Condition</th><th>Action</th></tr></thead><tbody>
+HTML
+    render_escalation_rows
     cat <<HTML
   </tbody></table></div>
 </section>

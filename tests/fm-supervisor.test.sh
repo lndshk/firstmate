@@ -87,7 +87,7 @@ write_meta unreadable-after-deadline fm-unreadable 1
 printf 'process-pid=2147483647\n' >> "$HOME_DIR/state/unreadable-after-deadline.meta"
 write_meta terminal-task fm-gone "$((now + 300))"
 write_meta late-terminal fm-gone 1
-write_meta transitioned-terminal fm-waiting "$((now + 300))"
+write_meta transitioned-terminal fm-waiting "$((now + 1))"
 write_meta failed-task fm-gone "$((now + 300))"
 write_meta missing-process fm-gone "$((now + 300))"
 printf 'done: PR https://example.test/42 checks green\n' > "$HOME_DIR/state/terminal-task.status"
@@ -189,19 +189,32 @@ grep -F $'\tlate-terminal\tmissed-receipt-deadline\tobtain the declared receipt 
 grep -F $'\tfailed-task\tfailed-receipt\tact on terminal receipt: failed: deterministic test failure' \
   "$HOME_DIR/state/.firstmate-supervisor.escalations" >/dev/null \
   || fail "failed receipt did not produce an actionable durable escalation"
+grep -F $'contract\ttransitioned-terminal\tany-receipt\t' "$SNAPSHOT" \
+  | grep -F $'\tsatisfied\t' >/dev/null \
+  || fail "on-time receipt satisfaction was not explicit in the snapshot"
+grep -F $'escalation\tpost-deadline\tmissed-receipt-deadline\tobtain the declared receipt or investigate the direct report' \
+  "$SNAPSHOT" >/dev/null \
+  || fail "current missed deadline was not represented in the snapshot"
+grep -F 'Current escalation queue' "$BOARD" >/dev/null \
+  || fail "board omitted the current escalation queue"
+grep -F 'obtain the declared receipt or investigate the direct report' "$BOARD" >/dev/null \
+  || fail "board omitted the current deadline action"
 [ -s "$HOME_DIR/state/.firstmate-supervisor.receipt-late-terminal-receipt" ] \
   || fail "late terminal receipt timing evidence was not persisted"
 
-transitioned_deadline=$(cut -f2 "$HOME_DIR/state/.firstmate-supervisor.receipt-transitioned-terminal-receipt")
-write_meta transitioned-terminal fm-waiting "$transitioned_deadline"
-sleep 1
+transitioned_version=$(cut -f2 "$HOME_DIR/state/.firstmate-supervisor.deadline-transitioned-terminal-receipt")
+sleep 2
 printf 'done: terminal receipt after deadline\n' >> "$HOME_DIR/state/transitioned-terminal.status"
 run_supervisor --once || fail "transitioned terminal receipt cycle failed"
 grep -F $'task\ttransitioned-terminal\tterminal\tterminal receipt recorded\t' "$SNAPSHOT" >/dev/null \
   || fail "transitioned terminal receipt was not terminal"
-grep -F $'\ttransitioned-terminal\tmissed-receipt-deadline\tobtain the declared receipt or investigate the direct report' \
-  "$HOME_DIR/state/.firstmate-supervisor.escalations" >/dev/null \
-  || fail "late terminal receipt inherited an earlier receipt timestamp"
+grep -F $'contract\ttransitioned-terminal\tany-receipt\t' "$SNAPSHOT" \
+  | grep -F $'\tsatisfied\t'"$transitioned_version"$'\t' >/dev/null \
+  || fail "later receipt revoked the first on-time receipt satisfaction"
+if awk -F '\t' '$1 == "escalation" && $2 == "transitioned-terminal" && $3 == "missed-receipt-deadline" { found=1 } END { exit !found }' \
+  "$SNAPSHOT"; then
+  fail "satisfied receipt contract became a current deadline escalation"
+fi
 
 printf 'needs-decision: choose deterministic recovery\n' >> "$HOME_DIR/state/failed-task.status"
 run_supervisor --once || fail "distinct failed-receipt cycle failed"
@@ -267,6 +280,11 @@ case "${first_pid:-}" in ''|*[!0-9]*) fail "start did not publish PID receipt" ;
 kill -0 "$first_pid" 2>/dev/null || fail "published supervisor PID is not alive"
 kill -STOP "$first_pid" 2>/dev/null || fail "could not pause supervisor for heartbeat-health test"
 rm -f "$HOME_DIR/state/.firstmate-supervisor.heartbeat"
+if unhealthy_status=$(run_supervisor status 2>&1); then
+  fail "status reported a heartbeat-less owner as healthy"
+fi
+printf '%s\n' "$unhealthy_status" | grep -F "state=unhealthy pid=$first_pid heartbeat=missing" >/dev/null \
+  || fail "status did not report the heartbeat-less owner as unhealthy: $unhealthy_status"
 if unhealthy_start=$(FM_SUPERVISOR_INTERVAL=1 run_supervisor start 2>&1); then
   fail "idempotent start accepted an owner without a fresh heartbeat"
 fi
