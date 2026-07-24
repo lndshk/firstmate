@@ -26,8 +26,10 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 INTERVAL="${FM_SUPERVISOR_INTERVAL:-15}"
 START_WAIT="${FM_SUPERVISOR_START_WAIT:-5}"
+TASK_LOCK_WAIT="${FM_SUPERVISOR_TASK_LOCK_WAIT:-5}"
 case "$INTERVAL" in ''|0|*[!0-9]*) INTERVAL=15 ;; esac
 case "$START_WAIT" in ''|0|*[!0-9]*) START_WAIT=5 ;; esac
+case "$TASK_LOCK_WAIT" in ''|*[!0-9]*) TASK_LOCK_WAIT=5 ;; esac
 LOCK="$STATE/.firstmate-supervisor.lock"
 CONTROL_LOCK="$STATE/.firstmate-supervisor.control.lock"
 TASK_STATE_LOCK="$STATE/.firstmate-supervisor.state.lock"
@@ -730,7 +732,33 @@ EOF
 write_heartbeat() {
   local tmp
   tmp="$HEARTBEAT.tmp.$$"
-  printf '%s\n' "$(now_epoch)" > "$tmp" && mv -f "$tmp" "$HEARTBEAT"
+  if ! printf '%s\n' "$(now_epoch)" > "$tmp" \
+    || ! mv -f "$tmp" "$HEARTBEAT"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+acquire_task_state_lock() {
+  local attempts
+  attempts=$((TASK_LOCK_WAIT * 10))
+  while ! fm_lock_try_acquire "$TASK_STATE_LOCK"; do
+    [ "$attempts" -gt 0 ] || return 1
+    sleep 0.1
+    attempts=$((attempts - 1))
+  done
+}
+
+record_retire_failure() { # <id> <condition> <action>
+  local id=$1 condition=$2 action=$3 dir tmp
+  dir=$(task_state_dir "$id") || return 1
+  mkdir -p "$dir" || return 1
+  tmp="$dir/retire-error.tmp.$$"
+  if ! printf '%s\t%s\t%s\n' "$(now_epoch)" "$condition" "$action" > "$tmp" \
+    || ! mv -f "$tmp" "$dir/retire-error"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 cleanup_task_state() { # <id>
@@ -749,21 +777,32 @@ cleanup_task_state() { # <id>
 }
 
 retire_task() { # <id>
-  local id=$1 status=0
+  local id=$1 status=0 action
   case "$id" in ''|*[!A-Za-z0-9_.-]*) return 2 ;; esac
   mkdir -p "$STATE" || return 1
-  fm_lock_acquire_wait "$TASK_STATE_LOCK"
+  if ! acquire_task_state_lock; then
+    action="retry teardown after inspecting the task-state lock at $TASK_STATE_LOCK"
+    if ! record_retire_failure "$id" task-state-lock-timeout "$action"; then
+      printf 'error: could not persist supervisor retirement failure for %s\n' \
+        "$id" >&2
+    fi
+    printf 'error: timed out waiting for supervisor task-state lock for %s; %s\n' \
+      "$id" "$action" >&2
+    return 1
+  fi
   reconcile_task_escalations "$id" || status=$?
+  if [ "$status" -eq 0 ]; then
+    cleanup_task_state "$id" || status=$?
+  fi
   if [ "$status" -eq 0 ]; then
     rm -f \
       "$STATE/$id.status" \
       "$STATE/$id.turn-ended" \
       "$STATE/$id.check.sh" \
-      "$STATE/$id.meta" \
       "$STATE/$id.pi-ext.ts" || status=$?
   fi
   if [ "$status" -eq 0 ]; then
-    cleanup_task_state "$id" || status=$?
+    rm -f "$STATE/$id.meta" || status=$?
   fi
   fm_lock_release "$TASK_STATE_LOCK"
   return "$status"
@@ -790,7 +829,11 @@ record_error() {
   { printf '%s\t%s\n' "$timestamp" "$1" > "$ERROR"; } 2>/dev/null || true
 }
 
-clear_error() {
+clear_error_state() {
+  rm -f "$ERROR"
+}
+
+record_recovery() {
   local previous_condition timestamp
   previous_condition=$(last_log_condition) || return 1
   case "$previous_condition" in
@@ -799,7 +842,18 @@ clear_error() {
       printf '%s\trecovered\n' "$timestamp" >> "$LOG" 2>/dev/null || return 1
       ;;
   esac
-  rm -f "$ERROR"
+}
+
+error_state_is_clear() {
+  local previous_condition
+  if [ -e "$ERROR" ] || [ -L "$ERROR" ]; then
+    return 1
+  fi
+  previous_condition=$(last_log_condition) || return 1
+  case "$previous_condition" in
+    *-failed) return 1 ;;
+  esac
+  return 0
 }
 
 cycle_locked() {
@@ -819,12 +873,16 @@ cycle_locked() {
     record_error board-refresh-failed
     return 1
   fi
-  if ! clear_error; then
+  if ! clear_error_state; then
     record_error error-clear-failed
     return 1
   fi
   if ! write_heartbeat; then
     record_error heartbeat-write-failed
+    return 1
+  fi
+  if ! record_recovery; then
+    record_error recovery-log-failed
     return 1
   fi
   return 0
@@ -833,7 +891,10 @@ cycle_locked() {
 cycle() {
   local status
   mkdir -p "$STATE" || return 1
-  fm_lock_acquire_wait "$TASK_STATE_LOCK"
+  if ! acquire_task_state_lock; then
+    record_error task-state-lock-failed
+    return 1
+  fi
   cycle_locked
   status=$?
   fm_lock_release "$TASK_STATE_LOCK"
@@ -892,7 +953,8 @@ sleep_interval() {
 heartbeat_is_ready() { # <not-before-epoch>
   local not_before=$1 beat
   beat=$(cat "$HEARTBEAT" 2>/dev/null || true)
-  is_uint "$beat" && [ "$beat" -ge "$not_before" ]
+  is_uint "$beat" && [ "$beat" -ge "$not_before" ] \
+    && error_state_is_clear
 }
 
 owner_interval() { # <pid>
@@ -911,7 +973,8 @@ heartbeat_is_healthy() { # <pid>
   receipt_interval=$(owner_interval "$pid") || return 1
   age=$(( $(now_epoch) - beat ))
   max_age=$((receipt_interval * 2 + 5))
-  [ "$age" -ge 0 ] && [ "$age" -le "$max_age" ]
+  [ "$age" -ge 0 ] && [ "$age" -le "$max_age" ] \
+    && error_state_is_clear
 }
 
 child_has_exited() {

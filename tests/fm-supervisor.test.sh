@@ -8,7 +8,6 @@ FAKEBIN="$TMP_ROOT/bin"
 BOARD_DIR="$TMP_ROOT/board"
 TMUX_LOG="$TMP_ROOT/tmux.log"
 SLEEP_LOG="$TMP_ROOT/sleep.log"
-LOCKED_RETIRE_PID=
 mkdir -p "$HOME_DIR/state" "$FAKEBIN" "$BOARD_DIR"
 
 fail() {
@@ -18,7 +17,6 @@ fail() {
 
 cleanup() {
   local pid_file pid
-  [ -z "$LOCKED_RETIRE_PID" ] || kill "$LOCKED_RETIRE_PID" 2>/dev/null || true
   for pid_file in "$TMP_ROOT"/*/state/.firstmate-supervisor.pid; do
     [ -f "$pid_file" ] || continue
     pid=$(cat "$pid_file" 2>/dev/null || true)
@@ -85,6 +83,11 @@ if [ "${FM_TEST_FAIL_ESCALATION_MARKER:-0}" = 1 ]; then
     *".firstmate-supervisor.task-"*"/escalated-"*) exit 1 ;;
   esac
 fi
+if [ "${FM_TEST_FAIL_HEARTBEAT:-0}" = 1 ]; then
+  case "$target" in
+    *".firstmate-supervisor.heartbeat") exit 1 ;;
+  esac
+fi
 exec /bin/mv "$@"
 SH
 chmod +x "$FAKEBIN/mv"
@@ -102,6 +105,13 @@ if [ "${FM_TEST_FAIL_RECEIPT_CLEAR:-0}" = 1 ]; then
   for arg in "$@"; do
     case "$arg" in
       *".firstmate-supervisor.task-"*"/receipt") exit 1 ;;
+    esac
+  done
+fi
+if [ "${FM_TEST_FAIL_TASK_STATE_CLEAR:-0}" = 1 ]; then
+  for arg in "$@"; do
+    case "$arg" in
+      *".firstmate-supervisor.task-"*) exit 1 ;;
     esac
   done
 fi
@@ -438,10 +448,45 @@ if FM_TEST_FAIL_ERROR_CLEAR=1 \
 fi
 [ ! -e "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.heartbeat" ] \
   || fail "error-state removal failure published a heartbeat"
+if FM_TEST_FAIL_HEARTBEAT=1 \
+  run_supervisor_home "$ERROR_CLEAR_HOME" "$ERROR_CLEAR_BOARD" --once >/dev/null 2>&1; then
+  fail "heartbeat persistence failure produced a successful cycle"
+fi
+[ "$(awk -F '\t' '$2 == "recovered" { count++ } END { print count + 0 }' \
+  "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.log")" -eq 0 ] \
+  || fail "recovery was recorded before the complete cycle succeeded"
+[ ! -e "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.heartbeat" ] \
+  || fail "failed recovery cycle retained a readiness heartbeat"
 run_supervisor_home "$ERROR_CLEAR_HOME" "$ERROR_CLEAR_BOARD" --once \
   || fail "supervisor did not recover after error-state removal failure"
 [ -s "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.heartbeat" ] \
   || fail "successful recovery did not publish its final heartbeat"
+[ "$(awk -F '\t' '$2 == "recovered" { count++ } END { print count + 0 }' \
+  "$ERROR_CLEAR_HOME/state/.firstmate-supervisor.log")" -eq 1 ] \
+  || fail "successful complete cycle did not record one recovery"
+
+ORDER_HOME="$TMP_ROOT/order-home"
+ORDER_BOARD="$TMP_ROOT/order-board"
+mkdir -p "$ORDER_HOME/state" "$ORDER_BOARD"
+{
+  printf 'window=\n'
+  printf 'kind=ship\n'
+} > "$ORDER_HOME/state/order-task.meta"
+printf 'done: complete\n' > "$ORDER_HOME/state/order-task.status"
+mkdir -p "$(task_state_dir "$ORDER_HOME" order-task)"
+printf 'stale receipt evidence\n' > "$(task_state_dir "$ORDER_HOME" order-task)/receipt"
+if FM_TEST_FAIL_TASK_STATE_CLEAR=1 \
+  run_supervisor_home "$ORDER_HOME" "$ORDER_BOARD" --retire-task order-task >/dev/null 2>&1; then
+  fail "task retirement succeeded when supervisor state cleanup failed"
+fi
+[ -e "$ORDER_HOME/state/order-task.meta" ] \
+  || fail "task retirement deleted metadata before supervisor state cleanup succeeded"
+[ -e "$(task_state_dir "$ORDER_HOME" order-task)/receipt" ] \
+  || fail "failed supervisor state cleanup removed its retry evidence"
+run_supervisor_home "$ORDER_HOME" "$ORDER_BOARD" --retire-task order-task \
+  || fail "task retirement did not recover after state cleanup failure"
+[ ! -e "$ORDER_HOME/state/order-task.meta" ] \
+  || fail "successful retirement retained its metadata retry anchor"
 
 LOCKED_HOME="$TMP_ROOT/locked-home"
 LOCKED_BOARD="$TMP_ROOT/locked-board"
@@ -453,18 +498,21 @@ printf '%s\n' "$$" > "$LOCKED_HOME/state/.firstmate-supervisor.state.lock/pid"
 } > "$LOCKED_HOME/state/locked-task.meta"
 mkdir -p "$(task_state_dir "$LOCKED_HOME" locked-task)"
 printf 'stale receipt evidence\n' > "$(task_state_dir "$LOCKED_HOME" locked-task)/receipt"
-run_supervisor_home "$LOCKED_HOME" "$LOCKED_BOARD" --retire-task locked-task &
-locked_retire_pid=$!
-LOCKED_RETIRE_PID=$locked_retire_pid
-/bin/sleep 1
-kill -0 "$locked_retire_pid" 2>/dev/null \
-  || fail "task retirement did not wait for the live cycle-state lock"
+if locked_retire_error=$(FM_SUPERVISOR_TASK_LOCK_WAIT=1 \
+  run_supervisor_home "$LOCKED_HOME" "$LOCKED_BOARD" --retire-task locked-task 2>&1); then
+  fail "task retirement waited indefinitely for the live cycle-state lock"
+fi
+printf '%s\n' "$locked_retire_error" \
+  | grep -F 'retry teardown after inspecting the task-state lock' >/dev/null \
+  || fail "bounded task retirement omitted actionable lock recovery"
 [ -e "$LOCKED_HOME/state/locked-task.meta" ] \
-  || fail "task retirement mutated metadata before acquiring the cycle-state lock"
+  || fail "timed-out task retirement removed its metadata retry anchor"
+[ -s "$(task_state_dir "$LOCKED_HOME" locked-task)/retire-error" ] \
+  || fail "timed-out task retirement omitted durable failure evidence"
 rm -f "$LOCKED_HOME/state/.firstmate-supervisor.state.lock/pid"
 rmdir "$LOCKED_HOME/state/.firstmate-supervisor.state.lock"
-wait "$locked_retire_pid" || fail "locked task retirement failed after lock release"
-LOCKED_RETIRE_PID=
+run_supervisor_home "$LOCKED_HOME" "$LOCKED_BOARD" --retire-task locked-task \
+  || fail "locked task retirement failed after bounded retry"
 [ ! -e "$LOCKED_HOME/state/locked-task.meta" ] \
   || fail "task retirement retained metadata after acquiring the cycle-state lock"
 [ ! -e "$(task_state_dir "$LOCKED_HOME" locked-task)" ] \
