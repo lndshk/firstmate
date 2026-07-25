@@ -537,6 +537,23 @@ EOF
   esac
 }
 
+select_orphan_task_state() {
+  local id=$1 generation=$2 dir
+  dir=$(task_state_dir "$id" "$generation") || return 1
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+    [ -f "$dir/id" ] && [ ! -L "$dir/id" ] || return 1
+    [ -f "$dir/generation" ] && [ ! -L "$dir/generation" ] || return 1
+    [ "$(cat "$dir/id")" = "$id" ] || return 1
+    [ "$(cat "$dir/generation")" = "$generation" ] || return 1
+  else
+    mkdir "$dir" || return 1
+    write_task_identity "$dir" "$id" "$generation" || return 1
+  fi
+  CURRENT_TASK_DIR=$dir
+  CURRENT_TASK_GENERATION=$generation
+}
+
 reconcile_orphan_teardown_markers() {
   local marker id record format generation owner_pid owner_identity progress
   local marker_state marker_condition meta current current_identity tab action
@@ -568,13 +585,7 @@ EOF
         if [ -n "$current_identity" ] && [ "$current_identity" = "$owner_identity" ]; then
           continue
         fi
-        CURRENT_TASK_GENERATION=${generation#generation:}
-        CURRENT_TASK_DIR=$(task_state_dir "$id" "$CURRENT_TASK_GENERATION") || return 1
-        if [ ! -d "$CURRENT_TASK_DIR" ]; then
-          mkdir "$CURRENT_TASK_DIR" || return 1
-          write_task_identity \
-            "$CURRENT_TASK_DIR" "$id" "$CURRENT_TASK_GENERATION" || return 1
-        fi
+        select_orphan_task_state "$id" "${generation#generation:}" || return 1
         action="inspect resources left by the exited teardown owner"
         escalate_once "$id" teardown-owner-missing "$action" "$generation" || return 1
         printf 'escalation\t%s\tteardown-owner-missing\t%s\n' \
@@ -582,13 +593,7 @@ EOF
         rm -f "$marker" || return 1
         ;;
       failed)
-        CURRENT_TASK_GENERATION=${generation#generation:}
-        CURRENT_TASK_DIR=$(task_state_dir "$id" "$CURRENT_TASK_GENERATION") || return 1
-        if [ ! -d "$CURRENT_TASK_DIR" ]; then
-          mkdir "$CURRENT_TASK_DIR" || return 1
-          write_task_identity \
-            "$CURRENT_TASK_DIR" "$id" "$CURRENT_TASK_GENERATION" || return 1
-        fi
+        select_orphan_task_state "$id" "${generation#generation:}" || return 1
         action="inspect resources left by the failed teardown"
         escalate_once "$id" teardown-failed "$action" "$generation" || return 1
         printf 'escalation\t%s\tteardown-failed\t%s\n' \

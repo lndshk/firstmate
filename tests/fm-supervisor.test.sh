@@ -481,6 +481,48 @@ run_supervisor --once || fail "completed orphan marker reclamation cycle failed"
 [ ! -e "$HOME_DIR/state/.firstmate-supervisor.teardown-orphan-complete" ] \
   || fail "provably completed orphan marker was not reclaimed"
 
+ORPHAN_STATE_HOME="$TMP_ROOT/orphan-state-home"
+ORPHAN_STATE_BOARD="$TMP_ROOT/orphan-state-board"
+ORPHAN_STATE_TARGET="$ORPHAN_STATE_HOME/target"
+mkdir -p "$ORPHAN_STATE_HOME/state" "$ORPHAN_STATE_BOARD" "$ORPHAN_STATE_TARGET"
+orphan_state_generation=orphan-state-generation
+orphan_state_key=$(
+  printf '%s\t%s' orphan-state "$orphan_state_generation" \
+    | cksum | awk '{ print $1 "-" $2 }'
+)
+orphan_state_dir="$ORPHAN_STATE_HOME/state/.firstmate-supervisor.task-orphan-state-$orphan_state_key"
+ln -s "$ORPHAN_STATE_TARGET" "$orphan_state_dir"
+printf 'v1\tgeneration:%s\t2147483647\t0-0\t%s\tactive\t-\n' \
+  "$orphan_state_generation" "$(date +%s)" \
+  > "$ORPHAN_STATE_HOME/state/.firstmate-supervisor.teardown-orphan-state"
+if run_supervisor_home "$ORPHAN_STATE_HOME" "$ORPHAN_STATE_BOARD" --once >/dev/null 2>&1; then
+  fail "orphan teardown wrote through a symlinked task-state directory"
+fi
+if find "$ORPHAN_STATE_TARGET" -mindepth 1 -print -quit | grep . >/dev/null; then
+  fail "orphan teardown changed the symlink target"
+fi
+[ -f "$ORPHAN_STATE_HOME/state/.firstmate-supervisor.teardown-orphan-state" ] \
+  || fail "unsafe orphan task state consumed teardown evidence"
+rm -f "$orphan_state_dir"
+mkdir "$orphan_state_dir"
+printf 'other-task\n' > "$orphan_state_dir/id"
+printf '%s\n' "$orphan_state_generation" > "$orphan_state_dir/generation"
+if run_supervisor_home "$ORPHAN_STATE_HOME" "$ORPHAN_STATE_BOARD" --once >/dev/null 2>&1; then
+  fail "orphan teardown accepted mismatched task-state identity"
+fi
+[ ! -e "$orphan_state_dir/escalated-teardown-owner-missing-condition" ] \
+  || fail "orphan teardown wrote through mismatched task state"
+[ -f "$ORPHAN_STATE_HOME/state/.firstmate-supervisor.teardown-orphan-state" ] \
+  || fail "mismatched orphan task state consumed teardown evidence"
+printf 'orphan-state\n' > "$orphan_state_dir/id"
+run_supervisor_home "$ORPHAN_STATE_HOME" "$ORPHAN_STATE_BOARD" --once \
+  || fail "validated orphan task-state reconciliation failed"
+[ ! -e "$ORPHAN_STATE_HOME/state/.firstmate-supervisor.teardown-orphan-state" ] \
+  || fail "validated orphan teardown evidence was not consumed"
+grep -F $'\torphan-state\tteardown-owner-missing\t' \
+  "$ORPHAN_STATE_HOME/state/.firstmate-supervisor.escalations" >/dev/null \
+  || fail "validated orphan teardown did not escalate"
+
 FAILED_HOME="$TMP_ROOT/failed-home"
 FAILED_BOARD="$TMP_ROOT/failed-board"
 mkdir -p "$FAILED_HOME/state"
