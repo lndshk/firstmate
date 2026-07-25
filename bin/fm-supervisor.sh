@@ -332,6 +332,7 @@ cleanup_task_state_dir() { # <dir>
     "$dir/id" \
     "$dir/generation" \
     "$dir/status-start-line" \
+    "$dir/deadline-boundary" \
     "$dir/receipt" \
     "$dir/deadline" \
     "$dir"/escalated-* \

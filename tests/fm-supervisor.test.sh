@@ -437,6 +437,12 @@ grep -F $'contract\tlegacy-future-deadline\tany-receipt\t' "$SNAPSHOT" \
   || fail "future legacy deadline remained quarantined after baseline"
 grep -F $'escalation\tlegacy-future-deadline\tmissed-receipt-deadline\t' \
   "$SNAPSHOT" >/dev/null || fail "future legacy missed deadline was not escalated"
+legacy_deadline_dir=$(task_state_dir_for "$HOME_DIR" legacy-future-deadline) \
+  || fail "future legacy deadline boundary state was not created"
+rm -f "$HOME_DIR/state/legacy-future-deadline.meta"
+run_supervisor --once || fail "legacy deadline-boundary orphan reclamation cycle failed"
+[ ! -e "$legacy_deadline_dir" ] \
+  || fail "legacy deadline boundary blocked exact-generation reclamation"
 
 write_meta legacy-boundary-teardown fm-gone "$((now + 300))"
 sed '/^status-start-line=/d' "$HOME_DIR/state/legacy-boundary-teardown.meta" \
