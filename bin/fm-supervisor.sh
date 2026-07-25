@@ -538,14 +538,23 @@ EOF
 }
 
 select_orphan_task_state() {
-  local id=$1 generation=$2 dir
+  local id=$1 generation=$2 dir saved_id="" saved_generation=""
   dir=$(task_state_dir "$id" "$generation") || return 1
   if [ -e "$dir" ] || [ -L "$dir" ]; then
     [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-    [ -f "$dir/id" ] && [ ! -L "$dir/id" ] || return 1
-    [ -f "$dir/generation" ] && [ ! -L "$dir/generation" ] || return 1
-    [ "$(cat "$dir/id")" = "$id" ] || return 1
-    [ "$(cat "$dir/generation")" = "$generation" ] || return 1
+    if [ -e "$dir/id" ] || [ -L "$dir/id" ]; then
+      [ -f "$dir/id" ] && [ ! -L "$dir/id" ] || return 1
+      saved_id=$(cat "$dir/id") || return 1
+    fi
+    if [ -e "$dir/generation" ] || [ -L "$dir/generation" ]; then
+      [ -f "$dir/generation" ] && [ ! -L "$dir/generation" ] || return 1
+      saved_generation=$(cat "$dir/generation") || return 1
+    fi
+    [ -z "$saved_id" ] || [ "$saved_id" = "$id" ] || return 1
+    [ -z "$saved_generation" ] || [ "$saved_generation" = "$generation" ] || return 1
+    if [ "$saved_id" != "$id" ] || [ "$saved_generation" != "$generation" ]; then
+      write_task_identity "$dir" "$id" "$generation" || return 1
+    fi
   else
     mkdir "$dir" || return 1
     write_task_identity "$dir" "$id" "$generation" || return 1

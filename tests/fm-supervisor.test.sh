@@ -515,8 +515,11 @@ fi
 [ -f "$ORPHAN_STATE_HOME/state/.firstmate-supervisor.teardown-orphan-state" ] \
   || fail "mismatched orphan task state consumed teardown evidence"
 printf 'orphan-state\n' > "$orphan_state_dir/id"
+rm -f "$orphan_state_dir/generation"
 run_supervisor_home "$ORPHAN_STATE_HOME" "$ORPHAN_STATE_BOARD" --once \
-  || fail "validated orphan task-state reconciliation failed"
+  || fail "partial orphan task-state repair failed"
+[ ! -e "$orphan_state_dir" ] \
+  || fail "repaired orphan task state was not reclaimed"
 [ ! -e "$ORPHAN_STATE_HOME/state/.firstmate-supervisor.teardown-orphan-state" ] \
   || fail "validated orphan teardown evidence was not consumed"
 grep -F $'\torphan-state\tteardown-owner-missing\t' \
