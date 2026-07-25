@@ -315,6 +315,23 @@ fi
 rm -f "$HOME_DIR/state/cursor-write.meta" "$HOME_DIR/state/cursor-write.status"
 run_supervisor --once || fail "supervisor did not recover after receipt cursor write failure"
 
+write_meta partial-identity fm-waiting "$((now + 300))"
+partial_generation=test-partial-identity
+partial_key=$(printf '%s\t%s' partial-identity "$partial_generation" | cksum | awk '{ print $1 "-" $2 }')
+partial_dir="$HOME_DIR/state/.firstmate-supervisor.task-partial-identity-$partial_key"
+mkdir "$partial_dir"
+printf 'partial-identity\n' > "$partial_dir/id"
+run_supervisor --once || fail "partial task identity repair cycle failed"
+[ "$(cat "$partial_dir/generation" 2>/dev/null || true)" = "$partial_generation" ] \
+  || fail "partial task identity was not repaired from matching metadata"
+rm -f "$HOME_DIR/state/partial-identity.meta"
+orphan_partial="$HOME_DIR/state/.firstmate-supervisor.task-interrupted-identity"
+mkdir "$orphan_partial"
+printf 'interrupted\n' > "$orphan_partial/id.tmp.123"
+run_supervisor --once || fail "orphan partial task identity reclamation cycle failed"
+[ ! -e "$partial_dir" ] || fail "repaired task state was not reclaimed after metadata disappeared"
+[ ! -e "$orphan_partial" ] || fail "orphan partial task identity wedged reclamation"
+
 transitioned_deadline_cursor=$(task_state_file "$HOME_DIR" transitioned-terminal deadline) \
   || fail "transitioned task deadline state was not created"
 transitioned_version=$(cut -f2 "$transitioned_deadline_cursor")
@@ -388,8 +405,29 @@ grep -F $'task\tteardown-live\tactive\tteardown owner is live\t' "$SNAPSHOT" >/d
 [ ! -d "$HOME_DIR/state/.firstmate-supervisor.teardown-locks" ] \
   || fail "supervisor created the obsolete teardown marker-lock subsystem"
 
+printf 'v1\tgeneration:test-teardown-live\t%s\t%s\t%s\tfailed\tcommand-failed\n' \
+  "$$" "$test_owner_identity" "$(date +%s)" \
+  > "$HOME_DIR/state/.firstmate-supervisor.teardown-teardown-live"
+run_supervisor --once || fail "first teardown failure cycle failed"
+teardown_retry_count=$(awk -F '\t' \
+  '$2 == "teardown-live" && $3 == "teardown-command-failed" { count++ } END { print count + 0 }' \
+  "$HOME_DIR/state/.firstmate-supervisor.escalations")
+[ "$teardown_retry_count" -eq 1 ] || fail "first teardown failure was not escalated once"
+printf 'v1\tgeneration:test-teardown-live\t%s\t%s\t%s\tactive\t-\n' \
+  "$$" "$test_owner_identity" "$(date +%s)" \
+  > "$HOME_DIR/state/.firstmate-supervisor.teardown-teardown-live"
+run_supervisor --once || fail "resolved teardown failure cycle failed"
+printf 'v1\tgeneration:test-teardown-live\t%s\t%s\t%s\tfailed\tcommand-failed\n' \
+  "$$" "$test_owner_identity" "$(date +%s)" \
+  > "$HOME_DIR/state/.firstmate-supervisor.teardown-teardown-live"
+run_supervisor --once || fail "retried teardown failure cycle failed"
+teardown_retry_count=$(awk -F '\t' \
+  '$2 == "teardown-live" && $3 == "teardown-command-failed" { count++ } END { print count + 0 }' \
+  "$HOME_DIR/state/.firstmate-supervisor.escalations")
+[ "$teardown_retry_count" -eq 2 ] || fail "retried teardown failure lost its escalation wake"
+
 write_meta teardown-dead fm-gone "$((now + 300))"
-printf 'v1\tgeneration:test-teardown-dead\t2147483647\tdead\t%s\tactive\t-\n' \
+printf 'v1\tgeneration:test-teardown-dead\t2147483647\t0-0\t%s\tactive\t-\n' \
   "$(date +%s)" > "$HOME_DIR/state/.firstmate-supervisor.teardown-teardown-dead"
 run_supervisor --once || fail "dead teardown observation cycle failed"
 grep -F $'task\tteardown-dead\tstalled\tteardown owner is missing\t' "$SNAPSHOT" >/dev/null \
@@ -419,7 +457,25 @@ grep -Fx 'temporary partial marker' \
   "$HOME_DIR/state/.firstmate-supervisor.teardown-partial.tmp.123" >/dev/null \
   || fail "supervisor consumed a temporary teardown artifact"
 
-printf 'v1\tgeneration:orphan-complete\t2147483647\tdead\t%s\tcomplete\t-\n' \
+write_meta malformed-owner fm-gone "$((now + 300))"
+printf 'v1\tgeneration:test-malformed-owner\tnot-a-pid\t0-0\t%s\tactive\t-\n' \
+  "$(date +%s)" > "$HOME_DIR/state/.firstmate-supervisor.teardown-malformed-owner"
+write_meta malformed-fields fm-gone "$((now + 300))"
+printf 'v1\tgeneration:test-malformed-fields\t2147483647\t0-0\t%s\tactive\t-\textra\n' \
+  "$(date +%s)" > "$HOME_DIR/state/.firstmate-supervisor.teardown-malformed-fields"
+write_meta malformed-lines fm-gone "$((now + 300))"
+printf 'v1\tgeneration:test-malformed-lines\t2147483647\t0-0\t%s\tactive\t-\nextra\n' \
+  "$(date +%s)" > "$HOME_DIR/state/.firstmate-supervisor.teardown-malformed-lines"
+run_supervisor --once || fail "malformed teardown marker quarantine cycle failed"
+for malformed_id in malformed-owner malformed-fields malformed-lines; do
+  grep -F "task	$malformed_id	stalled	recorded process is missing	" "$SNAPSHOT" >/dev/null \
+    || fail "malformed teardown marker influenced $malformed_id classification"
+  if grep -F "escalation	$malformed_id	teardown-" "$SNAPSHOT" >/dev/null; then
+    fail "malformed teardown marker produced teardown advice for $malformed_id"
+  fi
+done
+
+printf 'v1\tgeneration:orphan-complete\t2147483647\t0-0\t%s\tcomplete\t-\n' \
   "$(date +%s)" > "$HOME_DIR/state/.firstmate-supervisor.teardown-orphan-complete"
 run_supervisor --once || fail "completed orphan marker reclamation cycle failed"
 [ ! -e "$HOME_DIR/state/.firstmate-supervisor.teardown-orphan-complete" ] \
@@ -477,6 +533,16 @@ for _ in 1 2 3 4 5; do
 done
 case "${first_pid:-}" in ''|*[!0-9]*) fail "start did not publish PID receipt" ;; esac
 kill -0 "$first_pid" 2>/dev/null || fail "published supervisor PID is not alive"
+if once_while_running=$(run_supervisor --once 2>&1); then
+  fail "internal once cycle overlapped the live supervisor owner"
+fi
+printf '%s\n' "$once_while_running" \
+  | grep -F 'refusing --once while the supervisor owner is running' >/dev/null \
+  || fail "overlapping once cycle did not identify the live owner"
+[ "$(cat "$HOME_DIR/state/.firstmate-supervisor.pid")" = "$first_pid" ] \
+  || fail "refused once cycle disturbed the owner PID receipt"
+[ "$(cat "$HOME_DIR/state/.firstmate-supervisor.lock/pid")" = "$first_pid" ] \
+  || fail "refused once cycle disturbed the owner runtime lock"
 kill -STOP "$first_pid" 2>/dev/null || fail "could not pause supervisor for heartbeat-health test"
 rm -f "$HOME_DIR/state/.firstmate-supervisor.heartbeat"
 if unhealthy_status=$(run_supervisor status 2>&1); then

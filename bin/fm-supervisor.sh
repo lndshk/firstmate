@@ -194,6 +194,26 @@ write_task_identity() { # <dir> <id> <generation>
   fi
 }
 
+repair_task_identity_from_meta() { # <dir>
+  local dir=$1 meta id generation expected saved_id saved_generation
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    case "$id" in ''|*[!A-Za-z0-9_.-]*) continue ;; esac
+    generation=$(task_generation "$meta" 2>/dev/null || true)
+    [ -n "$generation" ] || continue
+    expected=$(task_state_dir "$id" "$generation") || return 1
+    [ "$expected" = "$dir" ] || continue
+    saved_id=$(read_optional_file "$dir/id") || return 1
+    saved_generation=$(read_optional_file "$dir/generation") || return 1
+    [ -z "$saved_id" ] || [ "$saved_id" = "$id" ] || return 1
+    [ -z "$saved_generation" ] || [ "$saved_generation" = "$generation" ] || return 1
+    write_task_identity "$dir" "$id" "$generation"
+    return
+  done
+  return 1
+}
+
 select_task_state() { # <meta> <id>
   local generation dir saved_id saved_generation
   generation=$(task_generation "$1") || return 1
@@ -243,8 +263,22 @@ garbage_collect_task_state() {
     [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
     id=$(read_optional_file "$dir/id") || return 1
     generation=$(read_optional_file "$dir/generation") || return 1
-    case "$id" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
-    [ -n "$generation" ] || return 1
+    case "$id" in
+      ''|*[!A-Za-z0-9_.-]*)
+        if repair_task_identity_from_meta "$dir"; then
+          continue
+        fi
+        cleanup_task_state_dir "$dir" || return 1
+        continue
+        ;;
+    esac
+    if [ -z "$generation" ]; then
+      if repair_task_identity_from_meta "$dir"; then
+        continue
+      fi
+      cleanup_task_state_dir "$dir" || return 1
+      continue
+    fi
     meta="$STATE/$id.meta"
     [ ! -e "$meta" ] && [ ! -L "$meta" ] || continue
     cleanup_task_state_dir "$dir" || return 1
@@ -301,6 +335,20 @@ escalate_once() { # <id> <condition> <action> [evidence]
 clear_escalation() { # <id> <condition>
   [ -n "$CURRENT_TASK_DIR" ] || return 1
   rm -f "$CURRENT_TASK_DIR/escalated-$(escalation_key "$2" condition)"
+}
+
+clear_other_teardown_escalations() { # [current-condition]
+  local current=${1:-} keep="" marker
+  [ -n "$CURRENT_TASK_DIR" ] || return 1
+  if [ -n "$current" ] && [ "$current" != - ]; then
+    keep="$CURRENT_TASK_DIR/escalated-$(escalation_key "$current" condition)"
+  fi
+  for marker in "$CURRENT_TASK_DIR"/escalated-teardown-*; do
+    [ -e "$marker" ] || [ -L "$marker" ] || continue
+    [ "$marker" != "$keep" ] || continue
+    [ -f "$marker" ] || [ -L "$marker" ] || return 1
+    rm -f "$marker" || return 1
+  done
 }
 
 receipt_evidence() { # <id> <status-file> <raw-receipt> <line>; prints <version><tab><time>
@@ -407,22 +455,59 @@ clear_deadline_satisfaction() { # <id>
   rm -f "$CURRENT_TASK_DIR/deadline"
 }
 
+validated_teardown_record() { # <marker>
+  local marker=$1 record format generation owner_pid owner_identity progress
+  local marker_state marker_condition identity_checksum identity_size tab extra
+  record=$(awk -F '\t' '
+    NR == 1 && NF == 7 { record=$0; next }
+    { invalid=1 }
+    END {
+      if (NR != 1 || invalid) exit 1
+      print record
+    }
+  ' "$marker") || return 1
+  tab=$(printf '\t')
+  IFS="$tab" read -r \
+    format generation owner_pid owner_identity progress marker_state marker_condition extra <<EOF
+$record
+EOF
+  [ "$format" = v1 ] || return 1
+  case "$generation" in generation:?*) ;; *) return 1 ;; esac
+  is_uint "$owner_pid" || return 1
+  case "$owner_identity" in
+    *-*)
+      identity_checksum=${owner_identity%-*}
+      identity_size=${owner_identity#*-}
+      ;;
+    *) return 1 ;;
+  esac
+  is_uint "$identity_checksum" && is_uint "$identity_size" || return 1
+  is_epoch "$progress" || return 1
+  case "$marker_condition" in
+    ''|*[!A-Za-z0-9_.-]*) return 1 ;;
+  esac
+  case "$marker_state" in
+    active|complete) [ "$marker_condition" = - ] || return 1 ;;
+    failed) [ "$marker_condition" != - ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  [ -z "$extra" ] || return 1
+  printf '%s\n' "$record"
+}
+
 matching_teardown_state() { # <meta> <id>; prints <state><tab><reason><tab><condition><tab><action>
   local id=$2 marker record format generation owner_pid owner_identity
   local progress marker_state marker_condition current_identity age tab action
   marker=$(teardown_marker_path "$id") || return 1
   [ -e "$marker" ] || [ -L "$marker" ] || return 1
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-  record=$(cat "$marker") || return 2
+  record=$(validated_teardown_record "$marker") || return 1
   tab=$(printf '\t')
   IFS="$tab" read -r \
     format generation owner_pid owner_identity progress marker_state marker_condition <<EOF
 $record
 EOF
-  [ "$format" = v1 ] || return 1
   [ "$generation" = "generation:$CURRENT_TASK_GENERATION" ] || return 1
-  is_epoch "$progress" || return 1
-  case "$marker_state" in active|complete|failed) ;; *) return 1 ;; esac
   age=$(( $(now_epoch) - progress ))
   [ "$age" -ge 0 ] || age=0
   case "$marker_state" in
@@ -461,16 +546,12 @@ reconcile_orphan_teardown_markers() {
     [ -f "$marker" ] && [ ! -L "$marker" ] || continue
     id=${marker##*/.firstmate-supervisor.teardown-}
     case "$id" in ''|*[!A-Za-z0-9_.-]*) continue ;; esac
-    record=$(cat "$marker") || return 1
+    record=$(validated_teardown_record "$marker") || continue
     tab=$(printf '\t')
     IFS="$tab" read -r \
       format generation owner_pid owner_identity progress marker_state marker_condition <<EOF
 $record
 EOF
-    [ "$format" = v1 ] || continue
-    case "$generation" in generation:?*) ;; *) continue ;; esac
-    is_epoch "$progress" || continue
-    case "$marker_state" in active|complete|failed) ;; *) continue ;; esac
     meta="$STATE/$id.meta"
     if [ -f "$meta" ]; then
       current=$(task_generation "$meta" 2>/dev/null || true)
@@ -683,26 +764,7 @@ EOF
   else
     clear_escalation "$id" invalid-receipt-deadline || return 1
   fi
-  if [ "${teardown_condition:-}" = - ] || [ -z "${teardown_condition:-}" ]; then
-    clear_escalation "$id" teardown-owner-missing || return 1
-    clear_escalation "$id" teardown-incomplete || return 1
-    clear_escalation "$id" teardown-failed || return 1
-  else
-    case "$teardown_condition" in
-      teardown-owner-missing)
-        clear_escalation "$id" teardown-incomplete || return 1
-        clear_escalation "$id" teardown-failed || return 1
-        ;;
-      teardown-incomplete)
-        clear_escalation "$id" teardown-owner-missing || return 1
-        clear_escalation "$id" teardown-failed || return 1
-        ;;
-      *)
-        clear_escalation "$id" teardown-owner-missing || return 1
-        clear_escalation "$id" teardown-incomplete || return 1
-        ;;
-    esac
-  fi
+  clear_other_teardown_escalations "${teardown_condition:-}" || return 1
 
   printf 'task\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$(snapshot_field "$id")" \
@@ -887,6 +949,30 @@ cycle() {
     cycle_failed recovery-log-failed
     return
   fi
+}
+
+run_once() {
+  local rc
+  mkdir -p "$STATE" || return 1
+  if ! fm_lock_try_acquire "$CONTROL_LOCK"; then
+    printf 'supervisor control operation already in progress%s\n' \
+      "${FM_LOCK_HELD_PID:+ (pid $FM_LOCK_HELD_PID)}" >&2
+    return 1
+  fi
+  trap 'fm_lock_release "$LOCK"; fm_lock_release "$CONTROL_LOCK"' EXIT
+  if ! fm_lock_try_acquire "$LOCK"; then
+    printf 'error: refusing --once while the supervisor owner is running%s\n' \
+      "${FM_LOCK_HELD_PID:+ (pid $FM_LOCK_HELD_PID)}" >&2
+    fm_lock_release "$CONTROL_LOCK"
+    trap - EXIT
+    return 1
+  fi
+  cycle
+  rc=$?
+  fm_lock_release "$LOCK"
+  fm_lock_release "$CONTROL_LOCK"
+  trap - EXIT
+  return "$rc"
 }
 
 run_loop() {
@@ -1140,7 +1226,7 @@ case "${1:-status}" in
   start) start ;;
   restart) restart ;;
   status) status ;;
-  --once) cycle ;;
+  --once) run_once ;;
   --run)
     [ "${2:-}" = "--owner-token=$OWNER_TOKEN" ] || {
       printf 'error: supervisor owner token does not match this home\n' >&2
