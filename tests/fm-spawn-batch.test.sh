@@ -123,6 +123,32 @@ test_fm_projects_override_scopes_projects_path() {
   pass "FM_PROJECTS_OVERRIDE scopes projects/ paths for single-task spawn"
 }
 
+test_status_path_fails_before_resource_creation() {
+  local home fakebin out status
+  home="$TMP_ROOT/status-home"
+  fakebin="$TMP_ROOT/status-bin"
+  mkdir -p "$home/data/status-path-z9" "$home/projects/alpha" \
+    "$home/state/status-path-z9.status" "$fakebin"
+  : > "$home/data/status-path-z9/brief.md"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$home/tmux.log"
+exit 97
+SH
+  chmod +x "$fakebin/tmux"
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
+    "$SPAWN" status-path-z9 projects/alpha codex 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "non-regular status path should refuse spawn"
+  printf '%s\n' "$out" \
+    | grep -F "task status path is not a regular file: $home/state/status-path-z9.status" >/dev/null \
+    || fail "non-regular status path did not report validation failure"
+  [ ! -e "$home/tmux.log" ] || fail "status-path validation ran after tmux resource creation"
+  [ ! -e "$home/state/status-path-z9.meta" ] || fail "refused status path published task metadata"
+  pass "status-path validation precedes worktree and window creation"
+}
+
 test_batch_dispatches_each_pair
 test_single_pair_is_batch
 test_single_mode_unaffected
@@ -130,3 +156,4 @@ test_batch_rejects_non_pair_argument
 test_id_with_slash_is_not_batch
 test_fm_home_scopes_projects_path
 test_fm_projects_override_scopes_projects_path
+test_status_path_fails_before_resource_creation

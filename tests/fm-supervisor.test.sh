@@ -381,6 +381,8 @@ write_meta duplicate-generation fm-waiting "$((now + 300))"
 printf 'generation=duplicate-generation-two\n' >> "$HOME_DIR/state/duplicate-generation.meta"
 run_supervisor --once || fail "duplicate generation quarantine cycle failed"
 grep -F $'task\tduplicate-generation\tactive-unverified\texplicit task generation or status boundary is missing or invalid\t' \
+  "$SNAPSHOT" >/dev/null && fail "duplicate generation used the obsolete boundary error"
+grep -F $'task\tduplicate-generation\tactive-unverified\texplicit task generation is missing or invalid\t' \
   "$SNAPSHOT" >/dev/null || fail "duplicate generation declaration was accepted"
 if task_state_dir_for "$HOME_DIR" duplicate-generation >/dev/null 2>&1; then
   fail "duplicate generation declaration created authoritative task state"
@@ -395,10 +397,62 @@ sed 's/^status-start-line=.*/status-start-line=1/' \
   "$HOME_DIR/state/immutable-boundary.meta" > "$HOME_DIR/state/immutable-boundary.meta.new"
 mv "$HOME_DIR/state/immutable-boundary.meta.new" "$HOME_DIR/state/immutable-boundary.meta"
 run_supervisor --once || fail "changed status-boundary quarantine cycle failed"
-grep -F $'task\timmutable-boundary\tactive-unverified\texplicit task generation or status boundary is missing or invalid\t' \
-  "$SNAPSHOT" >/dev/null || fail "status boundary changed within one generation"
+grep -F $'task\timmutable-boundary\tactive-unverified\tawaiting verifiable activity or receipt\t-\t' \
+  "$SNAPSHOT" >/dev/null || fail "changed status boundary disabled process observation"
 [ -d "$immutable_boundary_dir" ] || fail "changed current status boundary reclaimed task state"
 rm -f "$HOME_DIR/state/immutable-boundary.meta"
+
+write_meta legacy-boundary fm-busy 1
+sed '/^status-start-line=/d' "$HOME_DIR/state/legacy-boundary.meta" \
+  > "$HOME_DIR/state/legacy-boundary.meta.new"
+mv "$HOME_DIR/state/legacy-boundary.meta.new" "$HOME_DIR/state/legacy-boundary.meta"
+printf 'failed: ambiguous pre-boundary receipt\t1\n' > "$HOME_DIR/state/legacy-boundary.status"
+run_supervisor --once || fail "legacy status-boundary baseline cycle failed"
+grep -F $'task\tlegacy-boundary\tactive\tbusy pane observed\t-\t1\tfm-busy\t-' \
+  "$SNAPSHOT" >/dev/null || fail "legacy receipt history disabled live process observation"
+grep -F $'contract\tlegacy-boundary\tany-receipt\t1\tunverified\t-\t-' \
+  "$SNAPSHOT" >/dev/null || fail "legacy deadline history was treated as authoritative"
+if grep -F $'escalation\tlegacy-boundary\tfailed-receipt\t' "$SNAPSHOT" >/dev/null \
+  || grep -F $'escalation\tlegacy-boundary\tmissed-receipt-deadline\t' "$SNAPSHOT" >/dev/null; then
+  fail "legacy receipt or deadline history escaped quarantine"
+fi
+printf 'failed: proven post-boundary receipt\t%s\n' "$(date +%s)" \
+  >> "$HOME_DIR/state/legacy-boundary.status"
+run_supervisor --once || fail "post-boundary legacy receipt cycle failed"
+grep -F $'task\tlegacy-boundary\tterminal\tterminal receipt recorded\tfailed: proven post-boundary receipt\t' \
+  "$SNAPSHOT" >/dev/null || fail "post-boundary legacy receipt was not consumed"
+grep -F $'escalation\tlegacy-boundary\tfailed-receipt\t' "$SNAPSHOT" >/dev/null \
+  || fail "post-boundary legacy failure was not escalated"
+
+write_meta legacy-future-deadline fm-busy "$(( $(date +%s) + 5 ))"
+sed '/^status-start-line=/d' "$HOME_DIR/state/legacy-future-deadline.meta" \
+  > "$HOME_DIR/state/legacy-future-deadline.meta.new"
+mv "$HOME_DIR/state/legacy-future-deadline.meta.new" \
+  "$HOME_DIR/state/legacy-future-deadline.meta"
+run_supervisor --once || fail "future legacy deadline baseline cycle failed"
+sleep 6
+run_supervisor --once || fail "future legacy missed-deadline cycle failed"
+grep -F $'contract\tlegacy-future-deadline\tany-receipt\t' "$SNAPSHOT" \
+  | grep -F $'\tmissed\t-\t-' >/dev/null \
+  || fail "future legacy deadline remained quarantined after baseline"
+grep -F $'escalation\tlegacy-future-deadline\tmissed-receipt-deadline\t' \
+  "$SNAPSHOT" >/dev/null || fail "future legacy missed deadline was not escalated"
+
+write_meta legacy-boundary-teardown fm-gone "$((now + 300))"
+sed '/^status-start-line=/d' "$HOME_DIR/state/legacy-boundary-teardown.meta" \
+  > "$HOME_DIR/state/legacy-boundary-teardown.meta.new"
+mv "$HOME_DIR/state/legacy-boundary-teardown.meta.new" \
+  "$HOME_DIR/state/legacy-boundary-teardown.meta"
+printf 'done: ambiguous pre-boundary terminal\n' \
+  > "$HOME_DIR/state/legacy-boundary-teardown.status"
+printf 'v1\tgeneration:test-legacy-boundary-teardown\t2147483647\t0-0\t%s\tactive\t-\n' \
+  "$(date +%s)" \
+  > "$HOME_DIR/state/.firstmate-supervisor.teardown-legacy-boundary-teardown"
+run_supervisor --once || fail "legacy-boundary teardown observation cycle failed"
+grep -F $'task\tlegacy-boundary-teardown\tstalled\tteardown owner is missing\t-\t' \
+  "$SNAPSHOT" >/dev/null || fail "legacy receipt boundary disabled teardown observation"
+grep -F $'escalation\tlegacy-boundary-teardown\tteardown-owner-missing\t' \
+  "$SNAPSHOT" >/dev/null || fail "legacy-boundary teardown failure was not escalated"
 
 write_meta reused-id fm-gone 1
 sed 's/^generation=.*/generation=reused-one/' \
