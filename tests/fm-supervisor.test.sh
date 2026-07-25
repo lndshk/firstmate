@@ -87,6 +87,7 @@ write_meta() { # <id> <window> <deadline>
     printf 'window=%s\n' "$2"
     printf 'kind=ship\n'
     printf 'generation=test-%s\n' "$1"
+    printf 'status-start-line=0\n'
     printf 'receipt-deadline=%s\n' "$3"
   } > "$HOME_DIR/state/$1.meta"
 }
@@ -332,6 +333,24 @@ run_supervisor --once || fail "orphan partial task identity reclamation cycle fa
 [ ! -e "$partial_dir" ] || fail "repaired task state was not reclaimed after metadata disappeared"
 [ ! -e "$orphan_partial" ] || fail "orphan partial task identity wedged reclamation"
 
+write_meta ambiguous-current fm-waiting "$((now + 300))"
+ambiguous_generation=test-ambiguous-current
+ambiguous_key=$(
+  printf '%s\t%s' ambiguous-current "$ambiguous_generation" \
+    | cksum | awk '{ print $1 "-" $2 }'
+)
+ambiguous_dir="$HOME_DIR/state/.firstmate-supervisor.task-ambiguous-current-$ambiguous_key"
+mkdir "$ambiguous_dir"
+printf 'different-task\n' > "$ambiguous_dir/id"
+printf '%s\n' "$ambiguous_generation" > "$ambiguous_dir/generation"
+run_supervisor --once || fail "ambiguous current task-state quarantine cycle failed"
+[ -d "$ambiguous_dir" ] || fail "ambiguous current task state was reclaimed while metadata existed"
+[ "$(cat "$ambiguous_dir/id")" = different-task ] \
+  || fail "ambiguous current task state was repaired while metadata existed"
+rm -f "$HOME_DIR/state/ambiguous-current.meta"
+run_supervisor --once || fail "ambiguous orphan task-state reclamation cycle failed"
+[ ! -e "$ambiguous_dir" ] || fail "ambiguous task state was not reclaimed after metadata disappeared"
+
 transitioned_deadline_cursor=$(task_state_file "$HOME_DIR" transitioned-terminal deadline) \
   || fail "transitioned task deadline state was not created"
 transitioned_version=$(cut -f2 "$transitioned_deadline_cursor")
@@ -358,18 +377,51 @@ failed_escalations=$(awk -F '\t' '$2 == "failed-task" && $3 == "failed-receipt" 
   "$HOME_DIR/state/.firstmate-supervisor.escalations")
 [ "$failed_escalations" -eq 2 ] || fail "unchanged failed receipt was escalated twice"
 
-write_meta reused-id fm-gone "$((now + 300))"
-printf 'generation=reused-one\n' >> "$HOME_DIR/state/reused-id.meta"
+write_meta duplicate-generation fm-waiting "$((now + 300))"
+printf 'generation=duplicate-generation-two\n' >> "$HOME_DIR/state/duplicate-generation.meta"
+run_supervisor --once || fail "duplicate generation quarantine cycle failed"
+grep -F $'task\tduplicate-generation\tactive-unverified\texplicit task generation or status boundary is missing or invalid\t' \
+  "$SNAPSHOT" >/dev/null || fail "duplicate generation declaration was accepted"
+if task_state_dir_for "$HOME_DIR" duplicate-generation >/dev/null 2>&1; then
+  fail "duplicate generation declaration created authoritative task state"
+fi
+rm -f "$HOME_DIR/state/duplicate-generation.meta"
+
+write_meta immutable-boundary fm-waiting "$((now + 300))"
+run_supervisor --once || fail "initial immutable status-boundary cycle failed"
+immutable_boundary_dir=$(task_state_dir_for "$HOME_DIR" immutable-boundary) \
+  || fail "immutable status boundary was not persisted"
+sed 's/^status-start-line=.*/status-start-line=1/' \
+  "$HOME_DIR/state/immutable-boundary.meta" > "$HOME_DIR/state/immutable-boundary.meta.new"
+mv "$HOME_DIR/state/immutable-boundary.meta.new" "$HOME_DIR/state/immutable-boundary.meta"
+run_supervisor --once || fail "changed status-boundary quarantine cycle failed"
+grep -F $'task\timmutable-boundary\tactive-unverified\texplicit task generation or status boundary is missing or invalid\t' \
+  "$SNAPSHOT" >/dev/null || fail "status boundary changed within one generation"
+[ -d "$immutable_boundary_dir" ] || fail "changed current status boundary reclaimed task state"
+rm -f "$HOME_DIR/state/immutable-boundary.meta"
+
+write_meta reused-id fm-gone 1
+sed 's/^generation=.*/generation=reused-one/' \
+  "$HOME_DIR/state/reused-id.meta" > "$HOME_DIR/state/reused-id.meta.new"
+mv "$HOME_DIR/state/reused-id.meta.new" "$HOME_DIR/state/reused-id.meta"
+printf 'done: prior generation receipt\t1\n' > "$HOME_DIR/state/reused-id.status"
 run_supervisor --once || fail "first reused-id generation cycle failed"
+grep -F $'task\treused-id\tterminal\tterminal receipt recorded\t' "$SNAPSHOT" >/dev/null \
+  || fail "first reused-id generation did not consume its receipt"
 reused_old_dir=$(task_state_dir_for "$HOME_DIR" reused-id) \
   || fail "first reused-id generation state was not created"
 sed \
   -e 's/^generation=.*/generation=reused-two/' \
+  -e 's/^status-start-line=.*/status-start-line=1/' \
   -e 's/^window=.*/window=fm-waiting/' \
   "$HOME_DIR/state/reused-id.meta" \
   > "$HOME_DIR/state/reused-id.meta.new"
 mv "$HOME_DIR/state/reused-id.meta.new" "$HOME_DIR/state/reused-id.meta"
 run_supervisor --once || fail "second reused-id generation cycle failed"
+grep -F $'task\treused-id\tstalled\treceipt deadline passed\t-\t1\tfm-waiting\t-' \
+  "$SNAPSHOT" >/dev/null || fail "reused task id inherited a prior-generation receipt"
+grep -F $'contract\treused-id\tany-receipt\t1\tmissed\t-\t-' \
+  "$SNAPSHOT" >/dev/null || fail "reused task id inherited prior deadline satisfaction"
 reused_new_dir=$(task_state_dir_for_generation "$HOME_DIR" reused-id reused-two) \
   || fail "second reused-id generation state was not created"
 [ "$reused_new_dir" != "$reused_old_dir" ] \
@@ -438,6 +490,19 @@ grep -F $'escalation\tteardown-dead\tteardown-owner-missing\tinspect the recorde
 grep -F $'\tsignal\tsupervisor:teardown-dead\tteardown-owner-missing:' \
   "$HOME_DIR/state/.wake-queue" >/dev/null \
   || fail "missing teardown owner did not produce normal-mode wake delivery"
+
+write_meta terminal-teardown fm-gone "$((now + 300))"
+printf 'done: terminal before teardown\n' > "$HOME_DIR/state/terminal-teardown.status"
+printf 'v1\tgeneration:test-terminal-teardown\t2147483647\t0-0\t%s\tactive\t-\n' \
+  "$(date +%s)" > "$HOME_DIR/state/.firstmate-supervisor.teardown-terminal-teardown"
+run_supervisor --once || fail "terminal teardown observation cycle failed"
+grep -F $'task\tterminal-teardown\tterminal\tterminal receipt recorded\t' "$SNAPSHOT" >/dev/null \
+  || fail "teardown failure overrode terminal receipt classification"
+grep -F $'escalation\tterminal-teardown\tteardown-owner-missing\t' "$SNAPSHOT" >/dev/null \
+  || fail "terminal receipt suppressed teardown-owner escalation"
+grep -F $'\tsignal\tsupervisor:terminal-teardown\tteardown-owner-missing:' \
+  "$HOME_DIR/state/.wake-queue" >/dev/null \
+  || fail "terminal teardown-owner failure did not enqueue a normal wake"
 
 write_meta legacy-marker fm-gone "$((now + 300))"
 printf 'legacy evidence without generation\n' \
@@ -626,7 +691,7 @@ kill -CONT "$first_pid" 2>/dev/null || fail "could not resume supervisor after d
 second_generated=0
 second_board_generated=0
 wake_last_seq=0
-for _ in 1 2 3 4 5; do
+for _ in 1 2 3 4 5 6 7 8 9 10; do
   second_generated=$(awk -F '\t' '$1 == "generated-at" { print $2 }' "$SNAPSHOT")
   second_board_generated=$(sed -n 's/.*const generated=\([0-9][0-9]*\),.*/\1/p' "$BOARD")
   wake_last_seq=$(awk -F '\t' '$1 == "wake-last-seq" { print $2 }' "$SNAPSHOT")

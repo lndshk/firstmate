@@ -74,7 +74,16 @@ meta_value() {
 
 meta_generation() {
   local generation
-  generation=$(meta_value "$META" generation)
+  generation=$(awk '
+    /^generation=/ {
+      value=substr($0, length("generation=") + 1)
+      count++
+    }
+    END {
+      if (count != 1) exit 1
+      print value
+    }
+  ' "$META") || return 1
   [ -n "$generation" ] || return 1
   case "$generation" in *"$(printf '\t')"*|*$'\n'*) return 1 ;; esac
   printf '%s\n' "$generation"
@@ -85,6 +94,9 @@ ensure_explicit_generation() {
   if generation=$(meta_generation); then
     printf '%s\n' "$generation"
     return
+  fi
+  if grep -q '^generation=' "$META"; then
+    return 1
   fi
   before=$(cksum < "$META") || return 1
   generation="$(date +%s)-$$-${RANDOM:-0}"

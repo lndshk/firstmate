@@ -415,6 +415,25 @@ test_legacy_meta_gets_generation_and_atomic_marker() {
   pass "legacy metadata receives an explicit generation before teardown writes its marker"
 }
 
+test_duplicate_generation_is_rejected_unchanged() {
+  local case_dir rc marker
+  case_dir=$(make_case duplicate-generation)
+  write_meta "$case_dir" local-only ship
+  printf 'generation=duplicate-task-x1\n' >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" >/dev/null 2>&1
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "duplicate-generation: teardown must reject ambiguous identity"
+  [ "$(grep -c '^generation=' "$case_dir/state/task-x1.meta")" -eq 2 ] \
+    || fail "duplicate-generation: teardown rewrote duplicate generation declarations"
+  marker="$case_dir/state/.firstmate-supervisor.teardown-task-x1"
+  [ ! -e "$marker" ] || fail "duplicate-generation: teardown wrote a marker for ambiguous identity"
+  pass "teardown rejects duplicate generation declarations without rewriting metadata"
+}
+
 test_generation_change_preserves_reused_id_state() {
   local case_dir real_treehouse marker rc
   case_dir=$(make_case generation-recheck)
@@ -507,6 +526,7 @@ test_scout_does_not_abort_run
 test_local_only_does_not_abort_run
 test_abort_failure_does_not_fail_teardown
 test_legacy_meta_gets_generation_and_atomic_marker
+test_duplicate_generation_is_rejected_unchanged
 test_generation_change_preserves_reused_id_state
 test_teardown_syncs_symlink_project_target
 test_local_only_truly_unpushed_refuses

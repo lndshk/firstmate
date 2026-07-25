@@ -40,6 +40,7 @@ LOG="$STATE/.firstmate-supervisor.log"
 ERROR="$STATE/.firstmate-supervisor.error"
 CURRENT_TASK_DIR=
 CURRENT_TASK_GENERATION=
+CURRENT_STATUS_START_LINE=
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -74,8 +75,21 @@ meta_field() {
     END { if (found) print value }
   ' "$1"
 }
+single_meta_field() {
+  [ -f "$1" ] || return 1
+  awk -v prefix="$2=" '
+    index($0, prefix) == 1 {
+      value=substr($0, length(prefix) + 1)
+      count++
+    }
+    END {
+      if (count != 1) exit 1
+      print value
+    }
+  ' "$1"
+}
 last_receipt_record() {
-  awk 'NF { number=NR; line=$0 } END { printf "%d\t%s\n", number + 0, line }' "$1"
+  awk -v start="$2" 'NR > start && NF { number=NR; line=$0 } END { printf "%d\t%s\n", number + 0, line }' "$1"
 }
 read_optional_file() {
   if [ -e "$1" ] || [ -L "$1" ]; then
@@ -164,11 +178,18 @@ escalation_key() {
 
 task_generation() { # <meta>
   local generation clean
-  generation=$(meta_field "$1" generation) || return 1
+  generation=$(single_meta_field "$1" generation) || return 1
   [ -n "$generation" ] || return 1
   clean=$(printf '%s' "$generation" | clean_field)
   [ "$clean" = "$generation" ] || return 1
   printf '%s\n' "$generation"
+}
+
+task_status_start_line() {
+  local start
+  start=$(single_meta_field "$1" status-start-line) || return 1
+  is_uint "$start" || return 1
+  printf '%s\n' "$start"
 }
 
 task_state_dir() { # <id> <generation>
@@ -215,8 +236,9 @@ repair_task_identity_from_meta() { # <dir>
 }
 
 select_task_state() { # <meta> <id>
-  local generation dir saved_id saved_generation
+  local generation status_start_line dir saved_id saved_generation saved_status_start_line
   generation=$(task_generation "$1") || return 1
+  status_start_line=$(task_status_start_line "$1") || return 1
   dir=$(task_state_dir "$2" "$generation") || return 1
   if [ -e "$dir" ] || [ -L "$dir" ]; then
     [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
@@ -234,8 +256,18 @@ select_task_state() { # <meta> <id>
   if [ "$saved_id" != "$2" ] || [ "$saved_generation" != "$generation" ]; then
     write_task_identity "$dir" "$2" "$generation" || return 1
   fi
+  saved_status_start_line=$(read_optional_file "$dir/status-start-line") || return 1
+  if [ -n "$saved_status_start_line" ] \
+    && [ "$saved_status_start_line" != "$status_start_line" ]; then
+    return 1
+  fi
+  if [ "$saved_status_start_line" != "$status_start_line" ]; then
+    printf '%s\n' "$status_start_line" > "$dir/status-start-line.tmp.$$" \
+      && mv -f "$dir/status-start-line.tmp.$$" "$dir/status-start-line" || return 1
+  fi
   CURRENT_TASK_DIR=$dir
   CURRENT_TASK_GENERATION=$generation
+  CURRENT_STATUS_START_LINE=$status_start_line
 }
 
 cleanup_task_state_dir() { # <dir>
@@ -245,6 +277,7 @@ cleanup_task_state_dir() { # <dir>
   for path in \
     "$dir/id" \
     "$dir/generation" \
+    "$dir/status-start-line" \
     "$dir/receipt" \
     "$dir/deadline" \
     "$dir"/escalated-* \
@@ -254,6 +287,20 @@ cleanup_task_state_dir() { # <dir>
     rm -f "$path" || return 1
   done
   rmdir "$dir"
+}
+
+task_state_has_matching_meta() {
+  local dir=$1 meta id generation expected
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    case "$id" in ''|*[!A-Za-z0-9_.-]*) continue ;; esac
+    generation=$(task_generation "$meta" 2>/dev/null || true)
+    [ -n "$generation" ] || continue
+    expected=$(task_state_dir "$id" "$generation") || return 1
+    [ "$expected" != "$dir" ] || return 0
+  done
+  return 1
 }
 
 garbage_collect_task_state() {
@@ -268,6 +315,9 @@ garbage_collect_task_state() {
         if repair_task_identity_from_meta "$dir"; then
           continue
         fi
+        if task_state_has_matching_meta "$dir"; then
+          continue
+        fi
         cleanup_task_state_dir "$dir" || return 1
         continue
         ;;
@@ -276,11 +326,17 @@ garbage_collect_task_state() {
       if repair_task_identity_from_meta "$dir"; then
         continue
       fi
+      if task_state_has_matching_meta "$dir"; then
+        continue
+      fi
       cleanup_task_state_dir "$dir" || return 1
       continue
     fi
     meta="$STATE/$id.meta"
     [ ! -e "$meta" ] && [ ! -L "$meta" ] || continue
+    if task_state_has_matching_meta "$dir"; then
+      continue
+    fi
     cleanup_task_state_dir "$dir" || return 1
   done
 }
@@ -384,14 +440,14 @@ clear_receipt_evidence() { # <id>
   rm -f "$CURRENT_TASK_DIR/receipt"
 }
 
-timestamped_deadline_satisfaction() { # <status-file> <deadline>; prints <version><tab><time>
-  local receipt_file=$1 deadline=$2 candidate line raw receipt receipt_time hash tab
+timestamped_deadline_satisfaction() { # <status-file> <deadline> <start-line>; prints <version><tab><time>
+  local receipt_file=$1 deadline=$2 start_line=$3 candidate line raw receipt receipt_time hash tab
   if [ ! -e "$receipt_file" ] && [ ! -L "$receipt_file" ]; then
     return 1
   fi
   [ -f "$receipt_file" ] || return 2
-  candidate=$(awk -F '\t' -v deadline="$deadline" '
-    NF && $NF ~ /^[0-9]+$/ && length($NF) <= 10 && $NF <= deadline {
+  candidate=$(awk -F '\t' -v deadline="$deadline" -v start="$start_line" '
+    NR > start && NF && $NF ~ /^[0-9]+$/ && length($NF) <= 10 && $NF <= deadline {
       text=$0
       sub(/\t[0-9]+$/, "", text)
       if (length(text) > 0) {
@@ -412,8 +468,8 @@ timestamped_deadline_satisfaction() { # <status-file> <deadline>; prints <versio
   printf '%s\t%s\n' "$line-$hash" "$receipt_time"
 }
 
-deadline_satisfaction() { # <id> <deadline> <status-file> <receipt-version> <receipt-time>; prints <version><tab><time>
-  local id=$1 deadline=$2 receipt_file=$3 receipt_version=$4 receipt_time=$5 cursor
+deadline_satisfaction() { # <id> <deadline> <status-file> <receipt-version> <receipt-time> <start-line>; prints <version><tab><time>
+  local id=$1 deadline=$2 receipt_file=$3 receipt_version=$4 receipt_time=$5 start_line=$6 cursor
   local saved saved_deadline saved_version saved_time candidate candidate_status tmp
   [ -n "$CURRENT_TASK_DIR" ] || return 2
   cursor="$CURRENT_TASK_DIR/deadline"
@@ -428,7 +484,7 @@ EOF
     return 0
   fi
   candidate_status=0
-  candidate=$(timestamped_deadline_satisfaction "$receipt_file" "$deadline") \
+  candidate=$(timestamped_deadline_satisfaction "$receipt_file" "$deadline" "$start_line") \
     || candidate_status=$?
   if [ "$candidate_status" -eq 2 ]; then
     return 2
@@ -627,10 +683,11 @@ classify_meta() { # <meta>; prints one TSV task row
   id=$(basename "$meta" .meta)
   CURRENT_TASK_DIR=
   CURRENT_TASK_GENERATION=
+  CURRENT_STATUS_START_LINE=
   if ! select_task_state "$meta" "$id"; then
     printf 'task\t%s\tactive-unverified\t%s\t-\t-\t-\t-\n' \
       "$(snapshot_field "$id")" \
-      "$(snapshot_field "explicit task generation is missing or invalid")"
+      "$(snapshot_field "explicit task generation or status boundary is missing or invalid")"
     printf 'escalation\t%s\tunverified-task-generation\t%s\n' \
       "$(snapshot_field "$id")" \
       "$(snapshot_field "verify task identity before relying on legacy evidence")"
@@ -649,7 +706,7 @@ classify_meta() { # <meta>; prints one TSV task row
   receipt_file="$STATE/$id.status"
   if [ -e "$receipt_file" ] || [ -L "$receipt_file" ]; then
     [ -f "$receipt_file" ] || return 1
-    receipt_record=$(last_receipt_record "$receipt_file") || return 1
+    receipt_record=$(last_receipt_record "$receipt_file" "$CURRENT_STATUS_START_LINE") || return 1
     tab=$(printf '\t')
     receipt_line=${receipt_record%%"$tab"*}
     receipt_raw=${receipt_record#*"$tab"}
@@ -671,7 +728,8 @@ EOF
   fi
   if is_epoch "$deadline"; then
     if satisfaction=$(deadline_satisfaction \
-      "$id" "$deadline" "$receipt_file" "$receipt_version" "$receipt_time"); then
+      "$id" "$deadline" "$receipt_file" "$receipt_version" "$receipt_time" \
+      "$CURRENT_STATUS_START_LINE"); then
       deadline_status=satisfied
       IFS="$(printf '\t')" read -r deadline_version deadline_time <<EOF
 $satisfaction
@@ -688,6 +746,21 @@ EOF
     clear_deadline_satisfaction "$id" || return 1
   fi
 
+  teardown_status=0
+  teardown_result=$(matching_teardown_state "$meta" "$id") || teardown_status=$?
+  if [ "$teardown_status" -eq 2 ]; then
+    return 1
+  elif [ "$teardown_status" -eq 0 ]; then
+    IFS="$(printf '\t')" read -r \
+      teardown_state teardown_reason teardown_condition teardown_action <<EOF
+$teardown_result
+EOF
+    if [ "$teardown_condition" != - ]; then
+      escalate_once \
+        "$id" "$teardown_condition" "$teardown_action" "$teardown_result" || return 1
+    fi
+  fi
+
   if terminal_receipt "$receipt"; then
     state=terminal
     reason="terminal receipt recorded"
@@ -695,21 +768,9 @@ EOF
       receipt_condition=failed-receipt
     fi
   else
-    teardown_status=0
-    teardown_result=$(matching_teardown_state "$meta" "$id") || teardown_status=$?
-    if [ "$teardown_status" -eq 2 ]; then
-      return 1
-    elif [ "$teardown_status" -eq 0 ]; then
-      IFS="$(printf '\t')" read -r \
-        teardown_state teardown_reason teardown_condition teardown_action <<EOF
-$teardown_result
-EOF
+    if [ "$teardown_status" -eq 0 ]; then
       state=$teardown_state
       reason=$teardown_reason
-      if [ "$teardown_condition" != - ]; then
-        escalate_once \
-          "$id" "$teardown_condition" "$teardown_action" "$teardown_result" || return 1
-      fi
     else
     if [ -n "$window" ]; then
       if pane_exists "$window"; then

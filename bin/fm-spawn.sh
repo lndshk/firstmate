@@ -504,6 +504,14 @@ fi
 
 mkdir -p "$STATE"
 META_GENERATION="$(date +%s)-$$-${RANDOM:-0}"
+STATUS_START_LINE=0
+if [ -e "$STATE/$ID.status" ] || [ -L "$STATE/$ID.status" ]; then
+  [ -f "$STATE/$ID.status" ] || {
+    echo "error: task status path is not a regular file: $STATE/$ID.status" >&2
+    exit 1
+  }
+  STATUS_START_LINE=$(awk 'END { print NR + 0 }' "$STATE/$ID.status") || exit 1
+fi
 {
   echo "window=$T"
   echo "worktree=$WT"
@@ -513,6 +521,7 @@ META_GENERATION="$(date +%s)-$$-${RANDOM:-0}"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "generation=$META_GENERATION"
+  echo "status-start-line=$STATUS_START_LINE"
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
