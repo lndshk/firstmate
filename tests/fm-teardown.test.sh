@@ -134,6 +134,7 @@ worktree=$case_dir/wt
 project=$case_dir/project
 kind=$kind
 mode=$mode
+generation=test-task-x1
 EOF
 }
 
@@ -390,6 +391,85 @@ test_abort_failure_does_not_fail_teardown() {
   pass "a failing no-mistakes abort does not fail teardown (best-effort |\\| true)"
 }
 
+test_legacy_meta_gets_generation_and_atomic_marker() {
+  local case_dir marker
+  case_dir=$(make_case legacy-generation)
+  write_meta "$case_dir" local-only ship
+  sed '/^generation=/d' "$case_dir/state/task-x1.meta" \
+    > "$case_dir/state/task-x1.meta.legacy"
+  mv "$case_dir/state/task-x1.meta.legacy" "$case_dir/state/task-x1.meta"
+
+  run_teardown "$case_dir" >/dev/null \
+    || fail "legacy-generation: teardown failed"
+
+  marker="$case_dir/state/.firstmate-supervisor.teardown-task-x1"
+  [ -f "$marker" ] || fail "legacy-generation: completion marker was not written"
+  awk -F '\t' '
+    $1 == "v1" && $2 ~ /^generation:[0-9]+-[0-9]+-[0-9]+$/ && $6 == "complete" {
+      found=1
+    }
+    END { exit !found }
+  ' "$marker" || fail "legacy-generation: marker lacked an explicit generated identity"
+  [ ! -d "$case_dir/state/.firstmate-supervisor.teardown-locks" ] \
+    || fail "legacy-generation: teardown created the obsolete marker-lock subsystem"
+  pass "legacy metadata receives an explicit generation before teardown writes its marker"
+}
+
+test_duplicate_generation_is_rejected_unchanged() {
+  local case_dir rc marker
+  case_dir=$(make_case duplicate-generation)
+  write_meta "$case_dir" local-only ship
+  printf 'generation=duplicate-task-x1\n' >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" >/dev/null 2>&1
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "duplicate-generation: teardown must reject ambiguous identity"
+  [ "$(grep -c '^generation=' "$case_dir/state/task-x1.meta")" -eq 2 ] \
+    || fail "duplicate-generation: teardown rewrote duplicate generation declarations"
+  marker="$case_dir/state/.firstmate-supervisor.teardown-task-x1"
+  [ ! -e "$marker" ] || fail "duplicate-generation: teardown wrote a marker for ambiguous identity"
+  pass "teardown rejects duplicate generation declarations without rewriting metadata"
+}
+
+test_generation_change_preserves_reused_id_state() {
+  local case_dir real_treehouse marker rc
+  case_dir=$(make_case generation-recheck)
+  write_meta "$case_dir" local-only ship
+  printf 'working: new generation owns this receipt\n' > "$case_dir/state/task-x1.status"
+  real_treehouse="$case_dir/fakebin/treehouse"
+cat > "$real_treehouse" <<SH
+#!/usr/bin/env bash
+: > "$case_dir/treehouse.called"
+sed 's/^generation=.*/generation=reused-task-x1/' \
+  "$case_dir/state/task-x1.meta" > "$case_dir/state/task-x1.meta.new"
+mv "$case_dir/state/task-x1.meta.new" "$case_dir/state/task-x1.meta"
+exit 0
+SH
+  chmod +x "$real_treehouse"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "generation-recheck: generation replacement must stop same-id cleanup"
+  [ -f "$case_dir/treehouse.called" ] \
+    || fail "generation-recheck: external worktree cleanup was skipped"
+  grep -Fx 'generation=reused-task-x1' "$case_dir/state/task-x1.meta" >/dev/null \
+    || fail "generation-recheck: replacement metadata was removed"
+  [ -f "$case_dir/state/task-x1.status" ] \
+    || fail "generation-recheck: replacement status was removed"
+  marker="$case_dir/state/.firstmate-supervisor.teardown-task-x1"
+  awk -F '\t' '$6 == "failed" && $7 == "generation-changed" { found=1 } END { exit !found }' \
+    "$marker" || fail "generation-recheck: mismatch was not recorded by teardown"
+  [ ! -d "$case_dir/state/.firstmate-supervisor.teardown-locks" ] \
+    || fail "generation-recheck: mismatch handling created marker locks"
+  pass "explicit generation rechecks protect reused task ids without supervisor locks"
+}
+
 # A PR-based teardown passes project= back to fm-fleet-sync.sh explicitly.
 # When that project path is a symlink, the canonical checkout must still catch
 # up to origin after teardown. The git wrapper rejects the symlink as a -C path,
@@ -445,6 +525,9 @@ test_no_mistakes_ship_aborts_run_on_task_branch
 test_scout_does_not_abort_run
 test_local_only_does_not_abort_run
 test_abort_failure_does_not_fail_teardown
+test_legacy_meta_gets_generation_and_atomic_marker
+test_duplicate_generation_is_rejected_unchanged
+test_generation_change_preserves_reused_id_state
 test_teardown_syncs_symlink_project_target
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows

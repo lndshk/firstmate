@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
 
+fm_receipt_explicit_time() {
+  local raw=$1 tab suffix
+  tab=$(printf '\t')
+  suffix=${raw##*"$tab"}
+  [ "$suffix" != "$raw" ] || return 1
+  case "$suffix" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$suffix"
+}
+
+fm_receipt_text() {
+  local raw=$1 tab suffix
+  tab=$(printf '\t')
+  suffix=${raw##*"$tab"}
+  if [ "$suffix" != "$raw" ]; then
+    case "$suffix" in
+      ''|*[!0-9]*) ;;
+      *) printf '%s' "${raw%"$tab$suffix"}"; return ;;
+    esac
+  fi
+  printf '%s' "$raw"
+}
+
+[ "${FM_WAKE_LIB_PARSERS_ONLY:-0}" = 1 ] && return 0
+
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_WAKE_DEFAULT_ROOT}}"
@@ -105,10 +129,13 @@ fm_lock_acquire_wait() {
 fm_lock_release() {
   local lockdir=$1 pid current
   current=${BASHPID:-$$}
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  [ "$pid" = "$current" ] || return 0
-  rm -f "$lockdir/pid" 2>/dev/null || true
-  rmdir "$lockdir" 2>/dev/null || true
+  pid=$(cat "$lockdir/pid" 2>/dev/null) || return 1
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$pid" = "$current" ] || return 1
+  rm -f "$lockdir/pid" 2>/dev/null || return 1
+  rmdir "$lockdir" 2>/dev/null
 }
 
 fm_wake_clean_field() {
@@ -117,6 +144,7 @@ fm_wake_clean_field() {
 
 fm_wake_append() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
+  local release_status
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
@@ -138,7 +166,12 @@ fm_wake_append() {
   if [ "$status" -eq 0 ]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
   fi
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  if fm_lock_release "$FM_WAKE_QUEUE_LOCK"; then
+    release_status=0
+  else
+    release_status=$?
+  fi
+  [ "$status" -ne 0 ] || status=$release_status
   return "$status"
 }
 
@@ -172,4 +205,44 @@ fm_wake_print_deduped() {
       }
     }
   ' "$file"
+}
+
+# Print a locked, deduplicated copy of the durable wake queue without consuming
+# it. The always-on supervisor uses this to reconcile wake state while leaving
+# ownership of the real drain with Firstmate and the existing AFK flow.
+fm_wake_peek() {
+  local peek sequence_copy seq_file status release_status
+  peek="$STATE/.wake-queue.peek.$(fm_current_pid)"
+  sequence_copy=${1:-}
+  seq_file="$STATE/.wake-queue.seq"
+  status=0
+
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  if [ -s "$FM_WAKE_QUEUE" ]; then
+    cat "$FM_WAKE_QUEUE" > "$peek" || status=$?
+  else
+    : > "$peek" || status=$?
+  fi
+  if [ "$status" -eq 0 ] && [ -n "$sequence_copy" ]; then
+    if [ -e "$seq_file" ]; then
+      cat "$seq_file" > "$sequence_copy" || status=$?
+    else
+      printf '0\n' > "$sequence_copy" || status=$?
+    fi
+  fi
+  if fm_lock_release "$FM_WAKE_QUEUE_LOCK"; then
+    release_status=0
+  else
+    release_status=$?
+  fi
+  [ "$status" -ne 0 ] || status=$release_status
+
+  if [ "$status" -eq 0 ]; then
+    fm_wake_print_deduped "$peek" || status=$?
+  fi
+  rm -f "$peek"
+  if [ "$status" -ne 0 ] && [ -n "$sequence_copy" ]; then
+    rm -f "$sequence_copy"
+  fi
+  return "$status"
 }

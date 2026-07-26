@@ -367,6 +367,21 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+status_start_line() {
+  local path=$1
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] || {
+      echo "error: task status path is not a regular file: $path" >&2
+      return 1
+    }
+    awk 'END { print NR + 0 }' "$path"
+  else
+    printf '0\n'
+  fi
+}
+
+STATUS_START_LINE=$(status_start_line "$STATE/$ID.status") || exit 1
+
 # Resolve and reject an already-live target before a project-native refresh can
 # mutate the clone beneath that advisor. Outside tmux, do not create the fallback
 # session yet: unsafe sync failures must remain free of tmux launch side effects.
@@ -485,6 +500,20 @@ EOF
   esac
 fi
 
+rollback_unpublished_spawn() {
+  if [ "$KIND" != secondmate ]; then
+    rm -f "$WT/.claude/settings.local.json" \
+      "$WT/.opencode/plugins/fm-turn-end.js" \
+      "$STATE/$ID.pi-ext.ts"
+    if [ -n "$WT" ] && [ -d "$WT" ]; then
+      ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) || {
+        echo "warning: failed to return unpublished worktree $WT" >&2
+      }
+    fi
+  fi
+  tmux kill-window -t "$T" 2>/dev/null || true
+}
+
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md sections 6-7).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
@@ -503,7 +532,13 @@ EOF
 fi
 
 mkdir -p "$STATE"
-{
+META_GENERATION="$(date +%s)-$$-${RANDOM:-0}"
+if ! STATUS_START_LINE=$(status_start_line "$STATE/$ID.status"); then
+  rollback_unpublished_spawn
+  exit 1
+fi
+META_TMP="$STATE/.$ID.meta.tmp.$$"
+if {
   echo "window=$T"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
@@ -511,11 +546,24 @@ mkdir -p "$STATE"
   echo "kind=$KIND"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  echo "generation=$META_GENERATION"
+  echo "status-start-line=$STATUS_START_LINE"
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$META_TMP"; then
+  :
+else
+  rm -f "$META_TMP"
+  rollback_unpublished_spawn
+  exit 1
+fi
+if ! mv -f "$META_TMP" "$STATE/$ID.meta"; then
+  rm -f "$META_TMP"
+  rollback_unpublished_spawn
+  exit 1
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

@@ -16,13 +16,15 @@
 # any other worktree's checkout or the shared `main` branch.
 #
 # It does NOT re-read AGENTS.md or nudge secondmates itself - those are LLM /
-# tmux actions the skill performs. The script's job is the safe git mechanics
-# plus a parseable summary telling the caller what to do next:
+# tmux actions the skill performs. After safely updating or confirming the main
+# home is current, it activates the current deterministic supervisor. The script otherwise provides
+# safe git mechanics plus a parseable summary telling the caller what to do next:
 #   - one status line per target (updated/already current/skipped)
+#   - supervisor: active|unchanged|skipped|activation failed
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - nudge-secondmates: <window-targets...>|none   (updated live secondmates to nudge)
 #
-# Usage: fm-update.sh [--help]
+# Usage: fm-update.sh [--help|--activate-supervisor]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,21 +34,51 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 
-"$SCRIPT_DIR/fm-guard.sh" || true
-
-usage() { echo "usage: fm-update.sh [--help]" >&2; }
+usage() { echo "usage: fm-update.sh [--help|--activate-supervisor]" >&2; }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   usage
   exit 0
 fi
-[ $# -eq 0 ] || { usage; exit 1; }
+case "${1:-}" in
+  "") update_mode=full ;;
+  --activate-supervisor) update_mode=activate ;;
+  *) usage; exit 1 ;;
+esac
+[ $# -le 1 ] || { usage; exit 1; }
+
+"$SCRIPT_DIR/fm-guard.sh" || true
 
 # --- helpers ---------------------------------------------------------------
 
 first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }
+
+activate_supervisor() {
+  if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
+    supervisor_status="skipped: secondmate home"
+    return 0
+  fi
+  if [ ! -x "$FM_ROOT/bin/fm-supervisor.sh" ]; then
+    supervisor_status="activation failed: current supervisor is not executable"
+    return 1
+  fi
+  if supervisor_output=$("$FM_ROOT/bin/fm-supervisor.sh" start 2>&1); then
+    supervisor_status="active: $(first_line "$supervisor_output")"
+    return 0
+  fi
+  supervisor_status="activation failed: $(first_line "$supervisor_output")"
+  return 1
+}
+
+if [ "$update_mode" = activate ]; then
+  supervisor_status=
+  activation_status=0
+  activate_supervisor || activation_status=$?
+  echo "supervisor: $supervisor_status"
+  exit "$activation_status"
+fi
 
 default_branch() {
   local dir=$1 ref branch
@@ -324,9 +356,16 @@ ff_target() {
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
+supervisor_status="unchanged: firstmate update was skipped"
+update_status=0
 ff_target "$FM_ROOT" "firstmate" no no
 if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
   reread_firstmate="yes"
+fi
+if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
+  supervisor_status="skipped: secondmate home"
+elif [ "$FF_STATUS" = "updated" ] || [ "$FF_STATUS" = "current" ]; then
+  activate_supervisor || update_status=$?
 fi
 
 # --- secondmates -----------------------------------------------------------
@@ -386,5 +425,7 @@ fi
 
 # --- caller action summary -------------------------------------------------
 
+echo "supervisor: $supervisor_status"
 echo "reread-firstmate: $reread_firstmate"
 echo "nudge-secondmates:${nudge_windows:- none}"
+exit "$update_status"

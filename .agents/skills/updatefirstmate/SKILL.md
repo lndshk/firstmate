@@ -22,13 +22,20 @@ This touches only the firstmate repo and its own worktrees, never anything under
    bin/fm-update.sh
    ```
    It fast-forwards this firstmate repo's default branch from origin, then fast-forwards every registered secondmate home (each a treehouse worktree of this same repo, leased at a detached HEAD on the default branch) the same way.
-   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
+   In the main home it also ensures the post-update deterministic supervisor is active, including when the repo was already safely current; a secondmate home skips that owner activation.
+   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by action lines that tell you exactly what to do next:
+   - `supervisor: active: <detail>` (or an actionable skip/failure reason)
    - `reread-firstmate: yes|no`
    - `nudge-secondmates: <window-targets...>|none`
+   A supervisor activation failure returns nonzero after the complete summary is printed; surface it instead of treating the update as complete.
 
 2. **Re-read AGENTS.md if your own instructions changed.**
    When the updater printed `reread-firstmate: yes`, the tracked instruction surface (AGENTS.md, bin/, or skills) just advanced under you.
    **Read `AGENTS.md` now** (CLAUDE.md is a symlink to it) to refresh your operating instructions before doing anything else, so you are acting on the new instructions rather than the stale ones you were started with.
+   After the re-read, inspect the updater output for a `supervisor:` line.
+   If that line is absent, the update began with a legacy updater that could fast-forward the new supervisor files but could not activate them.
+   Run `bin/fm-update.sh --activate-supervisor` once and surface any failure before continuing.
+   This compatibility action performs no fetch or fast-forward; it only activates the current post-update main-home supervisor and safely skips a secondmate home.
    When it printed `reread-firstmate: no`, nothing changed for you - skip the re-read.
 
 3. **Nudge each updated live secondmate.**

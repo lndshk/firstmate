@@ -191,9 +191,7 @@ is_live_non_zombie() {
   local pid=$1 stat
   kill -0 "$pid" 2>/dev/null || return 1
   stat=$(ps -p "$pid" -o stat= 2>/dev/null || true)
-  case "$stat" in
-    Z*) return 1 ;;
-  esac
+  case "$stat" in *Z*) return 1 ;; esac
   return 0
 }
 
@@ -349,6 +347,31 @@ test_atomic_double_drain() {
   leftover=$(FM_STATE_OVERRIDE="$state" "$DRAIN" | awk 'NF { count++ } END { print count + 0 }')
   [ "$leftover" -eq 0 ] || fail "queue was not empty after double drain"
   pass "two atomic drains cannot consume the same records twice"
+}
+
+test_drain_reports_lock_release_failure() {
+  local dir state fakebin out status
+  dir=$(make_case drain-release-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/drain.out"
+  cat > "$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  *".wake-queue.lock/pid") printf '2147483647\n'; exit 0 ;;
+esac
+exec /bin/cat "$@"
+SH
+  chmod +x "$fakebin/cat"
+  append_wake "$state" heartbeat heartbeat heartbeat \
+    || fail "release-failure wake append failed"
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || status=$?
+  [ "$status" -ne 0 ] || fail "drain hid queue lock release failure"
+  grep "$(printf '\theartbeat\theartbeat\theartbeat')" "$out" >/dev/null \
+    || fail "release-failure drain lost its emitted wake"
+  pass "drain propagates queue lock release failure"
 }
 
 test_drain_dedupes_obvious_duplicates() {
@@ -702,6 +725,65 @@ test_signal_escalate_marks_seen_no_catchall_refire() {
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ ! -s "$state/.subsuper-escalations" ] || fail "catch-all scan re-fired an already-escalated signal"
   pass "captain signal escalate marks seen so the catch-all scan does not re-fire"
+}
+
+test_timestamped_status_uses_raw_dedupe_and_clean_presentation() {
+  local dir state fakebin sent capture raw1 raw2 raw3 key out
+  dir=$(make_supercase timestamped-status)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"
+  capture="$dir/pane.txt"
+  : > "$sent"
+  : > "$capture"
+  raw1=$'done: PR https://x/y/pull/11\t1700000123'
+  raw2=$'done: PR https://x/y/pull/11\t1700000456'
+  raw3=$'needs-decision: choose release window\t1700000789'
+  printf '%s\n' "$raw1" > "$state/stamped-s11.status"
+
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/stamped-s11.status" "$state")
+  case "$out" in
+    escalate\|*"done: PR https://x/y/pull/11"*) ;;
+    *) fail "timestamped signal did not present clean receipt text: $out" ;;
+  esac
+  case "$out" in *$'\t'*|*1700000123*) fail "timestamped signal leaked receipt metadata: $out" ;; esac
+
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/stamped-s11.status" "$state"
+  key=$(printf '%s' "stamped-s11" | tr ':/.' '___')
+  [ "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "$raw1" ] \
+    || fail "seen marker did not preserve the raw timestamped receipt"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/stamped-s11.status" "$state")
+  case "$out" in self\|*) ;; *) fail "unchanged raw receipt was not deduped: $out" ;; esac
+
+  printf '%s\n' "$raw2" >> "$state/stamped-s11.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/stamped-s11.status" "$state")
+  case "$out" in
+    escalate\|*"done: PR https://x/y/pull/11"*) ;;
+    *) fail "new raw receipt version with identical text was incorrectly deduped: $out" ;;
+  esac
+  case "$out" in *$'\t'*|*1700000456*) fail "new receipt version leaked metadata: $out" ;; esac
+
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-stamped-s11" "$state")
+  case "$out" in escalate\|*"done: PR https://x/y/pull/11"*) ;; *) fail "stale presentation was not clean: $out" ;; esac
+  case "$out" in *$'\t'*|*1700000456*) fail "stale presentation leaked receipt metadata: $out" ;; esac
+
+  printf '%s\n' "$raw3" > "$state/scanned-s12.status"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  if grep -F $'\t' "$state/.subsuper-escalations" >/dev/null \
+    || grep -E '1700000123|1700000456|1700000789' "$state/.subsuper-escalations" >/dev/null; then
+    fail "escalation buffer leaked timestamp receipt metadata"
+  fi
+
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" escalate_flush "$state" \
+    || fail "timestamped escalation digest did not inject"
+  if grep -F $'\t' "$sent" >/dev/null \
+    || grep -E '1700000123|1700000456|1700000789' "$sent" >/dev/null; then
+    fail "injected digest leaked timestamp receipt metadata"
+  fi
+  pass "timestamped statuses retain raw dedupe and present clean text"
 }
 
 # ============================================================================
@@ -1340,6 +1422,7 @@ test_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_singleton_start
 test_atomic_double_drain
+test_drain_reports_lock_release_failure
 test_drain_dedupes_obvious_duplicates
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
@@ -1363,6 +1446,7 @@ test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker
 test_signal_escalate_marks_seen_no_catchall_refire
+test_timestamped_status_uses_raw_dedupe_and_clean_presentation
 # /afk presence-gating + injection hardening.
 test_collapse_newlines_pure
 test_afk_absent_daemon_does_not_inject

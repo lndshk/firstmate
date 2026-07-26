@@ -168,13 +168,23 @@ fm_pane_input_pending() {  # <target>
   [ "$(fm_tmux_composer_state "$1")" = pending ]
 }
 
+# fm_pane_busy_state: print busy, idle, or unknown after scanning a 40-line tail.
+fm_pane_busy_state() {  # <target>
+  local win=$1 tail40
+  tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
+    printf 'busy'
+  else
+    printf 'idle'
+  fi
+}
+
 # fm_pane_is_busy: 0 if the pane's last few non-blank lines show a busy footer
 # (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
 fm_pane_is_busy() {  # <target>
-  local win=$1 tail40
-  tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+  [ "$(fm_pane_busy_state "$1")" = busy ]
 }
 
 # fm_tmux_safety_prompt_selection: recognize Codex's active

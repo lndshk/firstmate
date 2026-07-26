@@ -15,7 +15,13 @@ pass() {
 }
 
 cleanup() {
+  local pid_file pid
   if [ -n "${TMP_ROOT:-}" ]; then
+    for pid_file in "$TMP_ROOT"/*/home/state/.firstmate-supervisor.pid; do
+      [ -f "$pid_file" ] || continue
+      pid=$(cat "$pid_file" 2>/dev/null || true)
+      case "$pid" in ''|*[!0-9]*) ;; *) kill "$pid" 2>/dev/null || true ;; esac
+    done
     rm -rf "$TMP_ROOT"
   fi
 }
@@ -61,7 +67,75 @@ SH
 
 run_bootstrap() {
   local home=$1 fakebin=$2
+  # Most bootstrap tests exercise capability reporting, not main-home process
+  # startup. Mark those isolated fixtures as secondmate homes.
+  : > "$home/.fm-secondmate-home"
   PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_bootstrap_starts_main_home_supervisor() {
+  local case_dir fakebin out pid
+  case_dir="$TMP_ROOT/main-home"
+  mkdir -p "$case_dir/home"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$case_dir/home" FM_BOARD_DIR="$case_dir/board" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "main-home bootstrap reported problems: $out"
+  for _ in 1 2 3 4 5; do
+    pid=$(cat "$case_dir/home/state/.firstmate-supervisor.pid" 2>/dev/null || true)
+    case "$pid" in ''|*[!0-9]*) sleep 1 ;; *) break ;; esac
+  done
+  case "${pid:-}" in ''|*[!0-9]*) fail "bootstrap did not start main-home supervisor" ;; esac
+  kill -0 "$pid" 2>/dev/null || fail "bootstrap supervisor PID receipt is not live"
+  [ -s "$case_dir/home/state/.firstmate-supervisor.heartbeat" ] \
+    || fail "bootstrap supervisor did not publish heartbeat"
+  pass "bootstrap starts the main-home supervisor"
+}
+
+test_bootstrap_reports_supervisor_startup_failure() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/supervisor-startup-failure"
+  mkdir -p "$case_dir/home/state/.firstmate-supervisor.control.lock"
+  printf '%s\n' "$$" > "$case_dir/home/state/.firstmate-supervisor.control.lock/pid"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$case_dir/home" FM_BOARD_DIR="$case_dir/board" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F \
+    "SUPERVISOR: startup failed: supervisor control operation already in progress (pid $$)" >/dev/null \
+    || fail "bootstrap suppressed supervisor startup failure: $out"
+  pass "bootstrap reports supervisor startup failure"
+}
+
+test_bootstrap_reports_failed_initial_cycle() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/supervisor-initial-cycle-failure"
+  mkdir -p "$case_dir/home"
+  : > "$case_dir/board"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$case_dir/home" FM_BOARD_DIR="$case_dir/board" \
+    FM_SUPERVISOR_START_WAIT=2 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F \
+    'SUPERVISOR: startup failed: error: supervisor failed to publish a fresh heartbeat after its initial cycle' >/dev/null \
+    || fail "bootstrap suppressed failed initial cycle: $out"
+  [ ! -e "$case_dir/home/state/.firstmate-supervisor.heartbeat" ] \
+    || fail "failed bootstrap activation published a readiness heartbeat"
+  [ ! -e "$case_dir/home/state/.firstmate-supervisor.pid" ] \
+    || fail "failed bootstrap activation retained its PID receipt"
+  [ ! -d "$case_dir/home/state/.firstmate-supervisor.lock" ] \
+    || fail "failed bootstrap activation retained its ownership lock"
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$case_dir/home" FM_BOARD_DIR="$case_dir/board" \
+    FM_SUPERVISOR_START_WAIT=2 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F \
+    'SUPERVISOR: startup failed: error: supervisor failed to publish a fresh heartbeat after its initial cycle' >/dev/null \
+    || fail "bootstrap retry silently accepted failed activation: $out"
+  pass "bootstrap reports failed supervisor initial cycle"
 }
 
 test_bootstrap_accepts_treehouse_lease_support() {
@@ -130,3 +204,6 @@ test_bootstrap_accepts_treehouse_lease_support
 test_bootstrap_reports_treehouse_without_lease_support
 test_bootstrap_reports_tasks_axi_when_available
 test_bootstrap_ignores_incompatible_tasks_axi
+test_bootstrap_starts_main_home_supervisor
+test_bootstrap_reports_supervisor_startup_failure
+test_bootstrap_reports_failed_initial_cycle

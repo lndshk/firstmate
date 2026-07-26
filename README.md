@@ -115,6 +115,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 ```
 
 - **Event-driven supervision** - a zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet and wakes the first mate only when a crewmate reports, stalls, a PR merges, or an internal heartbeat review is due.
+  A complementary always-on shell supervisor (`bin/fm-supervisor.sh`) reconciles durable wakes without consuming them, classifies recorded direct reports, writes a machine-readable snapshot, and refreshes the Firstmate Board without injecting chat or spending LLM tokens.
   Detected wakes are also written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed one-shot process exit can be recovered by draining the queue.
   Each normal watcher start also ensures one singleton keepalive sidecar is running; the sidecar judges liveness by `state/.last-watcher-beat` age and silently re-arms the one-shot watcher when the beacon goes stale and no live watcher owns the watch lock.
   The sidecar is bound to in-flight work: it only spawns while a task exists (`state/*.meta`), and it stops cleanly and stops re-arming once the fleet empties, so a torn-down or ended session never leaves a task-less watcher enqueueing heartbeats with no consumer.
@@ -142,7 +143,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 - **Project memory belongs to projects** - durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`, with `CLAUDE.md` as a symlink.
   Ship briefs prompt crewmates to create or update those files through the normal delivery path; `data/projects.md` stays a thin private registry.
 - **Local clones stay fresh** - bootstrap and PR-based teardown refresh remote-backed project clones with clean default-branch fast-forwards when the clone is on the default branch and has no local work, and prune local branches whose remote is gone and that no worktree still needs.
-- **Self-updates stay safe** - `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
+- **Self-updates stay safe** - `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, activates the main home's current deterministic supervisor (including a one-time post-re-read bridge when the update began on a legacy updater), then re-reads updated instructions and nudges updated secondmates without touching project clones.
   The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 - **Restart-proof** - all state lives in tmux, status files, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
   Every incoming request is recorded in the local backlog before clarification, routing, or dispatch, so later messages and restarts do not silently drop it.
@@ -169,6 +170,8 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
 | `fm-watch.sh`            | Singleton-safe one-shot watcher; blocks until supervision work is due, queues it durably, then exits with one reason line; `--keepalive` silently re-arms stale/missed one-shot watchers |
 | `fm-supervise-daemon.sh` | Presence-gated sub-supervisor for walk-away (`/afk`) supervision: wraps `fm-watch.sh`, self-handles routine wakes in bash, and escalates only captain-relevant events as one verified, batched, single-line digest prefixed with a sentinel marker |
+| `fm-supervisor.sh`       | Always-on main-home, no-chat supervisor; reconciles wakes, snapshots direct-report contracts, records actionable failures, and refreshes the board |
+| `fm-board.sh`            | Render the Firstmate Board once from the current supervisor snapshot; it has no separate daemon owner |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes before handling supervision work                                              |
 | `fm-send.sh`             | Send one verified literal line (or `--key Escape`) to a crewmate window; exits non-zero when Enter is positively swallowed |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, dim-ghost-aware and border-aware composer detection, Codex safety-prompt clearing, and verified submit retry |
@@ -235,7 +238,22 @@ FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a 
 FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks
 FM_HEARTBEAT_SCAN_SECS=300         # cadence of the catch-all status scan for missed captain verbs
 FM_HOUSEKEEPING_TICK=15            # seconds between batch-flush, stale-recheck, and scan passes
+FM_SUPERVISOR_INTERVAL=15          # seconds between deterministic snapshot and board refresh cycles
 ```
+
+### Always-on supervisor runbook
+
+Bootstrap silently starts the main home's supervisor when tmux is available; secondmate homes do not start another owner.
+Self-update ensures the post-update main-home supervisor is active; use `bin/fm-supervisor.sh start` to ensure it is running during manual recovery, `restart` to replace a verified stale owner, and `status` to inspect its singleton PID, heartbeat, snapshot freshness, and last error.
+The running cadence is persisted in `state/.firstmate-supervisor.owner` and governs heartbeat health checks.
+These commands are safe to run immediately after merge; `start` is idempotent and `restart` refuses duplicate ownership.
+
+The snapshot is `state/firstmate-supervisor.tsv`, current actionable conditions appear in its escalation records and the generated board, and their durable history appends to `state/.firstmate-supervisor.escalations`.
+Per-task supervisor evidence follows the generation recorded by `fm-spawn` and is reclaimed after task metadata disappears.
+Teardown alone writes generation-identified teardown markers and rechecks the generation before same-id state cleanup.
+The supervisor observes matching markers without locks or rewrites, ignores ambiguous legacy and temporary evidence, and reclaims only completed or dead-owner orphan markers after metadata is absent.
+The authoritative state-classification and optional receipt-deadline contract is in the [supervision protocol](AGENTS.md#8-supervision-protocol).
+The supervisor never drains Firstmate's wake queue, changes the backlog, or sends chat, so normal ownership and AFK batching/injection remain unchanged.
 
 ## Development
 
@@ -255,8 +273,9 @@ tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only comp
 tests/fm-safety-autoclear.test.sh         # strict Codex safety-dialog detection, Keep waiting key sequence, off switch, and recorded-window watcher wiring
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
 tests/fm-bootstrap.test.sh                # bootstrap dependency and feature-probe tests
+tests/fm-supervisor.test.sh               # always-on wake reconciliation, exact states, escalations, no-chat behavior, and singleton restart
 tests/fm-fleet-sync.test.sh               # canonical symlink-target refresh, clean-FF-only skips, and safe gone-branch pruning
-tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
+tests/fm-update.test.sh                   # fast-forward-only self-update, supervisor activation, reread, nudge, dedup, and skip-safety tests
 tests/fm-secondmate.test.sh               # persistent secondmate routing, seeding, idle charter, backlog handoff, spawn, recovery, teardown, and FM_HOME tests
 tests/fm-teardown.test.sh                 # fm-teardown.sh safety and reminder checks: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, no-mistakes regression, tasks-axi reminder, --force override
 tests/fm-stall-check.test.sh              # stall detector: finished-but-not-advanced, unblocked/date-gated queued, unlanded-work sweep with secondmate/scout/local-only/pr-parked/fork-remote/mid-rebase exemptions, idle-pane stalls, idle-advisor detection with busy/active-child/needs-decision exclusions, terminal-child handling, pr-ready skip, done-archive fallback, and guard pointer
