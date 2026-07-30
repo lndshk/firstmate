@@ -34,9 +34,33 @@
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
 
+FM_TMUX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working...".
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.'
+
+# fm_pane_agent_state: classify a tmux pane as alive, dead, or unknown.
+# A pane is alive when its root PID is an ancestor of any verified harness
+# process. Foreground child commands therefore cannot hide the still-live agent.
+fm_pane_agent_state() { # <target>
+  local target=$1 pane_pid rc
+  pane_pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  case "$pane_pid" in
+    ''|*[!0-9]*) printf 'unknown'; return 0 ;;
+  esac
+  if "$FM_TMUX_LIB_DIR/fm-harness.sh" agent-in-tree "$pane_pid" >/dev/null 2>&1; then
+    printf 'alive'
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] && printf 'dead' || printf 'unknown'
+  fi
+}
+
+fm_pane_current_command() { # <target>
+  tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
+}
 
 # fm_tmux_strip_ghost: remove dim/faint (ANSI SGR 2) styled runs from one captured
 # composer line, then drop any remaining escape sequences, leaving only the plain,
