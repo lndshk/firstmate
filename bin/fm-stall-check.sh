@@ -295,6 +295,20 @@ check_date_gates() {
   done
 }
 
+check_dead_agents() {
+  local meta id window pane_command
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    window=$(window_for_meta "$meta")
+    [ -n "$window" ] || continue
+    [ "$(fm_pane_agent_state "$window")" = dead ] || continue
+    pane_command=$(fm_pane_current_command "$window" || true)
+    [ -n "$pane_command" ] || pane_command=unknown
+    printf 'dead?: %s - window %s has no live agent process (pane at %s)\n' "$id" "$window" "$pane_command"
+  done
+}
+
 check_idle_stalls() {
   local meta id kind status m age window
   for meta in "$STATE"/*.meta; do
@@ -404,6 +418,7 @@ check_unblocked_queued
 check_date_gates
 check_unlanded_work
 if ! "$FAST"; then
+  check_dead_agents
   check_idle_stalls
   check_advisor_idle_stalls
 fi

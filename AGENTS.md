@@ -94,7 +94,7 @@ state/               volatile runtime signals; gitignored
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
-  .hash-* .count-* .stale-* .seen-* .last-* .heartbeat-streak   watcher internals; never touch
+  .hash-* .count-* .stale-* .dead-* .seen-* .last-* .heartbeat-streak   watcher internals; never touch
   .last-watcher-beat watcher liveness beacon, touched every poll; fm-guard.sh reads it
   .watch.keepalive.* keepalive sidecar lock, log, and stderr; never touch
   .subsuper-* .supervise-daemon.*   sub-supervisor internals (stale markers, escalation buffer, inject-wedged marker, seen-status dedup, log, lock, pid); never touch
@@ -595,7 +595,7 @@ tmux is the ground truth.
 For `kind=secondmate`, an idle pane is healthy.
 A secondmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
 `fm-watch.sh` therefore skips stale-pane wakes for windows whose meta records `kind=secondmate`.
-This exception is narrow: ordinary crewmates still trip stale detection when their pane stops changing without a busy signature.
+This exception is narrow: ordinary crewmates still trip stale detection when their pane stops changing without a busy signature, and every recorded pane still trips a wake when two consecutive process-tree checks find no live verified agent.
 
 **Watcher liveness is guarded, not just disciplined.**
 Arming the watcher is the last action of every wake-handling turn - but the protocol no longer relies on remembering that.

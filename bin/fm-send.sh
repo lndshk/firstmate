@@ -50,6 +50,16 @@ resolve() {
 T=$(resolve "$1")
 shift
 
+agent_state=$(fm_pane_agent_state "$T")
+if [ "$agent_state" = dead ]; then
+  pane_command=$(fm_pane_current_command "$T" || true)
+  [ -n "$pane_command" ] || pane_command=unknown
+  echo "error: refusing to send to $T: no live agent process (pane at $pane_command)" >&2
+  exit 1
+elif [ "$agent_state" = unknown ]; then
+  echo "warning: could not verify a live agent process in $T; continuing because pane process state is unreadable" >&2
+fi
+
 if [ "${1:-}" = "--key" ]; then
   tmux send-keys -t "$T" "$2"
 else
