@@ -51,6 +51,30 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 
+pr_is_merged() { # <pr-url>  -> 0 only when GitHub positively reports "merged"
+  # Why this exists: a squash merge rewrites history, so the worktree's HEAD is
+  # never an ancestor of the merge commit. While the remote branch survives, the
+  # "reachable from any remote-tracking branch" test below still passes. But with
+  # GitHub's delete_branch_on_merge enabled the branch disappears the moment the
+  # PR merges, and the next `git fetch --prune` (bootstrap runs one every session)
+  # drops the local remote-tracking ref - after which that test reports landed work
+  # as unpushed and teardown refuses. A false refusal is not merely noise: it
+  # invites --force, which genuinely discards work, eroding prime directive #3.
+  #
+  # FAILS SAFE. Any missing tool, auth problem, network error, timeout, unparseable
+  # URL, or non-merged state returns non-zero, so the caller falls through to the
+  # normal refusal. This never assumes merged; it only accepts a positive answer.
+  local url=${1:-} repo num state
+  [ -n "$url" ] || return 1
+  command -v gh-axi >/dev/null 2>&1 || return 1
+  repo=$(printf '%s' "$url" | sed -n 's#^https\?://github\.com/\([^/]*/[^/]*\)/pull/[0-9][0-9]*.*#\1#p')
+  num=$(printf '%s' "$url" | sed -n 's#^https\?://github\.com/[^/]*/[^/]*/pull/\([0-9][0-9]*\).*#\1#p')
+  [ -n "$repo" ] && [ -n "$num" ] || return 1
+  state=$(timeout 20 gh-axi pr view "$num" --repo "$repo" 2>/dev/null \
+    | sed -n 's/^[[:space:]]*state:[[:space:]]*"\?\([a-zA-Z]*\)"\?[[:space:]]*$/\1/p' | head -1)
+  [ "$state" = "merged" ]
+}
+
 default_branch() {
   local ref branch
   ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
@@ -541,10 +565,18 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
         echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
         exit 1
       fi
+    elif [ -n "$unpushed" ] && [ -z "$dirty" ] && pr_is_merged "$PR_URL"; then
+      # The commits are not on any remote-tracking branch, but GitHub positively
+      # reports this task's PR as merged - so the work landed and the remote branch
+      # was deleted (squash merge + delete_branch_on_merge). That is landed work,
+      # not lost work. Note the guard on $dirty: a merged PR is evidence only about
+      # COMMITTED work, so uncommitted changes still fall through and refuse below.
+      echo "landed: $PR_URL is merged; the remote branch is gone (squash merge), so HEAD is no longer reachable from a remote-tracking ref." >&2
     elif [ -n "$dirty" ] || [ -n "$unpushed" ]; then
       echo "REFUSED: worktree $WT has work not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unpushed" ] && printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+      [ -n "$PR_URL" ] && echo "note: meta records pr=$PR_URL but GitHub did not report it merged (or could not be reached), so this refusal stands." >&2
       echo "Push the branch (or get the captain's explicit OK to discard, then --force)." >&2
       exit 1
     fi

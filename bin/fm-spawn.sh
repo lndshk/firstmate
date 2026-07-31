@@ -121,7 +121,17 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$(cat __BRIEF__)"' ;;
+    # Model tier: config/crew-model (local, gitignored) pins the claude model for spawned
+    # crewmates - e.g. "sonnet" to conserve a constrained allotment. Absent = CLI default.
+    claude)
+      _fm_model=""
+      [ -f "$FM_ROOT/config/crew-model" ] && _fm_model=$(tr -d '[:space:]' < "$FM_ROOT/config/crew-model" 2>/dev/null)
+      if [ -n "$_fm_model" ]; then
+        printf '%s' "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model $_fm_model --dangerously-skip-permissions \"\$(cat __BRIEF__)\""
+      else
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$(cat __BRIEF__)"'
+      fi
+      ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox -c __CODEX_TRUST__ "$(cat __BRIEF__)"'
