@@ -37,6 +37,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
@@ -123,9 +124,20 @@ launch_template() {
     # the defense-in-depth backstop for any pane this flag cannot reach.
     # Model tier: config/crew-model (local, gitignored) pins the claude model for spawned
     # crewmates - e.g. "sonnet" to conserve a constrained allotment. Absent = CLI default.
+    # Resolved home-scoped like every other config knob (see fm-harness.sh), so a
+    # secondmate home reads its own pin instead of the bin/ repo's.
     claude)
       _fm_model=""
-      [ -f "$FM_ROOT/config/crew-model" ] && _fm_model=$(tr -d '[:space:]' < "$FM_ROOT/config/crew-model" 2>/dev/null)
+      [ -f "$CONFIG/crew-model" ] && _fm_model=$(tr -d '[:space:]' < "$CONFIG/crew-model" 2>/dev/null)
+      # This value is interpolated into a launch string that is typed into a live
+      # shell, so accept only model-name characters; anything else is ignored rather
+      # than executed. shell_quote is defined below and is not in scope here.
+      case "$_fm_model" in
+        *[!A-Za-z0-9._-]*)
+          echo "warning: ignoring $CONFIG/crew-model: '$_fm_model' is not a bare model name" >&2
+          _fm_model=""
+          ;;
+      esac
       if [ -n "$_fm_model" ]; then
         printf '%s' "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model $_fm_model --dangerously-skip-permissions \"\$(cat __BRIEF__)\""
       else

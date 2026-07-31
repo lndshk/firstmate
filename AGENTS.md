@@ -34,6 +34,8 @@ Hard rules, in priority order:
 3. **Never tear down a worktree that holds unlanded work.**
    `bin/fm-teardown.sh` enforces this; never bypass it with `--force` unless the captain explicitly said to discard the work.
    The work is "landed" once `HEAD` is reachable from any remote-tracking branch (a fork counts as a remote - upstream-contribution PRs pushed to a fork satisfy this in any mode); for `local-only` ship tasks with no remote at all, the work may instead be merged into the local default branch.
+   A third proof covers the squash-merge case: when the task's meta records a `pr=` URL and GitHub positively reports that PR merged, the committed work landed even though the remote branch (and with it the remote-tracking ref) is gone, so teardown proceeds.
+   That proof is about committed work only - a dirty worktree still refuses - and only a positive "merged" answer counts, so a missing tool, auth problem, network error, or any other state falls back to refusing.
    The scout carve-out: a scout task's worktree is declared scratch from the start - its deliverable is the report, and teardown lets the worktree go once that report exists (section 7).
 4. **Crewmates never address the captain.**
    All crewmate communication flows through you.

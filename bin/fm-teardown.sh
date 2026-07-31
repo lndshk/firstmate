@@ -9,6 +9,11 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
 # for the common case where there is no remote at all.
+# A merged PR recorded as pr= in the task meta is a third landed-work proof, for
+# the squash-merge + delete_branch_on_merge case where the remote branch (and then
+# the remote-tracking ref) is gone even though the work landed. It is evidence
+# about COMMITTED work only, so a dirty worktree still refuses, and it accepts
+# only a positive "merged" answer from GitHub - every other outcome refuses.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product - teardown proceeds once the report exists, and refuses without it.
@@ -51,6 +56,19 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 
+run_with_timeout() { # <seconds> <command...>  - stock macOS ships no coreutils `timeout`
+  local secs=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+  else
+    # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$secs" "$@"
+  fi
+}
+
 pr_is_merged() { # <pr-url>  -> 0 only when GitHub positively reports "merged"
   # Why this exists: a squash merge rewrites history, so the worktree's HEAD is
   # never an ancestor of the merge commit. While the remote branch survives, the
@@ -64,14 +82,18 @@ pr_is_merged() { # <pr-url>  -> 0 only when GitHub positively reports "merged"
   # FAILS SAFE. Any missing tool, auth problem, network error, timeout, unparseable
   # URL, or non-merged state returns non-zero, so the caller falls through to the
   # normal refusal. This never assumes merged; it only accepts a positive answer.
+  # Every pattern here is portable BRE (no GNU-only \? or \+) and the timeout goes
+  # through run_with_timeout, so this stays live on macOS rather than silently
+  # degrading back into the false refusal it exists to prevent.
   local url=${1:-} repo num state
   [ -n "$url" ] || return 1
   command -v gh-axi >/dev/null 2>&1 || return 1
-  repo=$(printf '%s' "$url" | sed -n 's#^https\?://github\.com/\([^/]*/[^/]*\)/pull/[0-9][0-9]*.*#\1#p')
-  num=$(printf '%s' "$url" | sed -n 's#^https\?://github\.com/[^/]*/[^/]*/pull/\([0-9][0-9]*\).*#\1#p')
+  repo=$(printf '%s' "$url" | sed -n 's#^https*://github\.com/\([^/]*/[^/]*\)/pull/[0-9][0-9]*.*#\1#p')
+  num=$(printf '%s' "$url" | sed -n 's#^https*://github\.com/[^/]*/[^/]*/pull/\([0-9][0-9]*\).*#\1#p')
   [ -n "$repo" ] && [ -n "$num" ] || return 1
-  state=$(timeout 20 gh-axi pr view "$num" --repo "$repo" 2>/dev/null \
-    | sed -n 's/^[[:space:]]*state:[[:space:]]*"\?\([a-zA-Z]*\)"\?[[:space:]]*$/\1/p' | head -1)
+  state=$(run_with_timeout 20 gh-axi pr view "$num" --repo "$repo" 2>/dev/null \
+    | tr -d '"' \
+    | sed -n 's/^[[:space:]]*state:[[:space:]]*\([a-zA-Z][a-zA-Z]*\)[[:space:]]*$/\1/p' | head -1)
   [ "$state" = "merged" ]
 }
 
@@ -576,7 +598,17 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       echo "REFUSED: worktree $WT has work not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unpushed" ] && printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      [ -n "$PR_URL" ] && echo "note: meta records pr=$PR_URL but GitHub did not report it merged (or could not be reached), so this refusal stands." >&2
+      # Only claim a GitHub answer when pr_is_merged actually ran. The branch above
+      # short-circuits on both $unpushed and $dirty, so this mirrors that condition
+      # exactly; otherwise a refusal caused by uncommitted changes would send
+      # firstmate chasing gh auth or the network.
+      if [ -n "$PR_URL" ]; then
+        if [ -n "$unpushed" ] && [ -z "$dirty" ]; then
+          echo "note: meta records pr=$PR_URL but GitHub did not report it merged (or could not be reached), so this refusal stands." >&2
+        else
+          echo "note: meta records pr=$PR_URL, but a merged PR is evidence about committed work only; commit or discard the uncommitted changes first." >&2
+        fi
+      fi
       echo "Push the branch (or get the captain's explicit OK to discard, then --force)." >&2
       exit 1
     fi

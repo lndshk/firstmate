@@ -13,6 +13,16 @@
 #   (d) no-mistakes  + HEAD on origin remote-tracking branch   -> ALLOW  (no regression)
 #   (e) no-mistakes  + truly unpushed work                     -> REFUSE (no regression)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
+#
+# The merged-PR evidence path (squash merge + delete_branch_on_merge deletes the
+# remote branch, so landed work stops being reachable from a remote-tracking ref).
+# It must accept ONLY a positive "merged" answer about COMMITTED work:
+#   (g) unpushed + clean + pr= reported merged                 -> ALLOW  (the fix)
+#   (h) unpushed + clean + pr= reported open                   -> REFUSE (fail safe)
+#   (i) unpushed + clean + pr= but gh-axi errors               -> REFUSE (fail safe)
+#   (j) unpushed + clean + pr= but gh-axi absent from PATH     -> REFUSE (fail safe)
+#   (k) unpushed + DIRTY  + pr= reported merged                -> REFUSE (committed work only)
+#   (l) unpushed + clean + pr= reported merged, quoted state   -> ALLOW  (parser portability)
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -125,6 +135,45 @@ SH
   chmod +x "$case_dir/fakebin/tasks-axi"
 }
 
+# Install a `gh-axi` mock whose `pr view` output carries the given state text,
+# and which logs every invocation to $case_dir/gh-axi.log. The state is injected
+# verbatim so a caller can pass either `merged` (the format real gh-axi emits) or
+# `"merged"` (the quoted variant the parser also tolerates). Args: case_dir state
+add_gh_axi_state() {
+  local case_dir=$1 state=$2
+  cat > "$case_dir/fakebin/gh-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/gh-axi.log"
+printf 'pr:\n  number: 7\n  title: a change\n  state: $state\n'
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+}
+
+# Install a `gh-axi` mock that fails, standing in for an auth problem, a network
+# error, or an unknown PR. Args: case_dir
+add_failing_gh_axi() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/gh-axi.log"
+echo "gh: authentication required" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+}
+
+# Echo \$PATH with every entry that provides a real `gh-axi` removed, so the
+# "tool absent" case is deterministic on a machine that has gh-axi installed.
+path_without_gh_axi() {
+  local entry out= IFS=:
+  for entry in $PATH; do
+    [ -n "$entry" ] || continue
+    [ -x "$entry/gh-axi" ] && continue
+    out="${out:+$out:}$entry"
+  done
+  printf '%s\n' "$out"
+}
+
 # Write a meta file for the task. Args: case_dir mode kind
 write_meta() {
   local case_dir=$1 mode=$2 kind=$3
@@ -159,11 +208,13 @@ add_fork_with_pushed_branch() {
 }
 
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
+# Set FM_TEST_BASE_PATH to replace the inherited PATH the mocks are prepended to
+# (used to prove behavior when a tool is genuinely absent).
 run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
-  PATH="$case_dir/fakebin:$PATH" \
+  PATH="$case_dir/fakebin:${FM_TEST_BASE_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
 
@@ -519,6 +570,136 @@ SH
   pass "PR-based teardown fast-forwards a symlink project's canonical target"
 }
 
+# (g) The merged-PR evidence path: a squash merge deleted the remote branch, so the
+# commits are on no remote-tracking ref, but GitHub positively reports the PR merged.
+test_merged_pr_allows_unpushed_teardown() {
+  local case_dir rc
+  case_dir=$(make_case merged-pr-allow)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "work that was squash-merged"
+  add_failing_no_mistakes "$case_dir"
+  add_gh_axi_state "$case_dir" merged
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merged-pr-allow: teardown should succeed when the PR is merged"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "merged-pr-allow: teardown printed a REFUSED line"
+  grep -F 'landed: https://github.com/example/repo/pull/7 is merged' "$case_dir/stderr" >/dev/null \
+    || fail "merged-pr-allow: teardown did not report the merged-PR evidence: $(cat "$case_dir/stderr")"
+  grep -F 'pr view 7 --repo example/repo' "$case_dir/gh-axi.log" >/dev/null \
+    || fail "merged-pr-allow: URL was not parsed into repo/number: $(cat "$case_dir/gh-axi.log")"
+  pass "unpushed worktree whose PR GitHub reports merged is torn down (the fix)"
+}
+
+# (h) Any non-merged state is not evidence; the refusal must stand.
+test_open_pr_refuses_unpushed_teardown() {
+  local case_dir rc
+  case_dir=$(make_case open-pr-refuse)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "work still in review"
+  add_gh_axi_state "$case_dir" open
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "open-pr-refuse: teardown should refuse an unmerged PR"
+  grep -q REFUSED "$case_dir/stderr" || fail "open-pr-refuse: no REFUSED line in stderr"
+  grep -F 'GitHub did not report it merged' "$case_dir/stderr" >/dev/null \
+    || fail "open-pr-refuse: refusal did not explain the PR check: $(cat "$case_dir/stderr")"
+  pass "unpushed worktree whose PR is still open is refused (fail safe)"
+}
+
+# (i) A tool that errors (auth, network, unknown PR) is not a positive answer.
+test_failing_gh_axi_refuses_unpushed_teardown() {
+  local case_dir rc
+  case_dir=$(make_case gh-axi-error-refuse)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "work with an unreachable PR"
+  add_failing_gh_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gh-axi-error-refuse: teardown should refuse when the PR check errors"
+  grep -q REFUSED "$case_dir/stderr" || fail "gh-axi-error-refuse: no REFUSED line in stderr"
+  [ -s "$case_dir/gh-axi.log" ] || fail "gh-axi-error-refuse: the PR check never ran"
+  pass "unpushed worktree is refused when the PR check errors (fail safe)"
+}
+
+# (j) No gh-axi on PATH at all: still a refusal, never an assumed merge.
+test_missing_gh_axi_refuses_unpushed_teardown() {
+  local case_dir rc
+  case_dir=$(make_case gh-axi-missing-refuse)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "work with no way to check the PR"
+
+  set +e
+  FM_TEST_BASE_PATH=$(path_without_gh_axi) \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gh-axi-missing-refuse: teardown should refuse without gh-axi"
+  grep -q REFUSED "$case_dir/stderr" || fail "gh-axi-missing-refuse: no REFUSED line in stderr"
+  pass "unpushed worktree is refused when gh-axi is absent (fail safe)"
+}
+
+# (k) A merged PR is evidence about COMMITTED work only; uncommitted changes still refuse,
+# and the PR check must not even be consulted.
+test_merged_pr_does_not_cover_dirty_worktree() {
+  local case_dir rc
+  case_dir=$(make_case merged-pr-dirty-refuse)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "work that was squash-merged"
+  printf 'uncommitted\n' > "$case_dir/wt/scratch.txt"
+  add_gh_axi_state "$case_dir" merged
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "merged-pr-dirty-refuse: a merged PR must not cover uncommitted changes"
+  grep -q REFUSED "$case_dir/stderr" || fail "merged-pr-dirty-refuse: no REFUSED line in stderr"
+  grep -F 'evidence about committed work only' "$case_dir/stderr" >/dev/null \
+    || fail "merged-pr-dirty-refuse: refusal blamed the PR check it never ran: $(cat "$case_dir/stderr")"
+  [ ! -f "$case_dir/gh-axi.log" ] \
+    || fail "merged-pr-dirty-refuse: the PR check ran despite uncommitted changes"
+  pass "a merged PR does not license tearing down a dirty worktree (committed work only)"
+}
+
+# (l) The state parser must also tolerate a quoted value, using portable BREs only.
+test_quoted_merged_state_allows_unpushed_teardown() {
+  local case_dir rc
+  case_dir=$(make_case merged-pr-quoted-allow)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "work that was squash-merged"
+  add_failing_no_mistakes "$case_dir"
+  add_gh_axi_state "$case_dir" '"merged"'
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merged-pr-quoted-allow: a quoted merged state should be accepted"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "merged-pr-quoted-allow: teardown printed a REFUSED line"
+  pass "the PR state parser accepts a quoted value (portable BRE, no GNU-only \\?)"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_no_mistakes_ship_aborts_run_on_task_branch
@@ -534,3 +715,9 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_merged_pr_allows_unpushed_teardown
+test_open_pr_refuses_unpushed_teardown
+test_failing_gh_axi_refuses_unpushed_teardown
+test_missing_gh_axi_refuses_unpushed_teardown
+test_merged_pr_does_not_cover_dirty_worktree
+test_quoted_merged_state_allows_unpushed_teardown
