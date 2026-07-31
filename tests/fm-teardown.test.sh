@@ -162,6 +162,19 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi"
 }
 
+# True when any entry of the given PATH string provides an executable <tool>.
+# Deterministic by construction (no hash table, no builtin lookup rules), and it
+# mirrors how path_without_gh_axi decides which entries to drop.
+# Args: path_string tool
+path_provides() {
+  local pathstr=$1 tool=$2 entry IFS=:
+  for entry in $pathstr; do
+    [ -n "$entry" ] || continue
+    [ -x "$entry/$tool" ] && return 0
+  done
+  return 1
+}
+
 # Echo \$PATH with every entry that provides a real `gh-axi` removed, so the
 # "tool absent" case is deterministic on a machine that has gh-axi installed.
 path_without_gh_axi() {
@@ -172,6 +185,23 @@ path_without_gh_axi() {
     out="${out:+$out:}$entry"
   done
   printf '%s\n' "$out"
+}
+
+# Dropping whole PATH entries takes everything else in those directories with it.
+# On a layout where gh-axi shares a bin dir with git (an npm prefix of /usr/local,
+# or an asdf/Nix shim dir), the gh-axi-absent case would quietly become a
+# git-absent case: `dirty` and `unpushed` both come back empty, no branch fires,
+# and the assertion fails with no hint of the real cause. These tools are not
+# mocked in fakebin, so name the ones teardown needs and report the real reason.
+# A tool missing from the unfiltered PATH too was never available and is not the
+# filter's doing, so it is skipped rather than blamed. Args: filtered_path
+assert_path_keeps_teardown_tools() {
+  local filtered=$1 tool
+  for tool in bash git perl grep sed awk cut head tr; do
+    path_provides "$PATH" "$tool" || continue
+    path_provides "$filtered" "$tool" && continue
+    fail "cannot express the gh-axi-absent case on this PATH layout: removing gh-axi's directory also removes $tool"
+  done
 }
 
 # Write a meta file for the task. Args: case_dir mode kind
@@ -638,14 +668,20 @@ test_failing_gh_axi_refuses_unpushed_teardown() {
 
 # (j) No gh-axi on PATH at all: still a refusal, never an assumed merge.
 test_missing_gh_axi_refuses_unpushed_teardown() {
-  local case_dir rc
+  local case_dir rc filtered
   case_dir=$(make_case gh-axi-missing-refuse)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   wt_commit "$case_dir" "work with no way to check the PR"
 
+  # Assert outside a command substitution: fail's exit would only kill a subshell.
+  filtered=$(path_without_gh_axi)
+  assert_path_keeps_teardown_tools "$filtered"
+  path_provides "$filtered" gh-axi \
+    && fail "gh-axi-missing-refuse: gh-axi is still reachable, so the case is not being exercised"
+
   set +e
-  FM_TEST_BASE_PATH=$(path_without_gh_axi) \
+  FM_TEST_BASE_PATH="$filtered" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
