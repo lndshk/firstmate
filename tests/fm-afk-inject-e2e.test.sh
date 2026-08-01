@@ -327,7 +327,65 @@ test_scenario_b() {
   pass "Scenario B: swallowed Enter produces exactly one clean digest"
 }
 
+# --- Scenario C: vanished injection target -----------------------------------
+# Real tmux answers `display-message -p -t <gone window>` from the client's
+# current pane with exit 0, so a guard built on it can never fail. The daemon
+# must resolve its own target with the list-panes probe instead and refuse to
+# run against a target that is no longer there.
+
+test_scenario_c() {
+  reset_state
+  afk_enter "$STATE_DIR"
+
+  local gone="supervisor:fm-vanished" fallback dpid rc=0 i=0
+  fallback=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$gone" '#{pane_id}' 2>/dev/null) \
+    || fallback=""
+  [ -n "$fallback" ] \
+    || fail "Scenario C: expected real tmux display-message to silently answer for a gone window"
+  if PATH="$TMUX_SHIM_DIR:$PATH" fm_pane_exists "$gone"; then
+    fail "Scenario C: the pane probe accepted a window that does not exist"
+  fi
+
+  echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
+
+  PATH="$TMUX_SHIM_DIR:$PATH" \
+  FM_STATE_OVERRIDE="$STATE_DIR" \
+  FM_SUPERVISOR_TARGET="$gone" \
+  FM_ESCALATE_BATCH_SECS=0 \
+  FM_HOUSEKEEPING_TICK=1 \
+  FM_POLL=1 \
+  FM_SIGNAL_GRACE=1 \
+  FM_HEARTBEAT=999999 \
+  FM_CHECK_INTERVAL=999999 \
+  FM_STALE_ESCALATE_SECS=999999 \
+    "$DAEMON" >"$STATE_DIR/gone.out" 2>"$STATE_DIR/gone.err" &
+  dpid=$!
+  while [ "$i" -lt 40 ] && kill -0 "$dpid" 2>/dev/null; do
+    sleep 0.25
+    i=$((i + 1))
+  done
+  if kill -0 "$dpid" 2>/dev/null; then
+    kill "$dpid" 2>/dev/null || true
+    wait "$dpid" 2>/dev/null || true
+    fail "Scenario C: daemon kept running against a target that does not exist"
+  fi
+  wait "$dpid" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "Scenario C: daemon exited zero for a target that does not exist"
+  grep -q 'does not resolve to a tmux pane' "$STATE_DIR/gone.err" \
+    || fail "Scenario C: gone target was not reported: $(cat "$STATE_DIR/gone.err")"
+  [ ! -f "$STATE_DIR/.supervise-daemon.pid" ] \
+    || fail "Scenario C: daemon left a pid file after refusing a gone target"
+  if grep -q 'Supervisor escalate' "$LOG_FILE"; then
+    fail "Scenario C: an escalation reached the live pane while the target was gone"
+  fi
+
+  afk_exit "$STATE_DIR" 2>/dev/null || true
+  pass "Scenario C: a vanished injection target is refused, not resolved to the live pane"
+}
+
 test_scenario_a
 test_scenario_b
+test_scenario_c
 
 echo "all e2e injection tests passed"

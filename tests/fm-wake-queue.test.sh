@@ -75,8 +75,14 @@ make_supercase() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  list-panes)
+    # Pane presence is probed with list-panes, which fails for a gone target.
+    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || { printf "can't find window\n" >&2; exit 1; }
+    printf 'fakepane\n'
+    exit 0 ;;
   display-message)
-    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
+    # Real tmux answers display-message from the client's current pane even when
+    # the target is gone, so this fake never fails - only list-panes above can.
     _print=0
     # Return cursor_y when the format asks for it (pane_input_pending).
     for _a in "$@"; do
@@ -833,6 +839,30 @@ test_timestamped_status_uses_raw_dedupe_and_clean_presentation() {
 # /afk presence-gating + injection hardening
 # ============================================================================
 
+# The daemon's own injection target is guarded with the same list-panes probe as
+# every other pane check: display-message answers from the client's current pane
+# for a target that is gone, so a guard built on it can never fail and the daemon
+# keeps treating a vanished firstmate pane as a live one.
+test_inject_refuses_a_gone_target() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase inject-gone-target)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  afk_enter "$state"
+  escalate_add "$state" "done: PR https://x/y/pull/13"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=0 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state"; then
+    fail "escalate_flush reported success with a gone injection target"
+  fi
+  [ ! -s "$sent" ] \
+    || fail "the daemon typed into a pane after its own target vanished: $(cat "$sent")"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "escalations were dropped instead of preserved for the next flush"
+  pass "a gone injection target is detected: nothing is typed and the buffer survives"
+}
+
 test_collapse_newlines_pure() {
   local out
   out=$(_collapse_newlines $'line one\nline two\nline three')
@@ -1492,6 +1522,7 @@ test_dead_agent_stale_wake_parses_window_and_escalates
 test_signal_escalate_marks_seen_no_catchall_refire
 test_timestamped_status_uses_raw_dedupe_and_clean_presentation
 # /afk presence-gating + injection hardening.
+test_inject_refuses_a_gone_target
 test_collapse_newlines_pure
 test_afk_absent_daemon_does_not_inject
 test_afk_present_injects_with_marker
