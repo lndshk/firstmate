@@ -14,6 +14,16 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
+# Recognizes exactly the four VERIFIED harnesses (section 4: "never dispatch a
+# crewmate on an unverified adapter"). A process tree matching none of these is
+# treated as agent-dead by agent_in_tree/fm_pane_agent_state - intentionally:
+# under that policy every real crewmate runs one of these four, so a tree with
+# none of them means either the agent genuinely exited or the pane is running
+# something firstmate never dispatched. The one deliberate exception is the
+# raw-launch-command escape hatch used only to verify a brand-new adapter
+# (section 4), where firstmate is already peeking the pane directly and a
+# transient false-dead reading there is low-risk, unlike a long-lived trusted
+# pane silently misreporting healthy.
 harness_for_process() { # <comm> <args>
   local comm=${1##*/} args=${2:-}
   case "$comm" in
