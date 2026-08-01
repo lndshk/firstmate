@@ -97,9 +97,11 @@ pr_is_merged() { # <pr-url> <worktree-head-sha>  -> 0 only when GitHub positivel
   # FAILS SAFE. Any missing tool, auth problem, network error, timeout, unparseable
   # URL, absent or malformed head sha, non-merged state, or sha mismatch returns
   # non-zero, so the caller falls through to the normal refusal. This never assumes
-  # merged; it only accepts a positive, matching answer. Note that gh-axi exits 0
-  # even on a 404, so nothing here keys off its exit status - only on parsing a
-  # positive answer out of the body.
+  # merged; it only accepts a positive, matching answer. VERIFIED: on a 404 gh-axi
+  # exits 1 and writes its error body to STDOUT, leaving stderr empty - so the
+  # `2>/dev/null` above does not suppress it and a non-empty body is not evidence of
+  # anything. Hence the check parses for two positive facts instead of trusting the
+  # exit status or the presence of output; an error body cannot produce them.
   # Every pattern here is portable BRE/awk (no GNU-only \? or \+) and the timeout
   # goes through run_with_timeout, so this stays live on macOS rather than silently
   # degrading back into the false refusal it exists to prevent.

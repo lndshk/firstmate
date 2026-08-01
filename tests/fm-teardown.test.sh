@@ -27,7 +27,7 @@
 #   (l) unpushed + clean + merged, quoted merged/sha values    -> ALLOW  (parser portability)
 #   (m) unpushed + clean + merged, head sha != HEAD            -> REFUSE, naming BOTH shas
 #   (n) unpushed + clean + merged but no head sha reported     -> REFUSE (fail safe)
-#   (o) unpushed + clean + gh-axi 404 body with exit status 0  -> REFUSE (fail safe)
+#   (o) unpushed + clean + gh-axi error body but exit status 0 -> REFUSE (fail safe)
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -197,9 +197,12 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi"
 }
 
-# Install a `gh-axi` mock reproducing the real 404 shape: an error body on stdout
-# and exit status 0 (verified live against a nonexistent PR). Nothing in
-# pr_is_merged may key off the exit status, so this must still refuse. Args: case_dir
+# Install a `gh-axi` mock emitting the real 404 error body (VERIFIED live against a
+# nonexistent PR: gh-axi writes it to STDOUT, so `2>/dev/null` does not suppress it),
+# but paired with exit status 0, which real gh-axi does NOT do - it exits 1. This is
+# deliberately stronger than reality: pr_is_merged accepts only on parsing two
+# positive facts, so it must refuse an error body however the tool signalled it.
+# Args: case_dir
 add_notfound_gh_axi() {
   local case_dir=$1
   cat > "$case_dir/fakebin/gh-axi" <<SH
@@ -750,8 +753,10 @@ test_merged_pr_without_head_sha_refuses_teardown() {
   pass "a merged PR with no resolvable head sha is refused (fail safe)"
 }
 
-# (o) Real gh-axi exits 0 on a 404 and prints an error body, so a zero exit status is
-# never evidence on its own.
+# (o) An error body on stdout is never evidence, whatever the exit status says.
+# Deliberately stronger than observed behavior: real gh-axi exits 1 on a 404 (case (i)
+# already covers a non-zero exit), so this pairs the real error body with exit 0 to
+# prove the acceptance rests on parsing two positive facts rather than on the signal.
 test_notfound_gh_axi_refuses_unpushed_teardown() {
   local case_dir rc
   case_dir=$(make_case gh-axi-notfound-refuse)
@@ -765,10 +770,10 @@ test_notfound_gh_axi_refuses_unpushed_teardown() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "gh-axi-notfound-refuse: a 404 body with exit 0 must still refuse"
+  expect_code 1 "$rc" "gh-axi-notfound-refuse: an error body must refuse even on a zero exit"
   grep -q REFUSED "$case_dir/stderr" || fail "gh-axi-notfound-refuse: no REFUSED line in stderr"
   [ -s "$case_dir/gh-axi.log" ] || fail "gh-axi-notfound-refuse: the PR check never ran"
-  pass "a 404 body with a zero exit status is refused (fail safe)"
+  pass "an error body is refused even when the tool exits 0 (fail safe)"
 }
 
 # (i) A tool that errors (auth, network) is not a positive answer.
