@@ -16,13 +16,18 @@
 #
 # The merged-PR evidence path (squash merge + delete_branch_on_merge deletes the
 # remote branch, so landed work stops being reachable from a remote-tracking ref).
-# It must accept ONLY a positive "merged" answer about COMMITTED work:
-#   (g) unpushed + clean + pr= reported merged                 -> ALLOW  (the fix)
-#   (h) unpushed + clean + pr= reported open                   -> REFUSE (fail safe)
-#   (i) unpushed + clean + pr= but gh-axi errors               -> REFUSE (fail safe)
-#   (j) unpushed + clean + pr= but gh-axi absent from PATH     -> REFUSE (fail safe)
-#   (k) unpushed + DIRTY  + pr= reported merged                -> REFUSE (committed work only)
-#   (l) unpushed + clean + pr= reported merged, quoted state   -> ALLOW  (parser portability)
+# It must accept ONLY a positive "merged" answer whose head sha is this worktree's
+# HEAD, and only about COMMITTED work. "This PR merged" is not "these commits
+# merged", so the head sha is what ties the evidence to the work being discarded:
+#   (g) unpushed + clean + merged, head sha = HEAD             -> ALLOW  (the fix)
+#   (h) unpushed + clean + PR still open                       -> REFUSE (fail safe)
+#   (i) unpushed + clean + gh-axi errors                       -> REFUSE (fail safe)
+#   (j) unpushed + clean + gh-axi absent from PATH             -> REFUSE (fail safe)
+#   (k) unpushed + DIRTY  + merged, head sha = HEAD            -> REFUSE (committed work only)
+#   (l) unpushed + clean + merged, quoted merged/sha values    -> ALLOW  (parser portability)
+#   (m) unpushed + clean + merged, head sha != HEAD            -> REFUSE, naming BOTH shas
+#   (n) unpushed + clean + merged but no head sha reported     -> REFUSE (fail safe)
+#   (o) unpushed + clean + gh-axi 404 body with exit status 0  -> REFUSE (fail safe)
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -135,22 +140,52 @@ SH
   chmod +x "$case_dir/fakebin/tasks-axi"
 }
 
-# Install a `gh-axi` mock whose `pr view` output carries the given state text,
-# and which logs every invocation to $case_dir/gh-axi.log. The state is injected
-# verbatim so a caller can pass either `merged` (the format real gh-axi emits) or
-# `"merged"` (the quoted variant the parser also tolerates). Args: case_dir state
-add_gh_axi_state() {
-  local case_dir=$1 state=$2
+# Install a `gh-axi` mock that answers `api repos/<owner>/<repo>/pulls/<n>` with a
+# response shaped like the real one (verified against lndshk/firstmate PRs 15 and
+# 17), and which logs every invocation to $case_dir/gh-axi.log. Both fields are
+# injected verbatim so a caller can pass the bare forms real gh-axi emits
+# (`true`, a bare sha) or the quoted variants the parsers also tolerate; an empty
+# sha omits the head sha line entirely. Note the decoys the parsers must not pick
+# up: merge_commit_sha and merged_at at column 0, and base.sha in its own block.
+# Args: case_dir merged_value head_sha
+add_gh_axi_pr() {
+  local case_dir=$1 merged=$2 sha=$3 body="$case_dir/gh-axi-body.txt"
+  {
+    printf 'number: 7\n'
+    printf 'state: closed\n'
+    printf 'merged_at: "2026-07-26T23:29:39Z"\n'
+    printf 'merge_commit_sha: 1111111111111111111111111111111111111111\n'
+    printf 'head:\n'
+    printf '  label: "example:fm/task-x1"\n'
+    printf '  ref: fm/task-x1\n'
+    [ -n "$sha" ] && printf '  sha: %s\n' "$sha"
+    printf '  user: example\n'
+    printf '  repo:\n'
+    printf '    full_name: example/repo\n'
+    printf '    default_branch: main\n'
+    printf 'base:\n'
+    printf '  ref: main\n'
+    printf '  sha: 2222222222222222222222222222222222222222\n'
+    printf 'merged: %s\n' "$merged"
+    printf 'merged_by:\n'
+    printf '  login: example\n'
+  } > "$body"
   cat > "$case_dir/fakebin/gh-axi" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/gh-axi.log"
-printf 'pr:\n  number: 7\n  title: a change\n  state: $state\n'
+cat "$body"
 SH
   chmod +x "$case_dir/fakebin/gh-axi"
 }
 
-# Install a `gh-axi` mock that fails, standing in for an auth problem, a network
-# error, or an unknown PR. Args: case_dir
+# The worktree's current HEAD sha, which a merged PR must name to count as
+# evidence about these commits. Args: case_dir
+wt_head_sha() {
+  git -C "$1/wt" rev-parse HEAD
+}
+
+# Install a `gh-axi` mock that fails, standing in for an auth problem or a network
+# error. Args: case_dir
 add_failing_gh_axi() {
   local case_dir=$1
   cat > "$case_dir/fakebin/gh-axi" <<SH
@@ -158,6 +193,20 @@ add_failing_gh_axi() {
 printf '%s\n' "\$*" >> "$case_dir/gh-axi.log"
 echo "gh: authentication required" >&2
 exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+}
+
+# Install a `gh-axi` mock reproducing the real 404 shape: an error body on stdout
+# and exit status 0 (verified live against a nonexistent PR). Nothing in
+# pr_is_merged may key off the exit status, so this must still refuse. Args: case_dir
+add_notfound_gh_axi() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/gh-axi.log"
+printf 'error: "gh: Not Found (HTTP 404)"\ncode: NOT_FOUND\n'
+exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi"
 }
@@ -601,38 +650,41 @@ SH
 }
 
 # (g) The merged-PR evidence path: a squash merge deleted the remote branch, so the
-# commits are on no remote-tracking ref, but GitHub positively reports the PR merged.
+# commits are on no remote-tracking ref, but GitHub positively reports the PR merged
+# AND names this worktree's HEAD as the head it merged.
 test_merged_pr_allows_unpushed_teardown() {
-  local case_dir rc
+  local case_dir rc head
   case_dir=$(make_case merged-pr-allow)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   wt_commit "$case_dir" "work that was squash-merged"
+  head=$(wt_head_sha "$case_dir")
   add_failing_no_mistakes "$case_dir"
-  add_gh_axi_state "$case_dir" merged
+  add_gh_axi_pr "$case_dir" true "$head"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "merged-pr-allow: teardown should succeed when the PR is merged"
+  expect_code 0 "$rc" "merged-pr-allow: teardown should succeed when the PR merged this HEAD"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-pr-allow: teardown printed a REFUSED line"
-  grep -F 'landed: https://github.com/example/repo/pull/7 is merged' "$case_dir/stderr" >/dev/null \
+  grep -F "landed: https://github.com/example/repo/pull/7 merged this worktree's HEAD $head" "$case_dir/stderr" >/dev/null \
     || fail "merged-pr-allow: teardown did not report the merged-PR evidence: $(cat "$case_dir/stderr")"
-  grep -F 'pr view 7 --repo example/repo' "$case_dir/gh-axi.log" >/dev/null \
+  grep -F 'api repos/example/repo/pulls/7' "$case_dir/gh-axi.log" >/dev/null \
     || fail "merged-pr-allow: URL was not parsed into repo/number: $(cat "$case_dir/gh-axi.log")"
-  pass "unpushed worktree whose PR GitHub reports merged is torn down (the fix)"
+  pass "unpushed worktree whose PR merged this exact HEAD is torn down (the fix)"
 }
 
 # (h) Any non-merged state is not evidence; the refusal must stand.
 test_open_pr_refuses_unpushed_teardown() {
-  local case_dir rc
+  local case_dir rc head
   case_dir=$(make_case open-pr-refuse)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   wt_commit "$case_dir" "work still in review"
-  add_gh_axi_state "$case_dir" open
+  head=$(wt_head_sha "$case_dir")
+  add_gh_axi_pr "$case_dir" false "$head"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -646,7 +698,80 @@ test_open_pr_refuses_unpushed_teardown() {
   pass "unpushed worktree whose PR is still open is refused (fail safe)"
 }
 
-# (i) A tool that errors (auth, network, unknown PR) is not a positive answer.
+# (m) The correctness hole this guard exists to close: a stale, wrong, or copy-pasted
+# pr=, or commits made after the PR merged, mean the merged head is NOT these commits.
+# Refusing is correct, and the message must name both shas so it cannot read as a
+# network failure.
+test_merged_pr_with_other_head_refuses_teardown() {
+  local case_dir rc head other
+  case_dir=$(make_case merged-pr-other-head-refuse)
+  other=5844d51984320907cbb062e41cf1324c5fed1246
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "work that was squash-merged"
+  wt_commit "$case_dir" "further work committed after the merge, never pushed"
+  head=$(wt_head_sha "$case_dir")
+  add_gh_axi_pr "$case_dir" true "$other"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "merged-pr-other-head-refuse: a PR that merged a different head is not evidence"
+  grep -q REFUSED "$case_dir/stderr" || fail "merged-pr-other-head-refuse: no REFUSED line in stderr"
+  grep -F "merged head $other" "$case_dir/stderr" >/dev/null \
+    || fail "merged-pr-other-head-refuse: refusal did not name the PR head sha: $(cat "$case_dir/stderr")"
+  grep -F "this worktree is at $head" "$case_dir/stderr" >/dev/null \
+    || fail "merged-pr-other-head-refuse: refusal did not name the worktree HEAD: $(cat "$case_dir/stderr")"
+  grep -F 'could not be reached' "$case_dir/stderr" >/dev/null \
+    && fail "merged-pr-other-head-refuse: a sha mismatch was reported as a lookup failure"
+  pass "a merged PR naming a different head refuses and names both shas (the hole closed)"
+}
+
+# (n) Merged, but no head sha to compare against: never assume, always refuse.
+test_merged_pr_without_head_sha_refuses_teardown() {
+  local case_dir rc
+  case_dir=$(make_case merged-pr-no-head-sha)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "work whose PR head sha cannot be resolved"
+  add_gh_axi_pr "$case_dir" true ""
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "merged-pr-no-head-sha: an unresolvable head sha must refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "merged-pr-no-head-sha: no REFUSED line in stderr"
+  grep -F 'did not report it merged with a head sha matching' "$case_dir/stderr" >/dev/null \
+    || fail "merged-pr-no-head-sha: refusal did not explain the missing head sha: $(cat "$case_dir/stderr")"
+  pass "a merged PR with no resolvable head sha is refused (fail safe)"
+}
+
+# (o) Real gh-axi exits 0 on a 404 and prints an error body, so a zero exit status is
+# never evidence on its own.
+test_notfound_gh_axi_refuses_unpushed_teardown() {
+  local case_dir rc
+  case_dir=$(make_case gh-axi-notfound-refuse)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "work whose PR does not exist"
+  add_notfound_gh_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gh-axi-notfound-refuse: a 404 body with exit 0 must still refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "gh-axi-notfound-refuse: no REFUSED line in stderr"
+  [ -s "$case_dir/gh-axi.log" ] || fail "gh-axi-notfound-refuse: the PR check never ran"
+  pass "a 404 body with a zero exit status is refused (fail safe)"
+}
+
+# (i) A tool that errors (auth, network) is not a positive answer.
 test_failing_gh_axi_refuses_unpushed_teardown() {
   local case_dir rc
   case_dir=$(make_case gh-axi-error-refuse)
@@ -699,8 +824,8 @@ test_merged_pr_does_not_cover_dirty_worktree() {
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   wt_commit "$case_dir" "work that was squash-merged"
+  add_gh_axi_pr "$case_dir" true "$(wt_head_sha "$case_dir")"
   printf 'uncommitted\n' > "$case_dir/wt/scratch.txt"
-  add_gh_axi_state "$case_dir" merged
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -716,24 +841,25 @@ test_merged_pr_does_not_cover_dirty_worktree() {
   pass "a merged PR does not license tearing down a dirty worktree (committed work only)"
 }
 
-# (l) The state parser must also tolerate a quoted value, using portable BREs only.
+# (l) Both parsers must also tolerate quoted values, using portable BRE/awk only.
 test_quoted_merged_state_allows_unpushed_teardown() {
-  local case_dir rc
+  local case_dir rc head
   case_dir=$(make_case merged-pr-quoted-allow)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   wt_commit "$case_dir" "work that was squash-merged"
+  head=$(wt_head_sha "$case_dir")
   add_failing_no_mistakes "$case_dir"
-  add_gh_axi_state "$case_dir" '"merged"'
+  add_gh_axi_pr "$case_dir" '"true"' "\"$head\""
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "merged-pr-quoted-allow: a quoted merged state should be accepted"
+  expect_code 0 "$rc" "merged-pr-quoted-allow: quoted merged and sha values should be accepted"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-pr-quoted-allow: teardown printed a REFUSED line"
-  pass "the PR state parser accepts a quoted value (portable BRE, no GNU-only \\?)"
+  pass "the PR merged/sha parsers accept quoted values (portable BRE and awk)"
 }
 
 test_local_only_fork_remote_allows
@@ -757,3 +883,6 @@ test_failing_gh_axi_refuses_unpushed_teardown
 test_missing_gh_axi_refuses_unpushed_teardown
 test_merged_pr_does_not_cover_dirty_worktree
 test_quoted_merged_state_allows_unpushed_teardown
+test_merged_pr_with_other_head_refuses_teardown
+test_merged_pr_without_head_sha_refuses_teardown
+test_notfound_gh_axi_refuses_unpushed_teardown

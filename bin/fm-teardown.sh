@@ -11,9 +11,12 @@
 # for the common case where there is no remote at all.
 # A merged PR recorded as pr= in the task meta is a third landed-work proof, for
 # the squash-merge + delete_branch_on_merge case where the remote branch (and then
-# the remote-tracking ref) is gone even though the work landed. It is evidence
-# about COMMITTED work only, so a dirty worktree still refuses, and it accepts
-# only a positive "merged" answer from GitHub - every other outcome refuses.
+# the remote-tracking ref) is gone even though the work landed. GitHub must report
+# BOTH that the PR merged AND a head sha equal to the worktree's HEAD, so a stale,
+# wrong, or copy-pasted pr= cannot license a teardown, and commits made after that
+# merge are still unlanded and still refuse. It is evidence about COMMITTED work
+# only, so a dirty worktree refuses regardless - as does every non-positive or
+# non-matching answer.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product - teardown proceeds once the report exists, and refuses without it.
@@ -69,7 +72,13 @@ run_with_timeout() { # <seconds> <command...>  - stock macOS ships no coreutils 
   fi
 }
 
-pr_is_merged() { # <pr-url>  -> 0 only when GitHub positively reports "merged"
+# Set by pr_is_merged to the head sha GitHub reported for the PR, when one could be
+# resolved at all. Empty means "no answer to report", so a refusal note can tell a
+# genuine sha mismatch apart from a tool, auth, network, or parse failure.
+PR_HEAD_SHA=""
+
+pr_is_merged() { # <pr-url> <worktree-head-sha>  -> 0 only when GitHub positively
+                 # reports this PR merged AND its head sha equals that HEAD
   # Why this exists: a squash merge rewrites history, so the worktree's HEAD is
   # never an ancestor of the merge commit. While the remote branch survives, the
   # "reachable from any remote-tracking branch" test below still passes. But with
@@ -79,22 +88,42 @@ pr_is_merged() { # <pr-url>  -> 0 only when GitHub positively reports "merged"
   # as unpushed and teardown refuses. A false refusal is not merely noise: it
   # invites --force, which genuinely discards work, eroding prime directive #3.
   #
+  # Why the head sha matters: "this PR merged" is not "this worktree's commits
+  # merged". A stale, wrong, or copy-pasted pr= in the meta, or commits made in the
+  # worktree after the PR merged, would otherwise let teardown discard genuinely
+  # unlanded work - inverting the guard. Requiring head.sha to equal HEAD ties the
+  # evidence to the commits actually being discarded.
+  #
   # FAILS SAFE. Any missing tool, auth problem, network error, timeout, unparseable
-  # URL, or non-merged state returns non-zero, so the caller falls through to the
-  # normal refusal. This never assumes merged; it only accepts a positive answer.
-  # Every pattern here is portable BRE (no GNU-only \? or \+) and the timeout goes
-  # through run_with_timeout, so this stays live on macOS rather than silently
+  # URL, absent or malformed head sha, non-merged state, or sha mismatch returns
+  # non-zero, so the caller falls through to the normal refusal. This never assumes
+  # merged; it only accepts a positive, matching answer. Note that gh-axi exits 0
+  # even on a 404, so nothing here keys off its exit status - only on parsing a
+  # positive answer out of the body.
+  # Every pattern here is portable BRE/awk (no GNU-only \? or \+) and the timeout
+  # goes through run_with_timeout, so this stays live on macOS rather than silently
   # degrading back into the false refusal it exists to prevent.
-  local url=${1:-} repo num state
-  [ -n "$url" ] || return 1
+  local url=${1:-} head=${2:-} repo num body merged sha
+  PR_HEAD_SHA=""
+  [ -n "$url" ] && [ -n "$head" ] || return 1
   command -v gh-axi >/dev/null 2>&1 || return 1
   repo=$(printf '%s' "$url" | sed -n 's#^https*://github\.com/\([^/]*/[^/]*\)/pull/[0-9][0-9]*.*#\1#p')
   num=$(printf '%s' "$url" | sed -n 's#^https*://github\.com/[^/]*/[^/]*/pull/\([0-9][0-9]*\).*#\1#p')
   [ -n "$repo" ] && [ -n "$num" ] || return 1
-  state=$(run_with_timeout 20 gh-axi pr view "$num" --repo "$repo" 2>/dev/null \
-    | tr -d '"' \
-    | sed -n 's/^[[:space:]]*state:[[:space:]]*\([a-zA-Z][a-zA-Z]*\)[[:space:]]*$/\1/p' | head -1)
-  [ "$state" = "merged" ]
+  body=$(run_with_timeout 20 gh-axi api "repos/$repo/pulls/$num" 2>/dev/null)
+  merged=$(printf '%s\n' "$body" | tr -d '"' \
+    | sed -n 's/^merged:[[:space:]]*\([a-zA-Z][a-zA-Z]*\)[[:space:]]*$/\1/p' | head -1)
+  [ "$merged" = "true" ] || return 1
+  sha=$(printf '%s\n' "$body" | awk '
+    /^head:[[:space:]]*$/ { in_head = 1; next }
+    /^[^[:space:]]/ { in_head = 0 }
+    in_head && /^[[:space:]][[:space:]]*sha:[[:space:]]/ { gsub(/"/, "", $2); print $2; exit }
+  ')
+  case "$sha" in
+    ''|*[!0-9a-fA-F]*) return 1 ;;
+  esac
+  PR_HEAD_SHA=$sha
+  [ "$sha" = "$head" ]
 }
 
 default_branch() {
@@ -573,6 +602,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     # remote-tracking branch (empty result here). A fork is a remote too, so
     # upstream-contribution PRs pushed to a fork satisfy this regardless of mode.
     unpushed=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null | head -5 || true)
+    wt_head=$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)
     if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
       # local-only ships have no remote in the common case, so the "on a remote"
       # test above is expected to be non-empty. The work is safe once it is merged
@@ -587,13 +617,14 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
         echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
         exit 1
       fi
-    elif [ -n "$unpushed" ] && [ -z "$dirty" ] && pr_is_merged "$PR_URL"; then
+    elif [ -n "$unpushed" ] && [ -z "$dirty" ] && pr_is_merged "$PR_URL" "$wt_head"; then
       # The commits are not on any remote-tracking branch, but GitHub positively
-      # reports this task's PR as merged - so the work landed and the remote branch
-      # was deleted (squash merge + delete_branch_on_merge). That is landed work,
-      # not lost work. Note the guard on $dirty: a merged PR is evidence only about
-      # COMMITTED work, so uncommitted changes still fall through and refuse below.
-      echo "landed: $PR_URL is merged; the remote branch is gone (squash merge), so HEAD is no longer reachable from a remote-tracking ref." >&2
+      # reports this task's PR as merged AND that it merged exactly this HEAD - so
+      # the work landed and the remote branch was deleted (squash merge +
+      # delete_branch_on_merge). That is landed work, not lost work. Note the guard
+      # on $dirty: this is evidence about COMMITTED work only, so uncommitted
+      # changes still fall through and refuse below.
+      echo "landed: $PR_URL merged this worktree's HEAD $wt_head; the remote branch is gone (squash merge), so HEAD is no longer reachable from a remote-tracking ref." >&2
     elif [ -n "$dirty" ] || [ -n "$unpushed" ]; then
       echo "REFUSED: worktree $WT has work not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
@@ -601,10 +632,16 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       # Only claim a GitHub answer when pr_is_merged actually ran. The branch above
       # short-circuits on both $unpushed and $dirty, so this mirrors that condition
       # exactly; otherwise a refusal caused by uncommitted changes would send
-      # firstmate chasing gh auth or the network.
+      # firstmate chasing gh auth or the network. A resolved-but-different head sha
+      # is the interesting case and must not read as a network failure, so it names
+      # both shas.
       if [ -n "$PR_URL" ]; then
         if [ -n "$unpushed" ] && [ -z "$dirty" ]; then
-          echo "note: meta records pr=$PR_URL but GitHub did not report it merged (or could not be reached), so this refusal stands." >&2
+          if [ -n "$PR_HEAD_SHA" ] && [ "$PR_HEAD_SHA" != "$wt_head" ]; then
+            echo "note: meta records pr=$PR_URL, but that PR merged head $PR_HEAD_SHA while this worktree is at $wt_head, so these commits are not covered by it and are genuinely unlanded." >&2
+          else
+            echo "note: meta records pr=$PR_URL but GitHub did not report it merged with a head sha matching $wt_head (or could not be reached), so this refusal stands." >&2
+          fi
         else
           echo "note: meta records pr=$PR_URL, but a merged PR is evidence about committed work only; commit or discard the uncommitted changes first." >&2
         fi

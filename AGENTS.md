@@ -34,8 +34,9 @@ Hard rules, in priority order:
 3. **Never tear down a worktree that holds unlanded work.**
    `bin/fm-teardown.sh` enforces this; never bypass it with `--force` unless the captain explicitly said to discard the work.
    The work is "landed" once `HEAD` is reachable from any remote-tracking branch (a fork counts as a remote - upstream-contribution PRs pushed to a fork satisfy this in any mode); for `local-only` ship tasks with no remote at all, the work may instead be merged into the local default branch.
-   A third proof covers the squash-merge case: when the task's meta records a `pr=` URL and GitHub positively reports that PR merged, the committed work landed even though the remote branch (and with it the remote-tracking ref) is gone, so teardown proceeds.
-   That proof is about committed work only - a dirty worktree still refuses - and only a positive "merged" answer counts, so a missing tool, auth problem, network error, or any other state falls back to refusing.
+   A third proof covers the squash-merge case: when the task's meta records a `pr=` URL and GitHub positively reports both that the PR merged and a head sha equal to the worktree's `HEAD`, the committed work landed even though the remote branch (and with it the remote-tracking ref) is gone, so teardown proceeds.
+   Both halves are required, because "this PR merged" is not "this worktree's commits merged": a stale or wrong `pr=`, or commits made in the worktree after that PR merged, leave work that is genuinely unlanded and still refuses.
+   That proof is about committed work only - a dirty worktree still refuses - and only a positive, matching answer counts, so a missing tool, auth problem, network error, absent head sha, or any other state falls back to refusing.
    The scout carve-out: a scout task's worktree is declared scratch from the start - its deliverable is the report, and teardown lets the worktree go once that report exists (section 7).
 4. **Crewmates never address the captain.**
    All crewmate communication flows through you.
@@ -76,6 +77,7 @@ README.md            public overview and development notes
 .claude/skills       symlink to .agents/skills for claude compatibility
 bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning, and fm-update.sh for fast-forward-only self-updates; read each script's header before first use
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
+config/crew-model    model pin for claude crewmates (a bare model name, e.g. "sonnet"); LOCAL, gitignored; absent = the CLI's own default
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style - approval posture, communication style, release habits; LOCAL, gitignored; compact rewrite-and-prune counterpart to shared AGENTS.md; canonical harness-portable home, even if harness memory mirrors it as a recall cache
@@ -149,6 +151,9 @@ Crewmates default to the same harness you are running on.
 The captain may override this at any time, typically at bootstrap: record the choice in `config/crew-harness` (a single word - an adapter name below; the file is local and gitignored, so each machine keeps its own; absent or `default` means mirror your own harness).
 The recorded harness is used for every dispatch until changed; a per-task instruction from the captain ("run this one on codex") overrides it for that dispatch only.
 Resolve `default` by detecting your own harness (below).
+Orthogonal to which harness, `config/crew-model` pins which model a claude crewmate launches on - write a bare model name such as `sonnet` to conserve a constrained allotment, or leave the file absent to take the CLI's own default.
+It is local and gitignored exactly like `config/crew-harness`, and both resolve home-scoped (`FM_CONFIG_OVERRIDE`, else `$FM_HOME/config`), so each firstmate home - including every secondmate - keeps its own pin.
+`bin/fm-spawn.sh` ignores anything that is not a bare model name, so the value can never become part of the command typed into a crewmate's shell.
 
 Each adapter splits into mechanics and knowledge.
 The mechanics (launch command, autonomy flag, turn-end hook) live in `bin/fm-spawn.sh`; the knowledge you need while supervising (busy signature, exit, interrupt, dialogs, quirks) lives in the tables below.
