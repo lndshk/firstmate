@@ -42,6 +42,23 @@ for arg in "$@"; do
 done
 case "${1:-}" in
   display-message)
+    # Real tmux (verified on 3.6): display-message -t <target> does NOT fail
+    # for a target that does not exist - it silently falls back to the
+    # attached client's CURRENT pane and returns ITS data (here, sess:busy's,
+    # standing in for "whatever pane happens to be active"). This mock
+    # reproduces that exact misbehavior on purpose so that liveness lookups
+    # relying on display-message (instead of list-panes) fail these tests.
+    case "$format" in
+      '#{pane_pid}') printf '20\n' ;;
+      '#{pane_current_command}') printf 'bash\n' ;;
+      '#{cursor_y}') printf '0\n' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  list-panes)
+    # Real tmux: list-panes -t <target> correctly fails ("can't find
+    # window"/"can't find session") for a target that does not exist, with no
+    # fallback to any other pane. This mock mirrors that.
     case "$format:$target" in
       '#{pane_pid}:sess:idle') printf '10\n' ;;
       '#{pane_pid}:sess:busy') printf '20\n' ;;
@@ -49,8 +66,13 @@ case "${1:-}" in
       '#{pane_current_command}:sess:idle') printf 'node\n' ;;
       '#{pane_current_command}:sess:busy') printf 'bash\n' ;;
       '#{pane_current_command}:sess:dead') printf 'bash\n' ;;
-      '#{cursor_y}:'*) printf '0\n' ;;
-      *) exit 1 ;;
+      *)
+        case "$target" in
+          *:*) printf "can't find window: %s\n" "${target#*:}" >&2 ;;
+          *) printf "can't find session: %s\n" "$target" >&2 ;;
+        esac
+        exit 1
+        ;;
     esac
     ;;
   capture-pane)
@@ -98,6 +120,34 @@ if PATH="$FAKEBIN:$PATH" FM_FAKE_PS_SNAPSHOT="$PS_SNAPSHOT" \
   fail "zombie agent was marked alive"
 fi
 pass "shared harness knowledge identifies live agent trees and excludes shells/zombies"
+
+# Incident reproduction (verified live against real tmux 3.6, not just this
+# mock): a liveness query for a window that no longer exists must be reported
+# dead and must NOT inherit whatever pane happens to be "current" in the
+# session. The prior bug used `tmux display-message -t <target>`, which
+# silently falls back to the current pane and returns ITS pid/command with
+# exit 0 - no error at all - so five secondmates whose windows had been gone
+# 9-11 days all read back firstmate's own live pid as "healthy". The mock's
+# display-message case above reproduces that fallback (always answers with
+# sess:busy's pid/command); list-panes above correctly errors instead. These
+# assertions fail if fm-tmux-lib.sh ever reverts to display-message here.
+state_gone_a=$(PATH="$FAKEBIN:$PATH" FM_FAKE_PS_SNAPSHOT="$PS_SNAPSHOT" \
+  bash -c '. "$1"; fm_pane_agent_state "$2"' _ "$ROOT/bin/fm-tmux-lib.sh" 'sess:gone-a')
+[ "$state_gone_a" = dead ] \
+  || fail "liveness query for a nonexistent window was not reported dead (got: $state_gone_a)"
+pass "liveness query for a nonexistent window is reported dead, not inherited-alive"
+
+state_gone_b=$(PATH="$FAKEBIN:$PATH" FM_FAKE_PS_SNAPSHOT="$PS_SNAPSHOT" \
+  bash -c '. "$1"; fm_pane_agent_state "$2"' _ "$ROOT/bin/fm-tmux-lib.sh" 'sess:gone-b')
+[ "$state_gone_a" = dead ] && [ "$state_gone_b" = dead ] \
+  || fail "two different nonexistent windows did not both report dead ($state_gone_a, $state_gone_b)"
+pass "two different nonexistent windows are each independently dead, not one shared live pid"
+
+command_gone=$(PATH="$FAKEBIN:$PATH" FM_FAKE_PS_SNAPSHOT="$PS_SNAPSHOT" \
+  bash -c '. "$1"; fm_pane_current_command "$2"' _ "$ROOT/bin/fm-tmux-lib.sh" 'sess:gone-a')
+[ -z "$command_gone" ] \
+  || fail "pane_current_command for a nonexistent window leaked the current window's command: $command_gone"
+pass "pane_current_command for a nonexistent window reports nothing, not the current pane's command"
 
 HOME_DIR="$TMP_ROOT/home"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data"
@@ -190,6 +240,37 @@ test_real_tmux_process_tree() {
     || fail "real live-agent stall check exited non-zero"
   [ -z "$out" ] || fail "live real tmux agent was reported stalled/dead: $out"
   pass "real tmux pane at bash remains alive while its agent parent runs"
+
+  # Incident reproduction against genuine tmux, with a real live agent pane
+  # present to (wrongly) inherit from: a window that was never created in this
+  # session - not merely one whose agent died - must report dead and must not
+  # pick up proof:agent's live pid/command just because it is the session's
+  # current window. This is the exact failure that made five secondmates gone
+  # 9-11 days read back as healthy with firstmate's own pid.
+  ghost_state=$(TMUX="$tmux_env" bash -c '. "$1"; fm_pane_agent_state "$2"' _ "$ROOT/bin/fm-tmux-lib.sh" 'proof:ghost-a' 2>/dev/null || true)
+  ghost_command=$(TMUX="$tmux_env" bash -c '. "$1"; fm_pane_current_command "$2"' _ "$ROOT/bin/fm-tmux-lib.sh" 'proof:ghost-a' 2>/dev/null || true)
+  [ "$ghost_state" = dead ] \
+    || fail "a window that never existed inherited the live proof:agent pane's state ($ghost_state) on real tmux"
+  [ -z "$ghost_command" ] \
+    || fail "a window that never existed leaked the live pane's command ($ghost_command) on real tmux"
+  ghost_state_b=$(TMUX="$tmux_env" bash -c '. "$1"; fm_pane_agent_state "$2"' _ "$ROOT/bin/fm-tmux-lib.sh" 'proof:ghost-b' 2>/dev/null || true)
+  [ "$ghost_state_b" = dead ] \
+    || fail "a second, differently-named nonexistent window did not independently report dead ($ghost_state_b) on real tmux"
+  pass "on real tmux, a window that never existed reports dead and does not inherit the live agent's pane data"
+
+  ghost_home="$TMP_ROOT/ghost-home"
+  mkdir -p "$ghost_home/state" "$ghost_home/data"
+  before_ghost=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$target")
+  if FM_HOME="$ghost_home" TMUX="$tmux_env" \
+    "$ROOT/bin/fm-send.sh" 'proof:ghost-a' 'must-not-hit-anything' >/dev/null 2>"$TMP_ROOT/ghost-send.err"; then
+    fail "fm-send accepted a window that never existed on real tmux"
+  fi
+  after_ghost=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$target")
+  [ "$before_ghost" = "$after_ghost" ] \
+    || fail "fm-send to a nonexistent window changed the live proof:agent pane instead"
+  grep -F 'no live agent process' "$TMP_ROOT/ghost-send.err" >/dev/null \
+    || fail "fm-send did not explain refusing a nonexistent window: $(cat "$TMP_ROOT/ghost-send.err")"
+  pass "fm-send to a nonexistent window exits non-zero and sends no keys anywhere"
 
   kill -TERM "$agent_pid"
   for _ in 1 2 3 4 5 6 7 8 9 10; do
