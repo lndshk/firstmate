@@ -171,7 +171,7 @@ stall_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
 printf '%s\n' "$stall_out" \
   | grep -F 'dead?: dead-advisor - window sess:dead has no live agent process (pane at bash)' >/dev/null \
   || fail "dead advisor finding missing: $stall_out"
-printf '%s\n' "$stall_out" | grep -E 'dead\\?: (idle-advisor|busy-crew)' >/dev/null \
+printf '%s\n' "$stall_out" | grep -E 'dead\?: (idle-advisor|busy-crew)' >/dev/null \
   && fail "live idle or mid-shell agent was reported dead: $stall_out"
 pass "stall check reports only the dead pane, preserving live idle and mid-shell agents"
 
@@ -208,6 +208,25 @@ watch_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$WATCH_HOME" \
 [ "$watch_out" = 'stale: sess:dead (no live agent process)' ] \
   || fail "watcher did not wake immediately for dead secondmate: $watch_out"
 pass "watcher wakes for a dead secondmate without changing its live-idle exemption"
+
+REUSE_HOME="$TMP_ROOT/watch-reuse-home"
+mkdir -p "$REUSE_HOME/state"
+touch "$REUSE_HOME/state/.last-check" "$REUSE_HOME/state/.last-heartbeat"
+cat > "$REUSE_HOME/state/dead-advisor.meta" <<'EOF'
+window=sess:dead
+kind=secondmate
+generation=1700000000-222-2
+EOF
+printf '1700000000-111-1 9\n' > "$REUSE_HOME/state/.dead-sess_dead"
+watch_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$REUSE_HOME" \
+  FM_FAKE_PS_SNAPSHOT="$PS_SNAPSHOT" FM_FAKE_SEND_LOG="$SEND_LOG" \
+  FM_WATCH_KEEPALIVE=0 FM_POLL=0.01 FM_HEARTBEAT=5 FM_CHECK_INTERVAL=999999 \
+  "$ROOT/bin/fm-watch.sh") || fail "watcher exited non-zero on a reused window name"
+[ "$watch_out" = 'stale: sess:dead (no live agent process)' ] \
+  || fail "watcher did not wake for a dead pane whose window name carried a previous task's count: $watch_out"
+grep -F '1700000000-222-2 2' "$REUSE_HOME/state/.dead-sess_dead" >/dev/null \
+  || fail "dead streak was not re-keyed to the recorded generation: $(cat "$REUSE_HOME/state/.dead-sess_dead")"
+pass "dead streak restarts for a new task generation on a reused window name"
 
 test_real_tmux_process_tree() {
   local target tag agent_command agent_pid= command state proof_home out before after tmux_env

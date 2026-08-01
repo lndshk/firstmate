@@ -328,8 +328,18 @@ EOF
     agent_state=$(fm_pane_agent_state "$w")
     deadf="$STATE/.dead-$key"
     if [ "$agent_state" = dead ]; then
-      dead_count=$(( $(cat "$deadf" 2>/dev/null || echo 0) + 1 ))
-      echo "$dead_count" > "$deadf"
+      # The streak belongs to the task generation that records the window now,
+      # so a reused window name never inherits a previous task's count.
+      dead_gen=$(window_meta_field "$w" generation none)
+      prev_gen=
+      prev_count=0
+      if [ -r "$deadf" ]; then
+        read -r prev_gen prev_count < "$deadf" || true
+      fi
+      case "$prev_count" in ''|*[!0-9]*) prev_count=0 ;; esac
+      [ "$prev_gen" = "$dead_gen" ] || prev_count=0
+      dead_count=$(( prev_count + 1 ))
+      printf '%s %s\n' "$dead_gen" "$dead_count" > "$deadf"
       # Require two consecutive snapshots so the brief shell-to-agent handoff
       # during spawn cannot produce a false death wake.
       if [ "$dead_count" -eq 2 ]; then
