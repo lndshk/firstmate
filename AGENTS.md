@@ -166,6 +166,7 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 `bin/fm-harness.sh` prints your own harness (verified env markers first, then process ancestry); `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness`.
 On `unknown`, ask the captain instead of guessing; a captain override always beats detection.
 When you verify a new adapter, record its env marker and command name in that script.
+`bin/fm-harness.sh agent-in-tree <pid>` answers whether a process tree still holds a live verified agent, and pane liveness is built on it, so an adapter whose command name is not recorded there makes its panes read as dead.
 
 ### claude (VERIFIED)
 
@@ -583,9 +584,10 @@ On wake, in order of cheapness:
 Run `bin/fm-stall-check.sh` at every heartbeat and every wake-handling turn, immediately after draining queued wakes and before deciding the fleet is quiet.
 It is a read-only, pull-based sweep over the same backlog/state/tmux surfaces firstmate already consumes, and prints nothing when all clear.
 Act on every emitted line: advance finished-but-still-in-flight tasks into validation/PR/teardown/next-task handling, treat queued items whose blockers or date gates have cleared as candidates and apply the Queued dispatch checks before dispatch, and investigate `stall?:` idle candidates by peeking the pane and applying the stuck-crewmate playbook if needed.
+It also emits `dead?:` when a recorded in-flight window's pane holds no live verified agent process - the agent exited, or the window itself is gone. That is an exited or lost crewmate, not a slow one, so reconcile it (salvage or tear down) instead of steering it; `bin/fm-send.sh` refuses a dead pane anyway.
 It also emits `advisor-idle?:` when a live `kind=secondmate` pane has been idle past `FM_ADVISOR_IDLE_STALL_SECS` (default 1800s), has no genuinely active child work in its own home, and its last status is terminal rather than captain-gated; route its next program step or confirm it is intentionally parked.
 It also emits `unlanded?:` when an in-flight push-based crew's worktree holds commits reachable from no remote-tracking branch - committed work living only in a disposable worktree that teardown would discard; push the branch, or, if it is a squash-merged branch whose remote copy was deleted, confirm it already landed. Like `stall?:`, this is a verify-candidate, not an assertion. Secondmate, scout, and `local-only` tasks are exempt (a scout ships a report, `local-only` has no remote by design), and PR-parked tasks are skipped because the merge poll already tracks them.
-`bin/fm-guard.sh` also warns when the stall detector has any finding, so the next supervision script invocation surfaces dormant work mechanically.
+`bin/fm-guard.sh` also warns when the detector's fast subset (`--fast`, which skips the per-pane peeks and process checks) has any finding, so the next supervision script invocation surfaces dormant work mechanically.
 
 Heartbeats back off exponentially while they are the only wakes firing (600s doubling to a 2h cap - an idle fleet stops burning turns); any signal, stale, or check wake resets the cadence to the base interval.
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.

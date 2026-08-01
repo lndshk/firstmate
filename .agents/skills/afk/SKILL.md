@@ -123,6 +123,10 @@ did not land instead of leaving it unsubmitted.
   (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`)
   → **self-handle**. Captain-relevant verb → escalate.
 - `check` → always escalate (check scripts print only when firstmate should wake).
+- `stale` annotated `(no live agent process)` → escalate on the wake. A dead
+  agent is not transient staleness: the process is gone, it cannot resume, and
+  the watcher reports it once per task generation, so deferring it to the
+  persistence recheck would lose it outright once the window itself disappears.
 - `stale` with a terminal status → escalate. Non-terminal stale is transient: the
   daemon records a marker and self-handles; if the pane is still idle past
   `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible
