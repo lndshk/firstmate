@@ -710,6 +710,49 @@ test_terminal_stale_escalate_leaves_no_marker() {
   pass "terminal-stale escalate removes its marker so housekeeping does not re-escalate"
 }
 
+# The watcher reports a process-tree death as "stale: <window> (no live agent
+# process)". The trailing annotation must never be parsed as part of the window:
+# doing so looks up the wrong status file (self-handle instead of escalate) and
+# writes a marker key housekeeping can never map back to a window, so the one
+# wake fm-watch fires per generation is discarded while the captain is away.
+test_dead_agent_stale_wake_parses_window_and_escalates() {
+  local dir state win out
+  dir=$(make_supercase stale-dead-agent)
+  state="$dir/state"
+  win="sess:fm-gone-d3"
+  printf 'working: mid-task\n' > "$state/gone-d3.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state" "(no live agent process)")
+  [ "${out%%|*}" = escalate ] \
+    || fail "dead-agent stale was not classified as escalate: $out"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win (no live agent process)" "$state"
+  grep -F "$win" "$state/.subsuper-escalations" >/dev/null \
+    || fail "dead-agent stale wake was not escalated: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  grep -F 'no live agent process)' "$state/.subsuper-escalations" >/dev/null \
+    && fail "the trailing annotation leaked into the escalated window name"
+  ls "$state"/.subsuper-stale-* >/dev/null 2>&1 \
+    && fail "dead-agent stale left a persistence marker housekeeping cannot map back"
+
+  dir=$(make_supercase stale-dead-agent-terminal)
+  state="$dir/state"
+  win="sess:fm-fin-d4"
+  printf 'done: PR https://x/y/pull/4\n' > "$state/fin-d4.status"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win (no live agent process)" "$state"
+  grep -F 'done: PR https://x/y/pull/4' "$state/.subsuper-escalations" >/dev/null \
+    || fail "annotated stale did not read the recorded task's status file"
+  [ -e "$state/.subsuper-seen-status-fin-d4" ] \
+    || fail "seen marker was not keyed to the bare task id: $(ls "$state" | tr '\n' ' ')"
+
+  dir=$(make_supercase stale-plain-transient)
+  state="$dir/state"
+  printf 'working: mid-task\n' > "$state/plain-d5.status"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-plain-d5" "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "plain transient stale was escalated: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-stale-plain-d5" ] \
+    || fail "plain transient stale did not record its persistence marker"
+  pass "dead-agent stale wake parses the bare window, escalates, and leaves no garbled marker"
+}
+
 test_signal_escalate_marks_seen_no_catchall_refire() {
   local dir state key
   dir=$(make_supercase signal-seen)
@@ -1445,6 +1488,7 @@ test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker
+test_dead_agent_stale_wake_parses_window_and_escalates
 test_signal_escalate_marks_seen_no_catchall_refire
 test_timestamped_status_uses_raw_dedupe_and_clean_presentation
 # /afk presence-gating + injection hardening.

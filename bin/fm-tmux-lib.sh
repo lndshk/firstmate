@@ -78,6 +78,15 @@ fm_pane_current_command() { # <target>
   tmux list-panes -t "$1" -F '#{pane_current_command}' 2>/dev/null | head -n1
 }
 
+# fm_pane_exists: 0 when <target> resolves to a pane that is really there.
+# Same primitive rule as fm_pane_agent_state: `display-message -t` answers for
+# the client's current pane when the target window/session is gone, so it can
+# never prove presence; `list-panes -t` fails for a target that is gone.
+fm_pane_exists() { # <target>
+  [ -n "${1:-}" ] || return 1
+  tmux list-panes -t "$1" >/dev/null 2>&1
+}
+
 # fm_tmux_strip_ghost: remove dim/faint (ANSI SGR 2) styled runs from one captured
 # composer line, then drop any remaining escape sequences, leaving only the plain,
 # normal-intensity text, the text a human actually typed. Dim/faint runs are

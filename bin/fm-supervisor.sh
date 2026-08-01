@@ -116,7 +116,7 @@ failed_receipt() {
 }
 
 pane_exists() {
-  [ -n "$1" ] && tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1
+  fm_pane_exists "$1"
 }
 
 supervisor_process_matches_owner() {
