@@ -34,6 +34,9 @@ Hard rules, in priority order:
 3. **Never tear down a worktree that holds unlanded work.**
    `bin/fm-teardown.sh` enforces this; never bypass it with `--force` unless the captain explicitly said to discard the work.
    The work is "landed" once `HEAD` is reachable from any remote-tracking branch (a fork counts as a remote - upstream-contribution PRs pushed to a fork satisfy this in any mode); for `local-only` ship tasks with no remote at all, the work may instead be merged into the local default branch.
+   A third proof covers the squash-merge case: when the task's meta records a `pr=` URL and GitHub positively reports both that the PR merged and a head sha equal to the worktree's `HEAD`, the committed work landed even though the remote branch (and with it the remote-tracking ref) is gone, so teardown proceeds.
+   Both halves are required, because "this PR merged" is not "this worktree's commits merged": a stale or wrong `pr=`, or commits made in the worktree after that PR merged, leave work that is genuinely unlanded and still refuses.
+   That proof is about committed work only - a dirty worktree still refuses - and only a positive, matching answer counts, so a missing tool, auth problem, network error, absent head sha, or any other state falls back to refusing.
    The scout carve-out: a scout task's worktree is declared scratch from the start - its deliverable is the report, and teardown lets the worktree go once that report exists (section 7).
 4. **Crewmates never address the captain.**
    All crewmate communication flows through you.
@@ -74,6 +77,7 @@ README.md            public overview and development notes
 .claude/skills       symlink to .agents/skills for claude compatibility
 bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning, and fm-update.sh for fast-forward-only self-updates; read each script's header before first use
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
+config/crew-model    model pin for claude crewmates (a bare model name, e.g. "sonnet"); LOCAL, gitignored; absent = the CLI's own default
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style - approval posture, communication style, release habits; LOCAL, gitignored; compact rewrite-and-prune counterpart to shared AGENTS.md; canonical harness-portable home, even if harness memory mirrors it as a recall cache
@@ -147,6 +151,9 @@ Crewmates default to the same harness you are running on.
 The captain may override this at any time, typically at bootstrap: record the choice in `config/crew-harness` (a single word - an adapter name below; the file is local and gitignored, so each machine keeps its own; absent or `default` means mirror your own harness).
 The recorded harness is used for every dispatch until changed; a per-task instruction from the captain ("run this one on codex") overrides it for that dispatch only.
 Resolve `default` by detecting your own harness (below).
+Orthogonal to which harness, `config/crew-model` pins which model a claude crewmate launches on - write a bare model name such as `sonnet` to conserve a constrained allotment, or leave the file absent to take the CLI's own default.
+It is local and gitignored exactly like `config/crew-harness`, and both resolve home-scoped (`FM_CONFIG_OVERRIDE`, else `$FM_HOME/config`), so each firstmate home - including every secondmate - keeps its own pin.
+`bin/fm-spawn.sh` ignores anything that is not a bare model name, so the value can never become part of the command typed into a crewmate's shell.
 
 Each adapter splits into mechanics and knowledge.
 The mechanics (launch command, autonomy flag, turn-end hook) live in `bin/fm-spawn.sh`; the knowledge you need while supervising (busy signature, exit, interrupt, dialogs, quirks) lives in the tables below.
@@ -640,40 +647,8 @@ The marker travels with the message text; it does not rely on harness-level type
 
 **Orthogonal to yolo.** afk changes how aggressively firstmate surfaces things, not who approves what. "Away" never means "approves more" — a PR, a needs-decision finding, or anything destructive still waits for the captain's explicit word.
 
-**Classification policy (per wake):**
-- `signal` whose status content has no captain-relevant verb (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`) → **self-handle**. Captain-relevant verb → escalate.
-- `check` → always escalate (check scripts print only when firstmate should wake).
-- `stale` with a terminal status → escalate. Non-terminal stale is transient: the daemon records a marker and self-handles; if the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge. This bounds wedge-detection latency to the threshold plus a tick - a delay, never a loss, and healthy crewmates (which are autonomous and do not wait on firstmate mid-task) are unaffected.
-- `heartbeat` → self-handle; the daemon runs its own cheap bash fleet scan every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a captain-relevant status line the per-wake classifier might miss.
-- Unknown reason, or any uncertainty → **escalate (fail-safe)**.
-
-**Escalation format:** escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 = immediate) and flushed as ONE single-line digest prefixed with the sentinel marker, carrying the pre-read status summaries and a recommended action.
-The single-line format and the marker solve the same problem as the busy-guard (the daemon and the captain share one input channel): the digest is one unambiguous submission regardless of TUI, and firstmate can tell it apart from a real message.
-This is why fewer, cheaper firstmate turns handle the same fleet.
-
-**Injection hardening (the fixes):**
-- **Single-line digest** - embedded newlines are collapsed to a literal separator before injection, so submission is unambiguous regardless of harness.
-- **Composer guard on the supervisor pane** - before injecting, the daemon checks both `pane_is_busy` (harness busy footer = agent mid-turn) and `pane_input_pending` (real unsubmitted text on the cursor line = human mid-typing or previous injection with swallowed Enter).
-  Either condition **defers** the injection (buffer preserved for retry).
-  This is the human-in-the-pane safety property: the daemon never merges its digest into the captain's half-typed line.
-  The composer detector (shared with `fm-send.sh` in `bin/fm-tmux-lib.sh`) drops dim/faint ghost text, then strips the harness's composer box borders, so a ghost-only or idle *bordered* composer (claude draws `│ > … │`) reads as empty, not pending.
-  Without these filters, idle bordered composers and dim ghost suggestions can look like pending input and stall supervision (incidents afk-invx-i5 and composer-robust).
-  `FM_COMPOSER_IDLE_RE` still overrides empty-composer matching after dim-ghost and border stripping, and `FM_BUSY_REGEX` overrides busy footers.
-- **Max-defer escape** - the daemon must never silently wedge.
-  If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one normal flush, which still requires an idle pane and empty composer.
-  If that cannot confirm a submit, it raises a loud, rate-limited wedge alarm (ERROR log + durable `state/.subsuper-inject-wedged` marker + a status-line flash).
-  A composer false-positive is then surfaced as a visible stall, never an unbounded silent no-op.
-- **Verified type-once submit model** - the digest is typed once via `send-keys -l`, then submitted with Enter and **verified**.
-  Enter is retried, Enter only and never a retype, until the composer is confirmed empty.
-  That empty composer is the acknowledgement that the submit landed, using the same dim-ghost-aware and border-aware detector so a ghost-only or bordered-empty claude composer counts as submitted rather than a false "swallowed Enter".
-  `fm-send.sh` shares this primitive and exits non-zero on a positively-confirmed swallow, so firstmate learns a steer did not land instead of leaving it unsubmitted.
-- **Marker strip** - `strip_injection_marker` removes the sentinel prefix before classification/relay, so the digest text firstmate sees is clean.
-- **Portable singleton lock** - the daemon uses the repo's mkdir-based lock helper (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
-- **Dedupe across signal/stale/scan** - `classify_signal` and `classify_stale` both check the seen-status marker before escalating, so a status escalated by one path is not re-escalated by another in the same digest.
-- **Auto-discovered supervisor pane** - the daemon resolves its injection target from `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE` (inherited from the pane that launched it), then a `firstmate:0` fallback with a warning; the resolution source is logged at startup so a wrong-but-resolving fallback is detectable.
-
-**Reliability properties (must hold):** nothing is lost (the #29 queue plus `fm-wake-drain.sh` recover any missed/crashed injection); wedge detection is bounded-latency, not lossy; the catch-all scan backs up the keyword classifier; the daemon preserves single-instance portable lock, crash-loop backoff, a pane-gone guard, and a signal-trapped shutdown that flushes buffered escalations before exit.
-`FM_INJECT_SKIP` (default `heartbeat`) force-self-handles matching kinds, overriding classification - use sparingly.
+**Daemon internals live in the `/afk` skill.** The per-wake classification policy, escalation batching and digest format, injection hardening (composer guard, max-defer escape, verified submit, marker strip, portable lock, dedupe, pane discovery), and the reliability properties the daemon must preserve are all documented in `.agents/skills/afk/SKILL.md`, which loads when `/afk` is invoked.
+They are daemon mechanics, needed when setting up or debugging away-mode rather than on every turn; the entering/exiting contract above stays here because it governs how firstmate reads an incoming message even in a session where the skill was never loaded.
 
 ### Stuck-crewmate playbook (escalate in order)
 
@@ -781,14 +756,6 @@ Adjust the other sections only when the task genuinely deviates from the standar
 ## 12. Self-update
 
 firstmate is its own repo behind the no-mistakes gate, so improvements to `AGENTS.md`, `bin/`, and skills reach `main` and then wait for each running firstmate to pull them.
-The `/updatefirstmate` skill performs that pull in place for the running main firstmate and every secondmate.
-It runs `bin/fm-update.sh`, which fast-forwards this firstmate repo's default branch from origin and then fast-forwards every registered secondmate home (resolved from `state/*.meta` and `data/secondmates.md`) the same way.
-The mechanics mirror `bin/fm-fleet-sync.sh` exactly: fast-forward only, never forcing, never creating a merge commit, never stashing, and skipping with a reported reason anything dirty, diverged, offline, or on a non-default branch, so prime directive #3 holds and no unlanded work is ever discarded.
-A tracked-files fast-forward leaves the gitignored operational dirs untouched, so a secondmate's in-flight work is never disrupted; secondmate homes are leased at a detached HEAD on the default branch and a fast-forward there advances only that worktree's HEAD.
-`bin/fm-update.sh` performs the git mechanics, ensures the main home's newly updated or safely current `bin/fm-supervisor.sh` owner is active, and prints a summary plus `supervisor: ...`, `reread-firstmate: yes|no`, and `nudge-secondmates: <window-targets...>|none` action lines.
-Supervisor activation uses the post-update script, is skipped in a marked secondmate home, and makes the update command fail after printing its full summary when activation cannot be confirmed.
-When handling `/updatefirstmate`, immediately after re-reading this file because the updater printed `reread-firstmate: yes`, inspect that updater's output for a `supervisor:` line.
-If the line is absent, the update began with a legacy updater: run `bin/fm-update.sh --activate-supervisor` once before doing anything else, and surface any failure.
-This compatibility action performs no git update and activates the newly installed owner before work continues.
-The skill then performs the parts a script cannot: when the running firstmate's instruction surface changed it re-reads `AGENTS.md`, and for each updated live secondmate with metadata it sends a gentle one-line re-read nudge via `bin/fm-send.sh <window-target>` so the whole tree converges on the latest `bin/` and instructions.
+The `/updatefirstmate` skill performs that pull in place for the running main firstmate and every secondmate, and `.agents/skills/updatefirstmate/SKILL.md` is the full procedure: what `bin/fm-update.sh` does, its `supervisor:` / `reread-firstmate:` / `nudge-secondmates:` action lines, the legacy-updater compatibility step, and the safety contract.
+The mechanics mirror `bin/fm-fleet-sync.sh`: fast-forward only, never forcing, never creating a merge commit, never stashing, and skipping with a reported reason anything dirty, diverged, offline, or on a non-default branch, so prime directive #3 holds and no unlanded work is ever discarded.
 This is a sanctioned self-write to the firstmate repo and its own worktrees only, exactly like the fleet sync, and never touches anything under `projects/`.

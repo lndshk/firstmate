@@ -116,3 +116,60 @@ mistaken for a swallowed Enter.
 `fm-send.sh` uses the same primitive and exits non-zero
 when a steer's Enter is positively swallowed, so firstmate learns an instruction
 did not land instead of leaving it unsubmitted.
+
+## Classification policy (per wake)
+
+- `signal` whose status content has no captain-relevant verb
+  (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`)
+  → **self-handle**. Captain-relevant verb → escalate.
+- `check` → always escalate (check scripts print only when firstmate should wake).
+- `stale` with a terminal status → escalate. Non-terminal stale is transient: the
+  daemon records a marker and self-handles; if the pane is still idle past
+  `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible
+  wedge. This bounds wedge-detection latency to the threshold plus a tick - a
+  delay, never a loss - and healthy crewmates (which are autonomous and do not
+  wait on firstmate mid-task) are unaffected.
+- `heartbeat` → self-handle; the daemon runs its own cheap bash fleet scan every
+  `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a captain-relevant
+  status line the per-wake classifier might miss.
+- Unknown reason, or any uncertainty → **escalate (fail-safe)**.
+
+`FM_INJECT_SKIP` (default `heartbeat`) force-self-handles matching kinds,
+overriding classification - use sparingly.
+
+## Escalation format
+
+Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =
+immediate) and flushed as ONE single-line digest prefixed with the sentinel
+marker, carrying the pre-read status summaries and a recommended action.
+Embedded newlines are collapsed to a literal separator before injection.
+
+The single-line format and the marker solve the same problem as the busy-guard
+(the daemon and the captain share one input channel): the digest is one
+unambiguous submission regardless of TUI, and firstmate can tell it apart from a
+real message. This is why fewer, cheaper firstmate turns handle the same fleet.
+
+## Remaining injection hardening
+
+- **Marker strip** - `strip_injection_marker` removes the sentinel prefix before
+  classification/relay, so the digest text firstmate sees is clean.
+- **Portable singleton lock** - the daemon uses the repo's mkdir-based lock
+  helper (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
+- **Dedupe across signal/stale/scan** - `classify_signal` and `classify_stale`
+  both check the seen-status marker before escalating, so a status escalated by
+  one path is not re-escalated by another in the same digest.
+- **Auto-discovered supervisor pane** - the daemon resolves its injection target
+  from `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE` (inherited from the pane that
+  launched it), then a `firstmate:0` fallback with a warning; the resolution
+  source is logged at startup so a wrong-but-resolving fallback is detectable.
+- **Dim ghost text** - the composer detector also drops dim/faint (SGR 2) runs
+  before the border strip, so a claude prompt-suggestion ghost never reads as
+  pending input (incident composer-robust). `FM_BUSY_REGEX` overrides busy footers.
+
+## Reliability properties (must hold)
+
+Nothing is lost (the durable wake queue plus `fm-wake-drain.sh` recover any
+missed or crashed injection); wedge detection is bounded-latency, not lossy; the
+catch-all scan backs up the keyword classifier; and the daemon preserves its
+single-instance portable lock, crash-loop backoff, a pane-gone guard, and a
+signal-trapped shutdown that flushes buffered escalations before exit.

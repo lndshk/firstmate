@@ -7,6 +7,9 @@
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
 #   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
+#   For claude, config/crew-model optionally pins the model (a bare model name, e.g.
+#   "sonnet"); absent means the CLI's own default, and any other value is ignored
+#   with a warning. Both config files resolve home-scoped, like every other knob.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md section 7); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home, normally with its safely refreshed primary-project
@@ -37,6 +40,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
@@ -121,7 +125,28 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$(cat __BRIEF__)"' ;;
+    # Model tier: config/crew-model (local, gitignored) pins the claude model for spawned
+    # crewmates - e.g. "sonnet" to conserve a constrained allotment. Absent = CLI default.
+    # Resolved home-scoped like every other config knob (see fm-harness.sh), so a
+    # secondmate home reads its own pin instead of the bin/ repo's.
+    claude)
+      _fm_model=""
+      [ -f "$CONFIG/crew-model" ] && _fm_model=$(tr -d '[:space:]' < "$CONFIG/crew-model" 2>/dev/null)
+      # This value is interpolated into a launch string that is typed into a live
+      # shell, so accept only model-name characters; anything else is ignored rather
+      # than executed. shell_quote is defined below and is not in scope here.
+      case "$_fm_model" in
+        *[!A-Za-z0-9._-]*)
+          echo "warning: ignoring $CONFIG/crew-model: '$_fm_model' is not a bare model name" >&2
+          _fm_model=""
+          ;;
+      esac
+      if [ -n "$_fm_model" ]; then
+        printf '%s' "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model $_fm_model --dangerously-skip-permissions \"\$(cat __BRIEF__)\""
+      else
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$(cat __BRIEF__)"'
+      fi
+      ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox -c __CODEX_TRUST__ "$(cat __BRIEF__)"'
