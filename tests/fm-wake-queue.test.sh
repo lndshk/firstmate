@@ -1222,6 +1222,11 @@ make_bordered_case() {
 set -u
 COMPOSER="${FM_FAKE_COMPOSER:?FM_FAKE_COMPOSER unset}"
 case "${1:-}" in
+  list-panes)
+    # Pane presence is probed with list-panes, which fails for a gone target.
+    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || { printf "can't find window\n" >&2; exit 1; }
+    printf 'fakepane\n'
+    exit 0 ;;
   display-message)
     print=0
     for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
