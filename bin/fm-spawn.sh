@@ -7,6 +7,9 @@
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
 #   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
+#   For claude, config/crew-model optionally pins the model (a bare model name, e.g.
+#   "sonnet"); absent means the CLI's own default, and any other value is ignored
+#   with a warning. Both config files resolve home-scoped, like every other knob.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md section 7); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home, normally with its safely refreshed primary-project
