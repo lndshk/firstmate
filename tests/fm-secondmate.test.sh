@@ -1160,6 +1160,65 @@ test_secondmate_spawn_records_home_meta() {
   pass "kind=secondmate missing-clone fallback preserves home metadata and FM_HOME"
 }
 
+test_secondmate_spawn_resolves_registry_home_with_parenthesis_in_summary() {
+  local home subhome subhome_abs fakebin log err meta summary
+  home="$TMP_ROOT/paren-main"
+  subhome="$TMP_ROOT/paren-sub"
+  mkdir -p "$home/data" "$home/state" "$subhome/data"
+  mark_firstmate_home "$subhome"
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  printf 'paren-sm\n' > "$subhome/.fm-secondmate-home"
+  printf 'current persistent charter\n' > "$subhome/data/charter.md"
+  # Reproduces the real captain fixture that broke resolution: free-form charter
+  # prose containing a parenthetical aside and other punctuation BEFORE the
+  # trailing (home: ...; scope: ...; projects: ...; added ...) metadata block.
+  # A leading-paren-anchored parser stops at "pillar (" and returns empty.
+  summary='Own the realtime pillar (this includes drawer sync, level draws, and pruning); handles edge-cases: sweeps, reclaims, and walls.'
+  printf -- '- paren-sm - %s (home: %s; scope: realtime scope; projects: alpha, beta; added 2026-07-20)\n' \
+    "$summary" "$subhome_abs" > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/paren-fake")
+  log="$TMP_ROOT/paren-fake/tmux.log"
+  err="$TMP_ROOT/paren-fake/spawn.err"
+
+  # Bare form (no explicit home argument) forces resolution through the
+  # registry lookup this bug lives in, instead of an explicit CLI-supplied home.
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/paren-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" paren-sm codex --secondmate >/dev/null 2>"$err" \
+    || fail "secondmate spawn failed to resolve a registry summary containing a parenthesis"
+
+  meta="$home/state/paren-sm.meta"
+  grep -Fx "home=$subhome_abs" "$meta" >/dev/null || fail "meta did not record the registry-resolved home"
+  grep -Fx 'projects=alpha, beta' "$meta" >/dev/null || fail "meta did not record the registry-resolved project list"
+  grep -F "new-window -d -t firstmate -n fm-paren-sm -c $subhome_abs" "$log" >/dev/null \
+    || fail "spawn did not launch from the registry-resolved home"
+  grep -F 'no firstmate home supplied or registered' "$err" >/dev/null \
+    && fail "spawn wrongly reported the registered secondmate as unregistered"
+  pass "secondmate_registry_value resolves home and projects past parentheses and punctuation in the charter summary"
+}
+
+test_secondmate_spawn_fails_loudly_for_unregistered_id() {
+  local home fakebin log err
+  home="$TMP_ROOT/unregistered-main"
+  mkdir -p "$home/data" "$home/state"
+  # A registry that is present and non-empty, but never mentions the id being
+  # spawned: the fix must not make an absent registration silently resolve.
+  printf -- '- other-sm - other domain (home: %s; scope: other domain; projects: alpha; added 2026-07-20)\n' \
+    "$TMP_ROOT/unrelated-subhome" > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/unregistered-fake")
+  log="$TMP_ROOT/unregistered-fake/tmux.log"
+  err="$TMP_ROOT/unregistered-fake/spawn.err"
+
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/unregistered-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" nonexistent-sm codex --secondmate >/dev/null 2>"$err"; then
+    fail "spawn succeeded for a secondmate id with no registry entry and no explicit home"
+  fi
+  grep -F 'error: no firstmate home supplied or registered for nonexistent-sm' "$err" >/dev/null \
+    || fail "spawn did not report the existing unregistered-secondmate error"
+  [ ! -e "$home/state/nonexistent-sm.meta" ] || fail "unregistered secondmate spawn wrote task metadata"
+  grep -F 'new-window' "$log" >/dev/null && fail "unregistered secondmate spawn created a tmux window"
+  pass "spawn still refuses an unregistered secondmate id with the existing error"
+}
+
 test_secondmate_spawn_without_primary_project_falls_back_home() {
   local home subhome subhome_abs fakebin log err
   home="$TMP_ROOT/no-primary-main"
@@ -2488,6 +2547,8 @@ test_home_seed_refuses_project_destinations_outside_subhome
 test_home_seed_refuses_operational_dirs_outside_subhome
 test_home_seed_refuses_symlinked_leaf_files
 test_secondmate_spawn_records_home_meta
+test_secondmate_spawn_resolves_registry_home_with_parenthesis_in_summary
+test_secondmate_spawn_fails_loudly_for_unregistered_id
 test_secondmate_spawn_without_primary_project_falls_back_home
 test_secondmate_spawn_fast_forwards_primary_clone_project_native
 test_secondmate_project_native_override_selects_specific_clone
