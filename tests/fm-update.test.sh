@@ -406,9 +406,14 @@ test_legacy_update_activation_bridge() {
     || fail "legacy-update compatibility action did not use the post-update supervisor"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "activation-only compatibility action changed repository HEAD"
-  grep -F 'run `bin/fm-update.sh --activate-supervisor` once before doing anything else' \
-    "$ROOT/AGENTS.md" >/dev/null \
-    || fail "post-update AGENTS re-read does not route legacy updater output to the bridge"
+  # The bridge instruction lives in the skill; AGENTS.md must route the post-update
+  # re-read to it, so assert both halves of that chain rather than one file's wording.
+  grep -F '.agents/skills/updatefirstmate/SKILL.md' "$ROOT/AGENTS.md" >/dev/null \
+    && grep -F 'legacy-updater compatibility step' "$ROOT/AGENTS.md" >/dev/null \
+    || fail "post-update AGENTS re-read does not route legacy updater output to the skill"
+  grep -F 'Run `bin/fm-update.sh --activate-supervisor` once and surface any failure before continuing.' \
+    "$ROOT/.agents/skills/updatefirstmate/SKILL.md" >/dev/null \
+    || fail "the updatefirstmate skill does not route legacy updater output to the bridge"
   pass "T14 legacy updater rollout activates the post-update supervisor"
 }
 
