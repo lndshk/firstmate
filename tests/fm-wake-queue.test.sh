@@ -75,8 +75,14 @@ make_supercase() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  list-panes)
+    # Pane presence is probed with list-panes, which fails for a gone target.
+    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || { printf "can't find window\n" >&2; exit 1; }
+    printf 'fakepane\n'
+    exit 0 ;;
   display-message)
-    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
+    # Real tmux answers display-message from the client's current pane even when
+    # the target is gone, so this fake never fails - only list-panes above can.
     _print=0
     # Return cursor_y when the format asks for it (pane_input_pending).
     for _a in "$@"; do
@@ -710,6 +716,49 @@ test_terminal_stale_escalate_leaves_no_marker() {
   pass "terminal-stale escalate removes its marker so housekeeping does not re-escalate"
 }
 
+# The watcher reports a process-tree death as "stale: <window> (no live agent
+# process)". The trailing annotation must never be parsed as part of the window:
+# doing so looks up the wrong status file (self-handle instead of escalate) and
+# writes a marker key housekeeping can never map back to a window, so the one
+# wake fm-watch fires per generation is discarded while the captain is away.
+test_dead_agent_stale_wake_parses_window_and_escalates() {
+  local dir state win out
+  dir=$(make_supercase stale-dead-agent)
+  state="$dir/state"
+  win="sess:fm-gone-d3"
+  printf 'working: mid-task\n' > "$state/gone-d3.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state" "(no live agent process)")
+  [ "${out%%|*}" = escalate ] \
+    || fail "dead-agent stale was not classified as escalate: $out"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win (no live agent process)" "$state"
+  grep -F "$win" "$state/.subsuper-escalations" >/dev/null \
+    || fail "dead-agent stale wake was not escalated: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  grep -F 'no live agent process)' "$state/.subsuper-escalations" >/dev/null \
+    && fail "the trailing annotation leaked into the escalated window name"
+  ls "$state"/.subsuper-stale-* >/dev/null 2>&1 \
+    && fail "dead-agent stale left a persistence marker housekeeping cannot map back"
+
+  dir=$(make_supercase stale-dead-agent-terminal)
+  state="$dir/state"
+  win="sess:fm-fin-d4"
+  printf 'done: PR https://x/y/pull/4\n' > "$state/fin-d4.status"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win (no live agent process)" "$state"
+  grep -F 'done: PR https://x/y/pull/4' "$state/.subsuper-escalations" >/dev/null \
+    || fail "annotated stale did not read the recorded task's status file"
+  [ -e "$state/.subsuper-seen-status-fin-d4" ] \
+    || fail "seen marker was not keyed to the bare task id: $(ls "$state" | tr '\n' ' ')"
+
+  dir=$(make_supercase stale-plain-transient)
+  state="$dir/state"
+  printf 'working: mid-task\n' > "$state/plain-d5.status"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-plain-d5" "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "plain transient stale was escalated: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-stale-plain-d5" ] \
+    || fail "plain transient stale did not record its persistence marker"
+  pass "dead-agent stale wake parses the bare window, escalates, and leaves no garbled marker"
+}
+
 test_signal_escalate_marks_seen_no_catchall_refire() {
   local dir state key
   dir=$(make_supercase signal-seen)
@@ -789,6 +838,30 @@ test_timestamped_status_uses_raw_dedupe_and_clean_presentation() {
 # ============================================================================
 # /afk presence-gating + injection hardening
 # ============================================================================
+
+# The daemon's own injection target is guarded with the same list-panes probe as
+# every other pane check: display-message answers from the client's current pane
+# for a target that is gone, so a guard built on it can never fail and the daemon
+# keeps treating a vanished firstmate pane as a live one.
+test_inject_refuses_a_gone_target() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase inject-gone-target)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  afk_enter "$state"
+  escalate_add "$state" "done: PR https://x/y/pull/13"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=0 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state"; then
+    fail "escalate_flush reported success with a gone injection target"
+  fi
+  [ ! -s "$sent" ] \
+    || fail "the daemon typed into a pane after its own target vanished: $(cat "$sent")"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "escalations were dropped instead of preserved for the next flush"
+  pass "a gone injection target is detected: nothing is typed and the buffer survives"
+}
 
 test_collapse_newlines_pure() {
   local out
@@ -1149,6 +1222,11 @@ make_bordered_case() {
 set -u
 COMPOSER="${FM_FAKE_COMPOSER:?FM_FAKE_COMPOSER unset}"
 case "${1:-}" in
+  list-panes)
+    # Pane presence is probed with list-panes, which fails for a gone target.
+    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || { printf "can't find window\n" >&2; exit 1; }
+    printf 'fakepane\n'
+    exit 0 ;;
   display-message)
     print=0
     for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
@@ -1445,9 +1523,11 @@ test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker
+test_dead_agent_stale_wake_parses_window_and_escalates
 test_signal_escalate_marks_seen_no_catchall_refire
 test_timestamped_status_uses_raw_dedupe_and_clean_presentation
 # /afk presence-gating + injection hardening.
+test_inject_refuses_a_gone_target
 test_collapse_newlines_pure
 test_afk_absent_daemon_does_not_inject
 test_afk_present_injects_with_marker

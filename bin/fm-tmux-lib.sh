@@ -2,7 +2,8 @@
 # fm-tmux-lib.sh — shared tmux pane primitives for firstmate.
 #
 # ONE source of truth for: busy detection, composer-empty (pending-input)
-# detection, Codex safety-prompt clearing, and a verify-and-retry-Enter submit.
+# detection, agent process-tree liveness, Codex safety-prompt clearing, and a
+# verify-and-retry-Enter submit.
 # Sourced by the watcher, the away-mode daemon (bin/fm-supervise-daemon.sh), and
 # bin/fm-send.sh so the pane/composer logic cannot drift between callers.
 #
@@ -34,9 +35,57 @@
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
 
+FM_TMUX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working...".
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.'
+
+# fm_pane_agent_state: classify a tmux pane as alive, dead, or unknown.
+# A pane is alive when its root PID is an ancestor of any verified harness
+# process. Foreground child commands therefore cannot hide the still-live agent.
+#
+# Uses `list-panes -t`, never `display-message -t`: display-message silently
+# falls back to the CLIENT's current pane when the target window/session does
+# not exist (verified on tmux 3.6 - no error, exit 0, wrong pane's data), which
+# is exactly how a gone-9-days secondmate window once reported healthy with the
+# supervisor's own pid. list-panes -t fails loudly ("can't find window/session")
+# for a target that is genuinely gone, so that case maps to a firm 'dead'
+# instead of inheriting whatever window happens to be active right now.
+fm_pane_agent_state() { # <target>
+  local target=$1 out rc pane_pid
+  out=$(tmux list-panes -t "$target" -F '#{pane_pid}' 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    case "$out" in
+      "can't find"*) printf 'dead'; return 0 ;;
+      *) printf 'unknown'; return 0 ;;
+    esac
+  fi
+  pane_pid=$(printf '%s\n' "$out" | head -n1)
+  case "$pane_pid" in
+    ''|*[!0-9]*) printf 'unknown'; return 0 ;;
+  esac
+  if "$FM_TMUX_LIB_DIR/fm-harness.sh" agent-in-tree "$pane_pid" >/dev/null 2>&1; then
+    printf 'alive'
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] && printf 'dead' || printf 'unknown'
+  fi
+}
+
+fm_pane_current_command() { # <target>
+  tmux list-panes -t "$1" -F '#{pane_current_command}' 2>/dev/null | head -n1
+}
+
+# fm_pane_exists: 0 when <target> resolves to a pane that is really there.
+# Same primitive rule as fm_pane_agent_state: `display-message -t` answers for
+# the client's current pane when the target window/session is gone, so it can
+# never prove presence; `list-panes -t` fails for a target that is gone.
+fm_pane_exists() { # <target>
+  [ -n "${1:-}" ] || return 1
+  tmux list-panes -t "$1" >/dev/null 2>&1
+}
 
 # fm_tmux_strip_ghost: remove dim/faint (ANSI SGR 2) styled runs from one captured
 # composer line, then drop any remaining escape sequences, leaving only the plain,

@@ -325,6 +325,32 @@ EOF
   # stale state is reported once (.stale-* remembers the hash already reported).
   while IFS= read -r w; do
     key=$(printf '%s' "$w" | tr ':/.' '___')
+    agent_state=$(fm_pane_agent_state "$w")
+    deadf="$STATE/.dead-$key"
+    if [ "$agent_state" = dead ]; then
+      # The streak belongs to the task generation that records the window now,
+      # so a reused window name never inherits a previous task's count.
+      dead_gen=$(window_meta_field "$w" generation none)
+      prev_gen=
+      prev_count=0
+      if [ -r "$deadf" ]; then
+        read -r prev_gen prev_count < "$deadf" || true
+      fi
+      case "$prev_count" in ''|*[!0-9]*) prev_count=0 ;; esac
+      [ "$prev_gen" = "$dead_gen" ] || prev_count=0
+      dead_count=$(( prev_count + 1 ))
+      printf '%s %s\n' "$dead_gen" "$dead_count" > "$deadf"
+      # Require two consecutive snapshots so the brief shell-to-agent handoff
+      # during spawn cannot produce a false death wake.
+      if [ "$dead_count" -eq 2 ]; then
+        reason="stale: $w (no live agent process)"
+        fm_wake_append stale "$w" "$reason" || exit 1
+        wake "$reason"
+      fi
+      continue
+    elif [ "$agent_state" = alive ]; then
+      rm -f "$deadf"
+    fi
     # Codex can block mid-turn on its additional-safety menu. Clear it before
     # classifying the recorded crewmate pane so the pause never reads as stale.
     # Only panes whose meta records the codex harness get keys, and at most
@@ -354,8 +380,9 @@ EOF
         rm -f "$clearf"
       fi
     fi
-    # A secondmate idling on its own watcher is healthy. Its parent supervises
-    # it through status writes and heartbeats, not pane-idle staleness.
+    # A live secondmate idling on its own watcher is healthy. Its parent
+    # supervises it through status writes and heartbeats, not pane-idle
+    # staleness. The separate process-tree check above still catches a dead one.
     [ "$(window_meta_field "$w" kind ship)" = secondmate ] && continue
     tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)

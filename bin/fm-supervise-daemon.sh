@@ -317,8 +317,8 @@ classify_signal() {  # <reason-after-colon> <state>
 # classify_stale decides the WAKE itself (one-shot per distinct hash). On a
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
-classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task raw last seen
+classify_stale() {  # <window> <state> [detail]
+  local win=$1 state=$2 detail=${3:-} task raw last seen
   task=$(window_to_task "$win")
   raw=$(last_status_line "$state/$task.status")
   last=$(fm_receipt_text "$raw")
@@ -333,6 +333,15 @@ classify_stale() {  # <window> <state>
     printf 'escalate|stale + terminal status: %s' "$last"
     return
   fi
+  # A dead agent is not transient staleness: the process is gone, it cannot
+  # resume, and the watcher reports it once per task generation. Deferring it to
+  # the persistence recheck loses it outright once the window itself disappears,
+  # so escalate on the wake.
+  case "$detail" in
+    *"no live agent process"*)
+      printf 'escalate|agent process gone (%s): %s' "$win" "${last:-no status}"
+      return ;;
+  esac
   # Non-terminal (or no status): defer to the persistence recheck. The caller
   # records/refreshes the stale marker so housekeeping can age it.
   printf 'self|transient stale (%s): %s' "$win" "${last:-no status}"
@@ -607,7 +616,7 @@ inject_msg() {  # <message> [state]
   msg=$(_collapse_newlines "$msg")
   msg="${FM_INJECT_MARK}${msg}"
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
-  tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1 || return 1
+  fm_pane_exists "$target" || return 1
   # (3) Busy-guard: never inject into an in-use pane. Two checks:
   #   a) pane_is_busy: the harness shows a busy footer (agent mid-turn).
   #   b) pane_input_pending: the cursor line has real unsubmitted text after
@@ -667,7 +676,7 @@ is_wake_reason() {  # <reason>
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
   local reason=$1 state=$2 decision action distilled
-  local kind="" arg=""
+  local kind="" arg="" detail=""
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
     return
@@ -676,7 +685,13 @@ handle_wake() {  # <reason> <state>
     signal:*) kind=signal; arg="${reason#signal: }"
               decision=$(classify_signal "$arg" "$state") ;;
     stale:*)  kind=stale; arg="${reason#stale: }"
-              decision=$(classify_stale "$arg" "$state") ;;
+              # A stale reason may carry a trailing annotation after the window
+              # name ("<window> (no live agent process)"). Every consumer below
+              # keys off a bare window, so split it here at the parse boundary.
+              case "$arg" in
+                *' ('*) detail="${arg#* (}"; arg="${arg%% (*}" ;;
+              esac
+              decision=$(classify_stale "$arg" "$state" "$detail") ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
     *)        decision=$(classify_unknown "$reason") ;;
@@ -773,7 +788,7 @@ fm_super_main() {
   local TARGET="$FM_SUPERVISOR_TARGET"
 
   # --- validate supervisor target at startup (a missing target is a typo) ---
-  if ! tmux display-message -p -t "$TARGET" '#{pane_id}' >/dev/null 2>&1; then
+  if ! fm_pane_exists "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a tmux pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found"
     fm_lock_release "$LOCK" 2>/dev/null || true
@@ -839,7 +854,7 @@ fm_super_main() {
     # has nowhere to go, and firstmate itself is the consumer of escalations.
     # Catch-up signals persist in state/*.status and flow on the next run, so
     # this delays rather than loses work.
-    if ! tmux display-message -p -t "$TARGET" '#{pane_id}' >/dev/null 2>&1; then
+    if ! fm_pane_exists "$TARGET"; then
       log "warn: supervisor target '$TARGET' gone; backing off ${INJECT_FAIL_SLEEP}s, will retry"
       # Flush is pointless with no pane; preserve any buffered escalations.
       sleep "$INJECT_FAIL_SLEEP"

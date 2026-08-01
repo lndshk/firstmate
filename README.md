@@ -120,7 +120,8 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
   Each normal watcher start also ensures one singleton keepalive sidecar is running; the sidecar judges liveness by `state/.last-watcher-beat` age and silently re-arms the one-shot watcher when the beacon goes stale and no live watcher owns the watch lock.
   The sidecar is bound to in-flight work: it only spawns while a task exists (`state/*.meta`), and it stops cleanly and stops re-arming once the fleet empties, so a torn-down or ended session never leaves a task-less watcher enqueueing heartbeats with no consumer.
   Routine watcher polling, restarts, elapsed waiting time, and unchanged heartbeat reviews stay silent; an idle crew costs you nothing.
-  A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if tasks are in flight and that watcher stops running, queued wakes are waiting to be drained, or a read-only stall sweep (`bin/fm-stall-check.sh`) finds dormant workstreams - finished-but-not-advanced tasks, queued items whose blockers or date gates have cleared, in-flight crews whose committed work is not pushed to any remote, idle in-flight panes, or an idle domain advisor that finished its routed work.
+  A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if tasks are in flight and that watcher stops running, queued wakes are waiting to be drained, or the fast read-only stall sweep it runs (`bin/fm-stall-check.sh --fast`) finds dormant workstreams - finished-but-not-advanced tasks, queued items whose blockers or date gates have cleared, or in-flight crews whose committed work is not pushed to any remote.
+  The pane and process checks - dead agent panes, idle in-flight panes, and an idle domain advisor that finished its routed work - cost a peek per pane, so they stay in the full sweep that runs at heartbeats and wakes rather than on the guard's hot path.
   A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which it self-handles routine wakes in bash and escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
   Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 - **Worktrees, not branches in your checkout** - crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
@@ -162,7 +163,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-brief.sh`            | Scaffold an evidence-bearing ship brief, a report-only scout brief with `--scout`, or a secondmate charter with `--secondmate` |
 | `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
 | `fm-guard.sh`            | Warn when tasks are in flight but queued wakes are pending, the stall detector has findings, or the watcher liveness beacon is stale or missing |
-| `fm-stall-check.sh`      | Read-only pull-based sweep that flags finished-but-not-advanced tasks, unblocked or date-gated queued items, in-flight crews with committed-but-unpushed work, idle in-flight stalls, and idle domain advisors that finished routed work; `--fast` skips the pane peeks |
+| `fm-stall-check.sh`      | Read-only pull-based sweep that flags dead agent panes, finished-but-not-advanced tasks, unblocked or date-gated queued items, in-flight crews with committed-but-unpushed work, idle in-flight stalls, and idle domain advisors that finished routed work; `--fast` skips the pane/process checks |
 | `fm-home-seed.sh`        | Lease/provision a secondmate home transactionally, clone projects, initialize gates, and maintain `data/secondmates.md` |
 | `fm-spawn.sh`            | Spawn one task, several `id=repo` pairs, or a persistent secondmate with `--secondmate`                            |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
@@ -173,13 +174,13 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-supervisor.sh`       | Always-on main-home, no-chat supervisor; reconciles wakes, snapshots direct-report contracts, records actionable failures, and refreshes the board |
 | `fm-board.sh`            | Render the Firstmate Board once from the current supervisor snapshot; it has no separate daemon owner |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes before handling supervision work                                              |
-| `fm-send.sh`             | Send one verified literal line (or `--key Escape`) to a crewmate window; exits non-zero when Enter is positively swallowed |
-| `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, dim-ghost-aware and border-aware composer detection, Codex safety-prompt clearing, and verified submit retry |
+| `fm-send.sh`             | Send one verified literal line (or `--key Escape`) to a live crewmate window; refuses panes whose agent process is gone and exits non-zero when Enter is positively swallowed |
+| `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, dim-ghost-aware and border-aware composer detection, process-tree agent liveness and pane existence, Codex safety-prompt clearing, and verified submit retry |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate pane                                                                             |
 | `fm-pr-check.sh`         | Record a PR-ready task and arm the watcher's merge poll                                                             |
 | `fm-promote.sh`          | Promote a scout task in place so it becomes a protected ship task                                                   |
 | `fm-teardown.sh`         | Return the worktree or retire/release a secondmate home; protects ship work, requires scout reports, checks child work, and prints the backlog reminder |
-| `fm-harness.sh`          | Detect the running harness; resolve the effective crewmate harness                                                  |
+| `fm-harness.sh`          | Detect the running harness; resolve the effective crewmate harness; answer whether a process tree still holds a live verified agent |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                                                     |
 
 ## Configuration
@@ -272,6 +273,7 @@ tests/fm-wake-queue.test.sh               # durable wake queue, singleton behavi
 tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, NBSP-padded prompt detection, and escape-free peek tests
 tests/fm-safety-autoclear.test.sh         # strict Codex safety-dialog detection, Keep waiting key sequence, off switch, and recorded-window watcher wiring
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
+tests/fm-agent-liveness.test.sh           # process-tree liveness, dead-pane send refusal/watcher wake, and real-tmux mid-shell/death proof
 tests/fm-bootstrap.test.sh                # bootstrap dependency and feature-probe tests
 tests/fm-supervisor.test.sh               # always-on wake reconciliation, exact states, escalations, no-chat behavior, and singleton restart
 tests/fm-fleet-sync.test.sh               # canonical symlink-target refresh, clean-FF-only skips, and safe gone-branch pruning

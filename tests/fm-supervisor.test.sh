@@ -37,19 +37,26 @@ case "$*" in
     : > "$FM_TEST_TMUX_LOG.injected"
     exit 99
     ;;
-  *display-message*fm-busy*)
+  *display-message*)
+    # Real tmux (verified on 3.6): display-message -t answers with the client's
+    # current pane when the target window is gone - it never fails, so it can
+    # never prove a recorded window is still there. Emulating that makes the
+    # fm-gone cases below fail loudly if pane presence is ever probed with it.
+    printf '%%9\n'
+    ;;
+  *list-panes*fm-busy*)
     printf '%%1\n'
     ;;
   *capture-pane*fm-busy*)
     printf 'Working (8s · esc to interrupt)\n'
     ;;
-  *display-message*fm-waiting*)
+  *list-panes*fm-waiting*)
     printf '%%2\n'
     ;;
   *capture-pane*fm-waiting*)
     printf 'idle prompt\n'
     ;;
-  *display-message*fm-unreadable*)
+  *list-panes*fm-unreadable*)
     printf '%%3\n'
     ;;
   *capture-pane*fm-unreadable*)

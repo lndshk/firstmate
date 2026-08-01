@@ -162,6 +162,7 @@ test_watcher_clears_only_recorded_window() {
     || fail "watcher exited non-zero"
   grep -Fx 'heartbeat' "$out" >/dev/null || fail "watcher did not complete its poll"
   expected=$(printf '%s\n' \
+    'list-panes -t crew:fm-recorded -F #{pane_pid}' \
     'capture-pane -p -t crew:fm-recorded -S -20' \
     'send-keys -t crew:fm-recorded Down' \
     'capture-pane -p -t crew:fm-recorded -S -20' \
