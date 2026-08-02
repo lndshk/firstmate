@@ -1493,6 +1493,385 @@ test_fm_send_exits_nonzero_on_initial_send_failure() {
   pass "fm-send exits non-zero when initial text send fails"
 }
 
+# ============================================================================
+# Stall-check integration (housekeeping job 4): the away-mode daemon must run
+# bin/fm-stall-check.sh's full sweep so its secondmate-child-escalation and
+# advisor-idle detectors also fire during afk, not just at present-mode
+# heartbeats (the 2026-08-02 incident: three crewmates sat on needs-decision
+# for ~2 hours across two secondmate homes with both advisors idle, and the
+# daemon escalated none of it).
+# ============================================================================
+
+test_stallcheck_scan_escalates_unrelayed_secondmate_child() {
+  # THE exact miss: a child parked on needs-decision: inside a SECONDMATE
+  # home's own state dir, which the main state/*.status catch-all (job 3)
+  # cannot see at all - it never reads inside a secondmate's home.
+  local dir state fakebin sent capture home
+  dir=$(make_supercase stallcheck-unrelayed)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  : > "$capture"
+
+  cat > "$state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  cat > "$home/state/rt-issue48.meta" <<'EOF'
+window=fm-rt-issue48
+kind=ship
+EOF
+  printf 'needs-decision: pick a rollout option\n' > "$home/state/rt-issue48.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/rt-issue48.status" 2>/dev/null \
+    || touch -t 200001010000 "$home/state/rt-issue48.status"
+
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 \
+    housekeeping "$state"
+
+  grep -F 'unrelayed?: rt-advisor/rt-issue48' "$sent" >/dev/null \
+    || fail "away-mode daemon did not escalate an unrelayed secondmate-child needs-decision: $(cat "$sent" 2>/dev/null)"
+  pass "housekeeping escalates a needs-decision child inside a secondmate home while afk"
+}
+
+test_stallcheck_scan_escalates_idle_working_advisor() {
+  # The other half of the incident: a secondmate advisor whose last status is
+  # working: (not terminal) has no status-change wake to trigger on, so only
+  # a time-based sweep like fm-stall-check.sh's advisor-idle check can catch it.
+  local dir state fakebin sent capture home
+  dir=$(make_supercase stallcheck-advisor-idle)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  : > "$capture"
+
+  cat > "$state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  printf 'working: still on task\n' > "$state/rt-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$state/rt-advisor.status" 2>/dev/null \
+    || touch -t 200001010000 "$state/rt-advisor.status"
+
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 \
+    housekeeping "$state"
+
+  grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
+    || fail "away-mode daemon did not escalate an idle advisor whose last status is working:: $(cat "$sent" 2>/dev/null)"
+  pass "housekeeping escalates an idle advisor (working: status) while afk"
+}
+
+test_stallcheck_scan_dedupes_repeated_finding() {
+  # fm-stall-check.sh has no ack mechanism and re-fires a persisting finding
+  # every sweep. One alarm, not a stream: the SAME finding must not escalate
+  # again on a second tick, even though the underlying condition (and the
+  # script's output) is unchanged and the scan is forced to re-run.
+  local dir state fakebin sent capture home
+  dir=$(make_supercase stallcheck-dedup)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  : > "$capture"
+
+  cat > "$state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  printf 'working: still on task\n' > "$state/rt-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$state/rt-advisor.status" 2>/dev/null \
+    || touch -t 200001010000 "$state/rt-advisor.status"
+
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 \
+    housekeeping "$state"
+  grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
+    || fail "first tick did not escalate the idle advisor: $(cat "$sent" 2>/dev/null)"
+
+  : > "$sent"
+  # Force the scan to re-run (FM_STALL_CHECK_SCAN_SECS=0 bypasses the cadence
+  # gate) so the underlying condition genuinely re-fires from fm-stall-check.sh
+  # a second time; only the daemon's own dedup marker can prevent a repeat.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 \
+    housekeeping "$state"
+  [ ! -s "$sent" ] \
+    || fail "the same stall-check finding was re-escalated on a second tick: $(cat "$sent")"
+  pass "stall-check scan escalates a persisting finding once, not on every tick"
+}
+
+test_stallcheck_scan_afk_inactive_does_not_inject() {
+  # afk changes how aggressively the daemon surfaces things, not what it can
+  # see. With afk inactive, detection must still run (so nothing is lost) but
+  # nothing may be typed into the pane - the same contract every other
+  # escalation source in this daemon already holds.
+  local dir state fakebin sent capture home
+  dir=$(make_supercase stallcheck-afk-off)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  : > "$capture"
+
+  cat > "$state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  printf 'working: still on task\n' > "$state/rt-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$state/rt-advisor.status" 2>/dev/null \
+    || touch -t 200001010000 "$state/rt-advisor.status"
+
+  # afk deliberately NOT entered.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 \
+    housekeeping "$state"
+
+  [ ! -s "$sent" ] || fail "daemon injected a stall-check finding while afk was inactive: $(cat "$sent")"
+  grep -F 'advisor-idle?: rt-advisor' "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "finding was not buffered while afk was inactive (would be lost instead of caught up later)"
+  pass "stall-check scan buffers without injecting while afk is inactive"
+}
+
+test_stallcheck_scan_respects_cadence_gate() {
+  # Cost control: the full sweep shells out to tmux per pane, so it must not
+  # run on every 15s housekeeping tick. Confirm the cadence gate actually
+  # blocks a due-but-not-yet-elapsed scan, and fires once it has elapsed.
+  local dir state fakebin sent capture home
+  dir=$(make_supercase stallcheck-cadence)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  : > "$capture"
+
+  cat > "$state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  printf 'working: still on task\n' > "$state/rt-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$state/rt-advisor.status" 2>/dev/null \
+    || touch -t 200001010000 "$state/rt-advisor.status"
+  afk_enter "$state"
+
+  date +%s > "$state/.subsuper-last-stallcheck"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=300 \
+    housekeeping "$state"
+  [ ! -s "$sent" ] || fail "stall-check scan ran before its cadence elapsed: $(cat "$sent")"
+
+  # The cadence gate is mtime-based (_file_age), like the existing
+  # .subsuper-last-scan marker - writing a backdated epoch as CONTENT does not
+  # backdate the file, since the write itself sets mtime to now. Backdate the
+  # mtime directly instead.
+  touch -d '2000-01-01 00:00:00' "$state/.subsuper-last-stallcheck" 2>/dev/null \
+    || touch -t 200001010000 "$state/.subsuper-last-stallcheck"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=300 \
+    housekeeping "$state"
+  grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
+    || fail "stall-check scan did not run once its cadence elapsed: $(cat "$sent" 2>/dev/null)"
+  pass "stall-check scan is gated by FM_STALL_CHECK_SCAN_SECS, not every housekeeping tick"
+}
+
+test_stallcheck_scan_failed_sweep_is_logged_not_silent() {
+  # A sweep that cannot run at all prints nothing, which is byte-identical to
+  # "all clear". Reading it as all-clear would restore the very blindness this
+  # job exists to close AND wipe every dedup marker, so the whole set
+  # re-escalates the moment the sweep recovers.
+  local dir state fakebin sent capture logf marker miss key
+  dir=$(make_supercase stallcheck-sweep-fails)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  logf="$dir/daemon.log"; : > "$logf"
+
+  # FM_DAEMON_DIR resolves only the sweep binary once the daemon is sourced, so
+  # pointing it at the fake bin substitutes a broken fm-stall-check.sh.
+  cat > "$fakebin/fm-stall-check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'fm-stall-check.sh: no server running on /tmp/tmux-1000/default\n' >&2
+exit 3
+SH
+  chmod +x "$fakebin/fm-stall-check.sh"
+
+  # Derive the marker names from the identity function rather than hardcoding
+  # them, so these tests stay pinned to real key formatting.
+  key=$(_stall_finding_key 'advisor-idle?: rt-advisor - idle 1900s')
+  marker="$state/.subsuper-seen-stallcheck-$key"
+  miss="$state/.subsuper-stallcheck-miss-$key"
+  date +%s > "$marker"
+
+  afk_enter "$state"
+  LOG="$logf" FM_DAEMON_DIR="$fakebin" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 housekeeping "$state"
+  unset LOG
+
+  [ -e "$marker" ] \
+    || fail "a failed stall-check sweep cleared its dedup markers, so every finding re-escalates once the sweep recovers"
+  [ ! -s "$sent" ] \
+    || fail "a failed stall-check sweep escalated something: $(cat "$sent")"
+  grep -F 'ERROR: stall-check sweep failed (rc=3)' "$logf" >/dev/null \
+    || fail "a failed stall-check sweep left no diagnostic in the daemon log: $(cat "$logf")"
+  grep -F 'no server running' "$logf" >/dev/null \
+    || fail "the failed sweep's stderr was discarded instead of logged: $(cat "$logf")"
+  [ ! -e "$miss" ] \
+    || fail "a failed stall-check sweep counted as an absence; a sweep that could not run is not evidence of resolution"
+  pass "a failing stall-check sweep logs an ERROR and preserves its dedup markers"
+}
+
+test_stallcheck_scan_realarms_unresolved_finding() {
+  # An escalation may be deduplicated, but never permanently suppressed by
+  # anything other than the condition going away. Firstmate's answer to the
+  # first alarm can fail to land (fm-send.sh refuses a dead pane), so a finding
+  # the sweep keeps emitting must alarm again once FM_STALL_REALARM_SECS has
+  # passed - not on the very next tick, and not never. The window is driven
+  # from a low env value here and probed on BOTH sides of it, so the assertion
+  # cannot pass merely because the ticks share a wall-clock second.
+  local dir state fakebin sent capture marker window
+  dir=$(make_supercase stallcheck-realarm)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  window=60
+
+  cat > "$fakebin/fm-stall-check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'advisor-idle?: rt-advisor - idle 1900s with no active child work; route its next program step\n'
+exit 0
+SH
+  chmod +x "$fakebin/fm-stall-check.sh"
+  marker="$state/.subsuper-seen-stallcheck-$(_stall_finding_key 'advisor-idle?: rt-advisor - idle 1900s')"
+
+  tick() {
+    FM_DAEMON_DIR="$fakebin" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 \
+      FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
+      FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 \
+      FM_STALL_REALARM_SECS="${1:-$window}" housekeeping "$state"
+  }
+
+  afk_enter "$state"
+  tick
+  grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
+    || fail "first tick did not escalate the idle advisor: $(cat "$sent" 2>/dev/null)"
+
+  : > "$sent"
+  tick
+  [ ! -s "$sent" ] \
+    || fail "an unresolved finding re-alarmed on the very next tick instead of once per window: $(cat "$sent")"
+
+  # The window is measured from the marker's CONTENT epoch (like the
+  # .subsuper-stale-* markers), so backdate the content, not the mtime. Just
+  # inside the window must stay quiet; just outside it must alarm.
+  printf '%s\n' "$(( $(date +%s) - (window / 2) ))" > "$marker"
+  tick
+  [ ! -s "$sent" ] \
+    || fail "a finding re-alarmed while still inside FM_STALL_REALARM_SECS: $(cat "$sent")"
+
+  printf '%s\n' "$(( $(date +%s) - window - 10 ))" > "$marker"
+  tick
+  grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
+    || fail "a still-unresolved finding never re-alarmed after FM_STALL_REALARM_SECS; the lane is silently stalled again: $(cat "$sent" 2>/dev/null)"
+
+  # <=0 follows the FM_ESCALATE_BATCH_SECS "immediate" idiom, never a disable:
+  # a disable path would be exactly the permanent suppression the principle
+  # forbids, so it must alarm even on a marker just stamped by the tick above.
+  : > "$sent"
+  tick 0
+  grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
+    || fail "FM_STALL_REALARM_SECS=0 suppressed an unresolved finding instead of alarming every sweep: $(cat "$sent" 2>/dev/null)"
+  unset -f tick
+  pass "an unresolved stall-check finding re-alarms once per FM_STALL_REALARM_SECS window"
+}
+
+test_stallcheck_scan_single_absent_sweep_is_not_resolution() {
+  # fm-stall-check.sh drops a finding for one sweep on ordinary flap (a
+  # momentarily busy child pane short-circuits check_advisor_idle_stalls, a
+  # bounded fm-peek.sh probe fails). One absence must therefore neither resolve
+  # the finding nor make its return read as a fresh occurrence; only a
+  # corroborated absence (STALL_CHECK_MISSES_TO_CLEAR = 2) clears the marker.
+  local dir state fakebin sent capture marker miss out key
+  dir=$(make_supercase stallcheck-flap)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  out="$dir/sweep-out.txt"
+
+  cat > "$fakebin/fm-stall-check.sh" <<SH
+#!/usr/bin/env bash
+cat "$out" 2>/dev/null
+exit 0
+SH
+  chmod +x "$fakebin/fm-stall-check.sh"
+  key=$(_stall_finding_key 'advisor-idle?: rt-advisor - idle 1900s')
+  marker="$state/.subsuper-seen-stallcheck-$key"
+  miss="$state/.subsuper-stallcheck-miss-$key"
+
+  # A wide re-alarm window keeps this test about the miss counter alone: the
+  # flap absorption it asserts is only observable while the re-alarm window has
+  # not elapsed, and a window at or below the sweep cadence would pre-empt it.
+  tick() {
+    FM_DAEMON_DIR="$fakebin" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 \
+      FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
+      FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 FM_STALL_REALARM_SECS=3600 \
+      housekeeping "$state"
+  }
+
+  afk_enter "$state"
+  printf 'advisor-idle?: rt-advisor - idle 1900s with no active child work\n' > "$out"
+  tick
+  grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
+    || fail "first tick did not escalate the idle advisor: $(cat "$sent" 2>/dev/null)"
+
+  : > "$sent"; : > "$out"
+  tick
+  [ -e "$marker" ] \
+    || fail "one absent sweep cleared the dedup marker; a single flap is not a resolution"
+  [ "$(cat "$miss" 2>/dev/null)" = "1" ] \
+    || fail "one absent sweep did not record a single consecutive miss: $(cat "$miss" 2>/dev/null)"
+
+  printf 'advisor-idle?: rt-advisor - idle 2200s with no active child work\n' > "$out"
+  tick
+  [ ! -s "$sent" ] \
+    || fail "a finding returning after one missed sweep re-escalated as a fresh occurrence: $(cat "$sent")"
+  [ -e "$marker" ] || fail "the returning finding lost its dedup marker"
+  [ ! -e "$miss" ] || fail "the returning finding did not reset its consecutive-miss counter"
+
+  : > "$out"
+  tick
+  [ -e "$marker" ] || fail "the marker was cleared after only one absence again"
+  tick
+  [ ! -e "$marker" ] \
+    || fail "two consecutive absent sweeps did not clear the marker, so a genuine recurrence would stay suppressed"
+  [ ! -e "$miss" ] || fail "clearing the marker left its miss counter behind"
+  unset -f tick
+  pass "one absent sweep is a flap, two consecutive absences resolve the finding"
+}
+
 test_daemon_state_root_uses_fm_home
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
@@ -1561,3 +1940,12 @@ test_max_defer_afk_inactive_does_not_flush_or_alarm
 test_fm_send_exits_nonzero_on_confirmed_swallow
 test_fm_send_ambiguous_pending_without_sent_text_succeeds
 test_fm_send_exits_nonzero_on_initial_send_failure
+# Stall-check integration (housekeeping job 4).
+test_stallcheck_scan_escalates_unrelayed_secondmate_child
+test_stallcheck_scan_escalates_idle_working_advisor
+test_stallcheck_scan_dedupes_repeated_finding
+test_stallcheck_scan_afk_inactive_does_not_inject
+test_stallcheck_scan_respects_cadence_gate
+test_stallcheck_scan_failed_sweep_is_logged_not_silent
+test_stallcheck_scan_realarms_unresolved_finding
+test_stallcheck_scan_single_absent_sweep_is_not_resolution

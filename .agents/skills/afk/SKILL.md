@@ -141,6 +141,37 @@ did not land instead of leaving it unsubmitted.
 `FM_INJECT_SKIP` (default `heartbeat`) force-self-handles matching kinds,
 overriding classification - use sparingly.
 
+**Second housekeeping catch-all: the fleet stall detector.** Independent of
+the per-wake classification above, the daemon also runs the full (never
+`--fast`) `bin/fm-stall-check.sh` sweep every `FM_STALL_CHECK_SCAN_SECS`
+(default 300s) and buffers any new finding through the same escalation path.
+This exists because two classes of stuck work have no wake to trigger on at
+all: an idle secondmate advisor with nothing left to change status, and a
+child parked on `needs-decision:`/`blocked:`/`failed:` inside a *different*
+secondmate's home, which the status-line catch-all above never reads. Present-mode
+firstmate already runs this same script by hand at every heartbeat and
+wake-handling turn (AGENTS.md §8); this is that same read-only sweep, on a
+cadence, for when nobody is watching. Findings are deduped by identity (kind +
+id) across sweeps, since the script itself re-fires an unresolved finding on
+every run - one escalation per re-alarm window, not a repeat every tick.
+
+The marker lifecycle obeys one principle: **an escalation may be deduplicated,
+but it may never be permanently suppressed by anything other than the condition
+actually going away.** Three rules enforce it. A marker silences its finding for
+`FM_STALL_REALARM_SECS` only (default 1800s - its own knob, deliberately well
+above the sweep cadence so the two cannot collide, and with no disable value:
+`<=0` means alarm on every sweep the condition persists): if the sweep is still
+emitting the finding once the marker is that old, firstmate's answer to the
+first alarm demonstrably never landed (a real path - `fm-send.sh` refuses a
+dead pane), so it escalates again. A marker is cleared only after the
+finding is missing from two consecutive sweeps, so one flapping sweep neither
+resolves the finding nor costs a duplicate escalation. And a sweep that cannot
+run at all (script missing, lost executable bit, tmux unreachable) prints
+nothing, which would otherwise be indistinguishable from "all clear", so its
+exit status is checked: a failed sweep logs an ERROR with the captured stderr in
+the daemon log and counts as neither presence nor absence, leaving every marker
+untouched.
+
 ## Escalation format
 
 Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =

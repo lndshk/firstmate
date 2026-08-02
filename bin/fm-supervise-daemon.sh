@@ -46,6 +46,18 @@
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
+#   - Stall-check catch-all: every FM_STALL_CHECK_SCAN_SECS the daemon runs the
+#     full (non---fast) bin/fm-stall-check.sh sweep and buffers any NEW finding.
+#     This is what present-mode firstmate already runs at every heartbeat and
+#     every wake-handling turn (AGENTS.md §8); without it, away-mode is BLIND to
+#     two classes the status-line catch-all above structurally cannot see: an
+#     idle secondmate advisor with no time-based wake to trigger on, and a child
+#     parked on needs-decision/blocked/failed inside a SEPARATE secondmate
+#     home's state dir. fm-stall-check.sh re-fires the same finding every sweep
+#     (it has no ack mechanism by design), so stall_check_scan dedupes by a
+#     kind+id identity marker before buffering — one escalation per occurrence,
+#     not a repeat every tick. See stall_check_scan for why this always runs
+#     the full sweep (never --fast) and the cadence/cost tradeoff.
 #
 # The robustness shell from the prior always-inject version is preserved:
 # single-instance lock (portable mkdir-based, no flock dependency), crash-loop
@@ -69,6 +81,16 @@
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
 #                                   (default 300)
+#          FM_STALL_CHECK_SCAN_SECS cadence for running bin/fm-stall-check.sh's
+#                                   full sweep as a housekeeping catch-all
+#                                   (default 300; always the full sweep, never
+#                                   --fast — see stall_check_scan)
+#          FM_STALL_REALARM_SECS    how long a stall-check finding stays deduped
+#                                   before an unresolved one alarms again
+#                                   (default 1800; <=0 means alarm on every sweep
+#                                   it persists — never a disable). Its own knob,
+#                                   deliberately independent of both the sweep
+#                                   cadence above and FM_MAX_DEFER_SECS below.
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
 #          FM_BUSY_REGEX            OR-ed busy signatures (mirrors fm-watch.sh)
@@ -118,11 +140,37 @@ INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
+STALL_CHECK_SCAN_SECS_DEFAULT=300
+# How long a stall-check finding stays deduped before an unresolved one alarms
+# again. This is deliberately its OWN knob rather than a reuse of an existing
+# one: any window equal to (or below) STALL_CHECK_SCAN_SECS collapses the dedup
+# entirely, since the very next sweep is already past it, which would both alarm
+# on every sweep and make STALL_CHECK_MISSES_TO_CLEAR's flap absorption
+# unreachable. 1800 is (a) 6x the default sweep cadence, so no plausible
+# retuning of that cadence can make the two collide, and (b) the same value
+# fm-stall-check.sh already uses for FM_ADVISOR_IDLE_STALL_SECS, which is the
+# same class of how-long-is-too-long-to-stay-quiet judgment.
+# <=0 follows FM_ESCALATE_BATCH_SECS's "immediate" idiom, NOT
+# FM_MAX_DEFER_SECS's "disabled" idiom: it means alarm on every sweep the
+# condition persists. There is deliberately no disable value, because a disable
+# path is exactly the permanent suppression stall_check_scan's governing
+# principle forbids.
+STALL_REALARM_SECS_DEFAULT=1800
 HOUSEKEEPING_TICK_DEFAULT=15
 # Max time a buffered escalation may sit undelivered before the daemon retries
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
 MAX_DEFER_SECS_DEFAULT=300
+# Consecutive sweeps in which a known stall-check finding must be ABSENT before
+# its dedup marker is cleared as genuinely resolved. N=1 offers no protection at
+# all - the very first absence clears the marker, so a single flapping sweep (a
+# momentarily busy child pane, a status file caught mid-write, a transient
+# fm-peek.sh probe failure) re-escalates the identical finding. N=2 is the
+# smallest value that absorbs one dropped sweep, and costs only one further
+# cadence interval of latency before a genuinely resolved marker frees up.
+# FM_STALL_REALARM_SECS independently bounds the cost of being wrong in either
+# direction, so N needs no defensive tuning beyond this.
+STALL_CHECK_MISSES_TO_CLEAR=2
 CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 # Busy footers + composer-empty detection now live in bin/fm-tmux-lib.sh
 # (FM_TMUX_BUSY_REGEX_DEFAULT / fm_tmux_composer_state); FM_BUSY_REGEX still
@@ -370,6 +418,31 @@ classify_unknown() {  # <reason>
 
 _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
 
+# Filesystem-safe identity for one bin/fm-stall-check.sh output line: its kind
+# and id (the first two space-separated fields), with everything outside
+# [A-Za-z0-9_.-] collapsed to '_'. Deliberately drops everything after the id
+# (idle-seconds counts, commit counts, pane commands) so the SAME underlying
+# condition keys identically while it persists — stall_check_scan dedupes it to
+# one escalation per re-alarm window rather than one per tick — while a finding
+# that is genuinely resolved (absent from STALL_CHECK_MISSES_TO_CLEAR
+# consecutive sweeps) drops its marker, so a later recurrence of the same
+# kind+id escalates as a new occurrence.
+_stall_finding_key() {  # <fm-stall-check.sh output line>
+  printf '%s' "$1" | awk '{print $1, $2}' | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+# Read a non-negative integer out of a marker file, falling back to <default>
+# when the file is missing, empty (an interrupted write), or not a plain count.
+# Callers pick a <default> that fails toward alarming rather than staying quiet.
+_read_int() {  # <file> <default>
+  local v
+  v=$(cat "$1" 2>/dev/null || true)
+  case "$v" in
+    ''|*[!0-9]*) printf '%s' "$2" ;;
+    *) printf '%s' "$v" ;;
+  esac
+}
+
 stale_marker_record() {  # <window> <state>  — create if absent
   local win=$1 state=$2 key marker
   key=$(_stale_key "$(window_to_task "$win")")
@@ -488,8 +561,131 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
   fi
 }
 
+# Run the read-only fleet stall detector (bin/fm-stall-check.sh) and buffer any
+# NEW finding for escalation. This closes the gap present-mode firstmate does
+# not have: at every heartbeat and every wake-handling turn it runs this same
+# script by hand (AGENTS.md §8); away-mode had no equivalent, so an idle
+# secondmate advisor (no status change to wake the signal/stale path on) and a
+# child parked on needs-decision/blocked/failed inside a SEPARATE secondmate
+# home's state dir (a dir the watcher never reads) were both invisible for an
+# entire afk stretch.
+#
+# Full sweep only, never --fast: fm-stall-check.sh's --fast flag is defined to
+# skip exactly check_advisor_idle_stalls and check_secondmate_child_escalations
+# (they are the ones that shell out to fm-peek.sh per pane) — the two checks
+# this integration exists to reach. A --fast tier on a tighter cadence would
+# cost more ticks for zero additional coverage of the gap being closed, so one
+# tier is used instead of a two-tier fast/full split.
+#
+# Cadence: measured against a fixture sized to a live fleet (7 secondmates, 14
+# children total, everything idle — the worst case that forces every
+# pane-peek path) the full sweep cost ~3.5s; at fresh/non-idle statuses (no
+# pane-peek paths triggered) it cost ~1.5s. On FM_STALL_CHECK_SCAN_SECS's
+# default 300s that is at most a ~1% duty cycle, so it is folded into the same
+# housekeeping tick as the FM_HEARTBEAT_SCAN_SECS catch-all rather than the
+# 15s HOUSEKEEPING_TICK — a large fleet with many idle advisors would otherwise
+# spend a meaningful fraction of every tick shelling out to tmux for no new
+# information.
+#
+# THE GOVERNING PRINCIPLE FOR THIS FUNCTION'S MARKER LIFECYCLE: an escalation
+# may be deduplicated, but it may NEVER be permanently suppressed by anything
+# other than the condition actually going away.
+#
+# Dedup: fm-stall-check.sh is a re-firing verify-candidate emitter with no ack
+# mechanism (its own header says so) — every sweep re-prints a persisting
+# condition. A marker file per _stall_finding_key (kind+id) collapses that into
+# one escalation per re-alarm window instead of one per tick. Three rules keep
+# that dedup from becoming suppression:
+#
+#   - Re-alarm, never mute. A marker only silences its finding for
+#     FM_STALL_REALARM_SECS (the same re-alarm-once-per-window pattern
+#     inject_wedge_alarm uses, on its own knob so the two windows cannot
+#     collide). Once a marker is that old and the sweep is STILL emitting the
+#     finding, the condition is demonstrably unresolved — firstmate's answer to
+#     the first alarm never landed, which is a real path (fm-send.sh refuses a
+#     dead pane) — so it escalates again and the marker's stamp is refreshed. A
+#     repeat alarm on a genuinely unresolved condition is correct, not spam.
+#   - Absence must be corroborated. A marker is cleared only after the finding
+#     is missing from STALL_CHECK_MISSES_TO_CLEAR consecutive sweeps, counted
+#     in a per-key .subsuper-stallcheck-miss-<key> sidecar. One flapping sweep
+#     therefore neither resolves the finding nor re-escalates it: a key that
+#     reappears after a single miss keeps its existing marker and re-alarm
+#     stamp, so it costs no firstmate turn.
+#   - Only a real sweep is evidence. Everything above runs after the failed-
+#     sweep early return below, so a sweep that could not run counts as neither
+#     presence nor absence.
+#
+# After a corroborated clear, a later recurrence of the same kind+id is a fresh
+# occurrence and escalates immediately.
+#
+# Failure is never silence: a sweep that cannot run (script missing after a
+# partial self-update, lost executable bit, tmux unreachable) exits non-zero
+# and prints nothing, which is indistinguishable from "all clear" unless the
+# status is checked, so the sweep is run through a command substitution (a
+# process substitution discards its exit status) with stderr captured. On a
+# failed sweep the daemon logs an ERROR like every other failure path here and
+# returns WITHOUT clearing markers: an empty failure output must not be read as
+# "every finding resolved", which would both hide the outage and re-escalate
+# the whole set once the sweep recovers.
+stall_check_scan() {  # <state>
+  local state=$1 home line key marker miss misses age now_s realarm current="" added=0 out err diag rc=0
+  home=$(dirname "$state")
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-stallcheck.XXXXXX") || {
+    log "ERROR: stall-check sweep skipped: mktemp failed; away-mode stall findings unavailable this tick (dedup markers preserved)"
+    return 1
+  }
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$FM_DAEMON_DIR/fm-stall-check.sh" 2>"$err") || rc=$?
+  diag=$(tr '\n\t' '  ' < "$err" 2>/dev/null | cut -c1-300)
+  rm -f "$err"
+  if [ "$rc" -ne 0 ]; then
+    log "ERROR: stall-check sweep failed (rc=$rc); away-mode stall findings unavailable this tick (dedup markers preserved): ${diag:-no stderr}"
+    return 1
+  fi
+  now_s=$(_now)
+  realarm=${FM_STALL_REALARM_SECS:-$STALL_REALARM_SECS_DEFAULT}
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key=$(_stall_finding_key "$line")
+    current="$current $key"
+    marker="$state/.subsuper-seen-stallcheck-$key"
+    rm -f "$state/.subsuper-stallcheck-miss-$key"
+    if [ -e "$marker" ]; then
+      age=$(( now_s - $(_read_int "$marker" 0) ))
+      if [ "$realarm" -gt 0 ] && [ "$age" -lt "$realarm" ]; then
+        continue
+      fi
+      log "escalate: stall-check re-alarm after ${age}s unresolved -> $line"
+    else
+      log "escalate: stall-check -> $line"
+    fi
+    escalate_add "$state" "$line"
+    printf '%s\n' "$now_s" > "$marker"
+    added=1
+  done <<< "$out"
+  for marker in "$state"/.subsuper-seen-stallcheck-*; do
+    [ -e "$marker" ] || continue
+    key="${marker##*.subsuper-seen-stallcheck-}"
+    case " $current " in
+      *" $key "*) continue ;;
+    esac
+    miss="$state/.subsuper-stallcheck-miss-$key"
+    misses=$(( $(_read_int "$miss" 0) + 1 ))
+    if [ "$misses" -ge "$STALL_CHECK_MISSES_TO_CLEAR" ]; then
+      rm -f "$marker" "$miss"
+    else
+      printf '%s\n' "$misses" > "$miss"
+    fi
+  done
+  # Mirror handle_wake's escalate path: attempt an immediate flush when
+  # batching is disabled, rather than waiting for job (1)'s own batch-flush
+  # check, which already ran earlier in this same housekeeping() tick.
+  if [ "$added" = 1 ] && [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
+    escalate_flush "$state" || true
+  fi
+}
+
 # --- housekeeping (runs every tick while the watcher is mid-cycle) ----------
-# Four cheap jobs, each guarded so an empty/quiet fleet costs near zero:
+# Five cheap jobs, each guarded so an empty/quiet fleet costs near zero:
 #  1) batch flush: if the escalation buffer's oldest content is older than
 #     ESCALATE_BATCH_SECS (or batching is disabled), inject one digest.
 #  1b) max-defer escape: if the buffer is STILL undelivered past MAX_DEFER_SECS,
@@ -499,6 +695,11 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
+#  4) stall-check scan: every FM_STALL_CHECK_SCAN_SECS, run the full
+#     bin/fm-stall-check.sh sweep and escalate any new finding (see
+#     stall_check_scan). Detection runs unconditionally, like (3); only
+#     delivery is afk-gated (escalate_flush -> inject_msg), so afk-inactive
+#     behavior is unchanged from before this integration.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age raw last max_defer oldest
   now=$(_now)
@@ -570,6 +771,12 @@ housekeeping() {  # <state>
       escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
       mark_status_seen "$state" "$task" "$raw"
     done
+  fi
+
+  # (4) stall-check scan (see stall_check_scan for the full rationale).
+  if [ "$(_file_age "$state/.subsuper-last-stallcheck")" -ge "${FM_STALL_CHECK_SCAN_SECS:-$STALL_CHECK_SCAN_SECS_DEFAULT}" ]; then
+    _now > "$state/.subsuper-last-stallcheck"
+    stall_check_scan "$state"
   fi
 }
 
