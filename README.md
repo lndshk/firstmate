@@ -121,7 +121,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
   The sidecar is bound to in-flight work: it only spawns while a task exists (`state/*.meta`), and it stops cleanly and stops re-arming once the fleet empties, so a torn-down or ended session never leaves a task-less watcher enqueueing heartbeats with no consumer.
   Routine watcher polling, restarts, elapsed waiting time, and unchanged heartbeat reviews stay silent; an idle crew costs you nothing.
   A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if tasks are in flight and that watcher stops running, queued wakes are waiting to be drained, or the fast read-only stall sweep it runs (`bin/fm-stall-check.sh --fast`) finds dormant workstreams - finished-but-not-advanced tasks, queued items whose blockers or date gates have cleared, or in-flight crews whose committed work is not pushed to any remote.
-  The pane and process checks - dead agent panes, idle in-flight panes, and an idle domain advisor that finished its routed work - cost a peek per pane, so they stay in the full sweep that runs at heartbeats and wakes rather than on the guard's hot path.
+  The pane and process checks - dead agent panes, idle in-flight panes, a live domain advisor idle past the threshold whose last status is not captain-gated, and a child escalation left unanswered inside a secondmate home - cost a peek per pane, so they stay in the full sweep that runs at heartbeats and wakes rather than on the guard's hot path.
   A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which it self-handles routine wakes in bash and escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
   Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 - **Worktrees, not branches in your checkout** - crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
@@ -163,7 +163,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-brief.sh`            | Scaffold an evidence-bearing ship brief, a report-only scout brief with `--scout`, or a secondmate charter with `--secondmate` |
 | `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
 | `fm-guard.sh`            | Warn when tasks are in flight but queued wakes are pending, the stall detector has findings, or the watcher liveness beacon is stale or missing |
-| `fm-stall-check.sh`      | Read-only pull-based sweep that flags dead agent panes, finished-but-not-advanced tasks, unblocked or date-gated queued items, in-flight crews with committed-but-unpushed work, idle in-flight stalls, and idle domain advisors that finished routed work; `--fast` skips the pane/process checks |
+| `fm-stall-check.sh`      | Read-only pull-based sweep that flags dead agent panes, finished-but-not-advanced tasks, unblocked or date-gated queued items, in-flight crews with committed-but-unpushed work, idle in-flight stalls, idle domain advisors whose last status is not captain-gated, and child escalations left unanswered inside secondmate homes; `--fast` skips the pane/process checks |
 | `fm-home-seed.sh`        | Lease/provision a secondmate home transactionally, clone projects, initialize gates, and maintain `data/secondmates.md` |
 | `fm-spawn.sh`            | Spawn one task, several `id=repo` pairs, or a persistent secondmate with `--secondmate`                            |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
@@ -216,7 +216,7 @@ FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_GUARD_GRACE=300      # seconds a stale watcher beacon may age before guard warnings
 FM_GUARD_STALL_CHECK=1  # set to 0 to stop fm-guard running the fast stall sweep
 FM_STALL_IDLE_SECS=600  # idle seconds before fm-stall-check flags an in-flight pane as a possible stall
-FM_ADVISOR_IDLE_STALL_SECS=1800  # idle seconds before fm-stall-check flags a live secondmate advisor that finished its routed work
+FM_ADVISOR_IDLE_STALL_SECS=1800  # idle seconds before fm-stall-check flags a live secondmate advisor whose last status is not captain-gated, and an unanswered child escalation inside a secondmate home
 FM_WATCH_KEEPALIVE=1    # set to 0 to disable the watcher keepalive sidecar
 FM_WATCH_KEEPALIVE_INTERVAL=30  # seconds between keepalive stale-beacon checks
 FM_WATCH_KEEPALIVE_CRASH_THRESHOLD=5  # consecutive failed re-arms before backoff
@@ -280,7 +280,7 @@ tests/fm-fleet-sync.test.sh               # canonical symlink-target refresh, cl
 tests/fm-update.test.sh                   # fast-forward-only self-update, supervisor activation, reread, nudge, dedup, and skip-safety tests
 tests/fm-secondmate.test.sh               # persistent secondmate routing, seeding, idle charter, backlog handoff, spawn, recovery, teardown, and FM_HOME tests
 tests/fm-teardown.test.sh                 # fm-teardown.sh safety and reminder checks: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, merged-PR head-sha evidence allow with open/errored/error-body/absent-gh-axi/dirty-worktree/other-head/no-head-sha refusals, no-mistakes regression, tasks-axi reminder, --force override
-tests/fm-stall-check.test.sh              # stall detector: finished-but-not-advanced, unblocked/date-gated queued, unlanded-work sweep with secondmate/scout/local-only/pr-parked/fork-remote/mid-rebase exemptions, idle-pane stalls, idle-advisor detection with busy/active-child/needs-decision exclusions, terminal-child handling, pr-ready skip, done-archive fallback, and guard pointer
+tests/fm-stall-check.test.sh              # stall detector: finished-but-not-advanced, unblocked/date-gated queued, unlanded-work sweep with secondmate/scout/local-only/pr-parked/fork-remote/mid-rebase exemptions, idle-pane stalls, idle-advisor detection for working/terminal statuses with busy/active-child/needs-decision/blocked exclusions, unrelayed child-escalation sweep with recent/busy-pane exclusions and advisor-state independence, terminal-child handling, pr-ready skip, done-archive fallback, and guard pointer
 [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
 [ "$(readlink .claude/skills)" = "../.agents/skills" ]
 FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch.sh  # watcher smoke test (prints "heartbeat")

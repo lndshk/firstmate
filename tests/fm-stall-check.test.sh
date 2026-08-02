@@ -72,6 +72,15 @@ run_check() {
     "$CHECK"
 }
 
+# Every fake-pane variable is set as a prefix on a bare "out=$(run_check ...)"
+# assignment, which bash keeps in the shell instead of scoping to that one
+# call, so each test starts from a cleared fake-pane environment rather than
+# whatever the previous test last configured.
+run_test() { # <test-fn>
+  unset FM_FAKE_TMUX_CAPTURE FM_FAKE_TMUX_CAPTURE_DIR
+  "$@"
+}
+
 test_finished_but_not_advanced() {
   local dir out
   dir=$(make_case finished)
@@ -753,28 +762,28 @@ EOF
   pass "fm-guard surfaces a stall-check pointer"
 }
 
-test_finished_but_not_advanced
-test_unblocked_parked_item
-test_unblocked_item_blocker_in_archive
-test_date_gate_ready
-test_idle_stall_candidate
-test_silent_when_clear_and_secondmate_skip
-test_pr_ready_task_not_flagged
-test_advisor_idle_terminal_no_children_flagged
-test_advisor_needs_decision_not_flagged
-test_advisor_with_child_work_not_flagged
-test_advisor_with_terminal_idle_child_flagged
-test_advisor_busy_not_flagged
-test_advisor_working_idle_no_children_flagged
-test_advisor_blocked_not_flagged
-test_advisor_working_busy_pane_not_flagged
-test_advisor_working_with_child_work_not_flagged
-test_secondmate_child_needs_decision_unrelayed_flagged
-test_secondmate_child_blocked_unrelayed_flagged
-test_secondmate_child_needs_decision_recent_not_flagged
-test_secondmate_child_needs_decision_busy_pane_not_flagged
-test_secondmate_child_escalation_independent_of_advisor_own_state
-test_unlanded_work_matrix
-test_unlanded_work_fork_remote_is_landed
-test_unlanded_work_mid_rebase_exempt
-test_guard_surfaces_stall_pointer
+run_test test_finished_but_not_advanced
+run_test test_unblocked_parked_item
+run_test test_unblocked_item_blocker_in_archive
+run_test test_date_gate_ready
+run_test test_idle_stall_candidate
+run_test test_silent_when_clear_and_secondmate_skip
+run_test test_pr_ready_task_not_flagged
+run_test test_advisor_idle_terminal_no_children_flagged
+run_test test_advisor_needs_decision_not_flagged
+run_test test_advisor_with_child_work_not_flagged
+run_test test_advisor_with_terminal_idle_child_flagged
+run_test test_advisor_busy_not_flagged
+run_test test_advisor_working_idle_no_children_flagged
+run_test test_advisor_blocked_not_flagged
+run_test test_advisor_working_busy_pane_not_flagged
+run_test test_advisor_working_with_child_work_not_flagged
+run_test test_secondmate_child_needs_decision_unrelayed_flagged
+run_test test_secondmate_child_blocked_unrelayed_flagged
+run_test test_secondmate_child_needs_decision_recent_not_flagged
+run_test test_secondmate_child_needs_decision_busy_pane_not_flagged
+run_test test_secondmate_child_escalation_independent_of_advisor_own_state
+run_test test_unlanded_work_matrix
+run_test test_unlanded_work_fork_remote_is_landed
+run_test test_unlanded_work_mid_rebase_exempt
+run_test test_guard_surfaces_stall_pointer
