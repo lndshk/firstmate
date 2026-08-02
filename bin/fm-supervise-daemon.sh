@@ -140,6 +140,16 @@ HOUSEKEEPING_TICK_DEFAULT=15
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
 MAX_DEFER_SECS_DEFAULT=300
+# Consecutive sweeps in which a known stall-check finding must be ABSENT before
+# its dedup marker is cleared as genuinely resolved. N=1 offers no protection at
+# all - the very first absence clears the marker, so a single flapping sweep (a
+# momentarily busy child pane, a status file caught mid-write, a transient
+# fm-peek.sh probe failure) re-escalates the identical finding. N=2 is the
+# smallest value that absorbs one dropped sweep, and costs only one further
+# cadence interval of latency before a genuinely resolved marker frees up.
+# FM_MAX_DEFER_SECS's re-alarm window independently bounds the cost of being
+# wrong in either direction, so N needs no defensive tuning beyond this.
+STALL_CHECK_MISSES_TO_CLEAR=2
 CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 # Busy footers + composer-empty detection now live in bin/fm-tmux-lib.sh
 # (FM_TMUX_BUSY_REGEX_DEFAULT / fm_tmux_composer_state); FM_BUSY_REGEX still
@@ -391,12 +401,25 @@ _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
 # and id (the first two space-separated fields), with everything outside
 # [A-Za-z0-9_.-] collapsed to '_'. Deliberately drops everything after the id
 # (idle-seconds counts, commit counts, pane commands) so the SAME underlying
-# condition keys identically while it persists — stall_check_scan escalates it
-# once, not once per tick — and a finding that later disappears from the sweep
-# (resolved) and then recurs gets a fresh key, because stall_check_scan clears
-# a marker whose key is absent from the current sweep.
+# condition keys identically while it persists — stall_check_scan dedupes it to
+# one escalation per re-alarm window rather than one per tick — while a finding
+# that is genuinely resolved (absent from STALL_CHECK_MISSES_TO_CLEAR
+# consecutive sweeps) drops its marker, so a later recurrence of the same
+# kind+id escalates as a new occurrence.
 _stall_finding_key() {  # <fm-stall-check.sh output line>
   printf '%s' "$1" | awk '{print $1, $2}' | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+# Read a non-negative integer out of a marker file, falling back to <default>
+# when the file is missing, empty (an interrupted write), or not a plain count.
+# Callers pick a <default> that fails toward alarming rather than staying quiet.
+_read_int() {  # <file> <default>
+  local v
+  v=$(cat "$1" 2>/dev/null || true)
+  case "$v" in
+    ''|*[!0-9]*) printf '%s' "$2" ;;
+    *) printf '%s' "$v" ;;
+  esac
 }
 
 stale_marker_record() {  # <window> <state>  — create if absent
@@ -543,13 +566,35 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 # spend a meaningful fraction of every tick shelling out to tmux for no new
 # information.
 #
+# THE GOVERNING PRINCIPLE FOR THIS FUNCTION'S MARKER LIFECYCLE: an escalation
+# may be deduplicated, but it may NEVER be permanently suppressed by anything
+# other than the condition actually going away.
+#
 # Dedup: fm-stall-check.sh is a re-firing verify-candidate emitter with no ack
 # mechanism (its own header says so) — every sweep re-prints a persisting
-# condition. A marker file per _stall_finding_key (kind+id) makes this
-# escalate once per occurrence: a finding already marked is skipped; a marker
-# whose key is absent from the CURRENT sweep is cleared, so a later, genuinely
-# new occurrence of the same kind+id (resolved, then recurred) escalates again
-# instead of staying suppressed forever.
+# condition. A marker file per _stall_finding_key (kind+id) collapses that into
+# one escalation per re-alarm window instead of one per tick. Three rules keep
+# that dedup from becoming suppression:
+#
+#   - Re-alarm, never mute. A marker only silences its finding for
+#     FM_MAX_DEFER_SECS (the same window and knob inject_wedge_alarm re-alarms
+#     on). Once a marker is that old and the sweep is STILL emitting the
+#     finding, the condition is demonstrably unresolved — firstmate's answer to
+#     the first alarm never landed, which is a real path (fm-send.sh refuses a
+#     dead pane) — so it escalates again and the marker's stamp is refreshed. A
+#     repeat alarm on a genuinely unresolved condition is correct, not spam.
+#   - Absence must be corroborated. A marker is cleared only after the finding
+#     is missing from STALL_CHECK_MISSES_TO_CLEAR consecutive sweeps, counted
+#     in a per-key .subsuper-stallcheck-miss-<key> sidecar. One flapping sweep
+#     therefore neither resolves the finding nor re-escalates it: a key that
+#     reappears after a single miss keeps its existing marker and re-alarm
+#     stamp, so it costs no firstmate turn.
+#   - Only a real sweep is evidence. Everything above runs after the failed-
+#     sweep early return below, so a sweep that could not run counts as neither
+#     presence nor absence.
+#
+# After a corroborated clear, a later recurrence of the same kind+id is a fresh
+# occurrence and escalates immediately.
 #
 # Failure is never silence: a sweep that cannot run (script missing after a
 # partial self-update, lost executable bit, tmux unreachable) exits non-zero
@@ -561,7 +606,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 # "every finding resolved", which would both hide the outage and re-escalate
 # the whole set once the sweep recovers.
 stall_check_scan() {  # <state>
-  local state=$1 home line key marker current="" added=0 out err diag rc=0
+  local state=$1 home line key marker miss misses age now_s realarm current="" added=0 out err diag rc=0
   home=$(dirname "$state")
   err=$(mktemp "${TMPDIR:-/tmp}/fm-stallcheck.XXXXXX") || {
     log "ERROR: stall-check sweep skipped: mktemp failed; away-mode stall findings unavailable this tick (dedup markers preserved)"
@@ -574,24 +619,40 @@ stall_check_scan() {  # <state>
     log "ERROR: stall-check sweep failed (rc=$rc); away-mode stall findings unavailable this tick (dedup markers preserved): ${diag:-no stderr}"
     return 1
   fi
+  now_s=$(_now)
+  realarm=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     key=$(_stall_finding_key "$line")
     current="$current $key"
     marker="$state/.subsuper-seen-stallcheck-$key"
-    [ -e "$marker" ] && continue
+    rm -f "$state/.subsuper-stallcheck-miss-$key"
+    if [ -e "$marker" ]; then
+      age=$(( now_s - $(_read_int "$marker" 0) ))
+      if [ "$realarm" -le 0 ] || [ "$age" -lt "$realarm" ]; then
+        continue
+      fi
+      log "escalate: stall-check re-alarm after ${age}s unresolved -> $line"
+    else
+      log "escalate: stall-check -> $line"
+    fi
     escalate_add "$state" "$line"
-    _now > "$marker"
-    log "escalate: stall-check -> $line"
+    printf '%s\n' "$now_s" > "$marker"
     added=1
   done <<< "$out"
   for marker in "$state"/.subsuper-seen-stallcheck-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-seen-stallcheck-}"
     case " $current " in
-      *" $key "*) : ;;
-      *) rm -f "$marker" ;;
+      *" $key "*) continue ;;
     esac
+    miss="$state/.subsuper-stallcheck-miss-$key"
+    misses=$(( $(_read_int "$miss" 0) + 1 ))
+    if [ "$misses" -ge "$STALL_CHECK_MISSES_TO_CLEAR" ]; then
+      rm -f "$marker" "$miss"
+    else
+      printf '%s\n' "$misses" > "$miss"
+    fi
   done
   # Mirror handle_wake's escalate path: attempt an immediate flush when
   # batching is disabled, rather than waiting for job (1)'s own batch-flush

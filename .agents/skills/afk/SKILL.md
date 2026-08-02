@@ -153,12 +153,22 @@ firstmate already runs this same script by hand at every heartbeat and
 wake-handling turn (AGENTS.md §8); this is that same read-only sweep, on a
 cadence, for when nobody is watching. Findings are deduped by identity (kind +
 id) across sweeps, since the script itself re-fires an unresolved finding on
-every run - one escalation per occurrence, not a repeat every tick.
-A sweep that cannot run at all (script missing, lost executable bit, tmux
-unreachable) prints nothing, which would otherwise be indistinguishable from
-"all clear", so its exit status is checked: a failed sweep logs an ERROR with
-the captured stderr in the daemon log and leaves the dedup markers untouched
-rather than treating the empty output as every finding having resolved.
+every run - one escalation per re-alarm window, not a repeat every tick.
+
+The marker lifecycle obeys one principle: **an escalation may be deduplicated,
+but it may never be permanently suppressed by anything other than the condition
+actually going away.** Three rules enforce it. A marker silences its finding for
+`FM_MAX_DEFER_SECS` only (the same window the wedge alarm re-alarms on): if the
+sweep is still emitting the finding once the marker is that old, firstmate's
+answer to the first alarm demonstrably never landed (a real path - `fm-send.sh`
+refuses a dead pane), so it escalates again. A marker is cleared only after the
+finding is missing from two consecutive sweeps, so one flapping sweep neither
+resolves the finding nor costs a duplicate escalation. And a sweep that cannot
+run at all (script missing, lost executable bit, tmux unreachable) prints
+nothing, which would otherwise be indistinguishable from "all clear", so its
+exit status is checked: a failed sweep logs an ERROR with the captured stderr in
+the daemon log and counts as neither presence nor absence, leaving every marker
+untouched.
 
 ## Escalation format
 
