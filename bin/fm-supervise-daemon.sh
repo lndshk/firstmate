@@ -550,9 +550,30 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 # whose key is absent from the CURRENT sweep is cleared, so a later, genuinely
 # new occurrence of the same kind+id (resolved, then recurred) escalates again
 # instead of staying suppressed forever.
+#
+# Failure is never silence: a sweep that cannot run (script missing after a
+# partial self-update, lost executable bit, tmux unreachable) exits non-zero
+# and prints nothing, which is indistinguishable from "all clear" unless the
+# status is checked, so the sweep is run through a command substitution (a
+# process substitution discards its exit status) with stderr captured. On a
+# failed sweep the daemon logs an ERROR like every other failure path here and
+# returns WITHOUT clearing markers: an empty failure output must not be read as
+# "every finding resolved", which would both hide the outage and re-escalate
+# the whole set once the sweep recovers.
 stall_check_scan() {  # <state>
-  local state=$1 home line key marker current="" added=0
+  local state=$1 home line key marker current="" added=0 out err diag rc=0
   home=$(dirname "$state")
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-stallcheck.XXXXXX") || {
+    log "ERROR: stall-check sweep skipped: mktemp failed; away-mode stall findings unavailable this tick (dedup markers preserved)"
+    return 1
+  }
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$FM_DAEMON_DIR/fm-stall-check.sh" 2>"$err") || rc=$?
+  diag=$(tr '\n\t' '  ' < "$err" 2>/dev/null | cut -c1-300)
+  rm -f "$err"
+  if [ "$rc" -ne 0 ]; then
+    log "ERROR: stall-check sweep failed (rc=$rc); away-mode stall findings unavailable this tick (dedup markers preserved): ${diag:-no stderr}"
+    return 1
+  fi
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     key=$(_stall_finding_key "$line")
@@ -561,8 +582,9 @@ stall_check_scan() {  # <state>
     [ -e "$marker" ] && continue
     escalate_add "$state" "$line"
     _now > "$marker"
+    log "escalate: stall-check -> $line"
     added=1
-  done < <(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$FM_DAEMON_DIR/fm-stall-check.sh" 2>/dev/null)
+  done <<< "$out"
   for marker in "$state"/.subsuper-seen-stallcheck-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-seen-stallcheck-}"

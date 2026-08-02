@@ -154,6 +154,11 @@ wake-handling turn (AGENTS.md §8); this is that same read-only sweep, on a
 cadence, for when nobody is watching. Findings are deduped by identity (kind +
 id) across sweeps, since the script itself re-fires an unresolved finding on
 every run - one escalation per occurrence, not a repeat every tick.
+A sweep that cannot run at all (script missing, lost executable bit, tmux
+unreachable) prints nothing, which would otherwise be indistinguishable from
+"all clear", so its exit status is checked: a failed sweep logs an ERROR with
+the captured stderr in the daemon log and leaves the dedup markers untouched
+rather than treating the empty output as every finding having resolved.
 
 ## Escalation format
 

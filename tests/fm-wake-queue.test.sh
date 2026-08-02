@@ -1694,6 +1694,48 @@ EOF
   pass "stall-check scan is gated by FM_STALL_CHECK_SCAN_SECS, not every housekeeping tick"
 }
 
+test_stallcheck_scan_failed_sweep_is_logged_not_silent() {
+  # A sweep that cannot run at all prints nothing, which is byte-identical to
+  # "all clear". Reading it as all-clear would restore the very blindness this
+  # job exists to close AND wipe every dedup marker, so the whole set
+  # re-escalates the moment the sweep recovers.
+  local dir state fakebin sent capture logf marker
+  dir=$(make_supercase stallcheck-sweep-fails)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  logf="$dir/daemon.log"; : > "$logf"
+
+  # FM_DAEMON_DIR resolves only the sweep binary once the daemon is sourced, so
+  # pointing it at the fake bin substitutes a broken fm-stall-check.sh.
+  cat > "$fakebin/fm-stall-check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'fm-stall-check.sh: no server running on /tmp/tmux-1000/default\n' >&2
+exit 3
+SH
+  chmod +x "$fakebin/fm-stall-check.sh"
+
+  marker="$state/.subsuper-seen-stallcheck-advisor-idle___rt-advisor"
+  date +%s > "$marker"
+
+  afk_enter "$state"
+  LOG="$logf" FM_DAEMON_DIR="$fakebin" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 housekeeping "$state"
+  unset LOG
+
+  [ -e "$marker" ] \
+    || fail "a failed stall-check sweep cleared its dedup markers, so every finding re-escalates once the sweep recovers"
+  [ ! -s "$sent" ] \
+    || fail "a failed stall-check sweep escalated something: $(cat "$sent")"
+  grep -F 'ERROR: stall-check sweep failed (rc=3)' "$logf" >/dev/null \
+    || fail "a failed stall-check sweep left no diagnostic in the daemon log: $(cat "$logf")"
+  grep -F 'no server running' "$logf" >/dev/null \
+    || fail "the failed sweep's stderr was discarded instead of logged: $(cat "$logf")"
+  pass "a failing stall-check sweep logs an ERROR and preserves its dedup markers"
+}
+
 test_daemon_state_root_uses_fm_home
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
@@ -1768,3 +1810,4 @@ test_stallcheck_scan_escalates_idle_working_advisor
 test_stallcheck_scan_dedupes_repeated_finding
 test_stallcheck_scan_afk_inactive_does_not_inject
 test_stallcheck_scan_respects_cadence_gate
+test_stallcheck_scan_failed_sweep_is_logged_not_silent
