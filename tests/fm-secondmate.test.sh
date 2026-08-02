@@ -2016,6 +2016,58 @@ EOF
   pass "secondmate teardown refuses nested homes from the child registry"
 }
 
+test_secondmate_teardown_refuses_registered_nested_home_with_parenthesis_in_summary() {
+  local home subhome nested fakebin err log summary
+  home="$TMP_ROOT/paren-nested-teardown-home"
+  subhome="$TMP_ROOT/paren-nested-teardown-subhome"
+  nested="$subhome/nested-domain"
+  err="$TMP_ROOT/paren-nested-teardown.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$nested/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  printf 'nested\n' > "$nested/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  cat > "$home/state/nested.meta" <<EOF
+window=firstmate:fm-nested
+worktree=$nested
+project=$nested
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$nested
+projects=beta
+EOF
+  # A registry summary with a parenthetical aside for the NESTED secondmate:
+  # this is the exact fixture shape that made registry_home_for_line return
+  # empty and let registered_descendant_home_for_removal's
+  # `[ -n "$registered_home" ] || continue` silently skip the guard, so
+  # teardown would have removed a directory containing a registered home.
+  summary='Own the realtime pillar (this includes drawer sync, level draws, and pruning); handles edge-cases: sweeps, reclaims, and walls.'
+  printf -- '- domain - design domain (home: %s; scope: design domain; projects: alpha; added 2026-06-22)\n' "$subhome" > "$home/data/secondmates.md"
+  printf -- '- nested - %s (home: %s; scope: nested realtime scope; projects: beta; added 2026-06-22)\n' "$summary" "$nested" >> "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/paren-nested-teardown-fake")
+  log="$TMP_ROOT/paren-nested-teardown-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/paren-nested-teardown-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
+    fail "teardown removed a home containing a nested secondmate whose summary has a parenthesis"
+  fi
+  [ -d "$subhome" ] || fail "teardown removed ancestor home despite a parenthesized nested-summary refusal"
+  [ -d "$nested" ] || fail "teardown removed the parenthesized-summary nested home after refusal"
+  grep -F 'contains registered secondmate home' "$err" >/dev/null \
+    || fail "teardown did not detect the nested home once its summary contained a parenthesis"
+  pass "secondmate teardown still detects a nested registered home whose charter summary contains a parenthesis"
+}
+
 test_secondmate_force_teardown_prevalidates_before_child_cleanup() {
   local home subhome childproj childwt fakebin err log
   home="$TMP_ROOT/prevalidate-teardown-home"
@@ -2447,6 +2499,33 @@ EOF
   pass "fm-backlog-handoff moves in-scope items, is idempotent, and aborts safely"
 }
 
+test_backlog_handoff_resolves_registry_home_with_parenthesis_in_summary() {
+  local home subhome subhome_abs summary out
+  home="$TMP_ROOT/handoff-paren-main"
+  subhome="$TMP_ROOT/handoff-paren-sub"
+  mkdir -p "$home/data" "$home/state"
+  seed_secondmate_home_marker "$subhome" paren-sm
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  # Same fixture shape as the fm-spawn.sh regression: a parenthetical aside
+  # and other prose punctuation before the trailing metadata block.
+  summary='Own the realtime pillar (this includes drawer sync, level draws, and pruning); handles edge-cases: sweeps, reclaims, and walls.'
+  printf -- '- paren-sm - %s (home: %s; scope: realtime scope; projects: alpha; added 2026-07-20)\n' \
+    "$summary" "$subhome_abs" > "$home/data/secondmates.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] feat-x - add feature x (repo: alpha)
+EOF
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" paren-sm feat-x) \
+    || fail "handoff failed to resolve a registry summary containing a parenthesis"
+  printf '%s\n' "$out" | grep -F 'handed off 1 item(s) to paren-sm' >/dev/null \
+    || fail "handoff did not report the moved item"
+  grep -F 'feat-x' "$home/data/backlog.md" >/dev/null && fail "feat-x was not removed from the main backlog"
+  grep -F -- '- [ ] feat-x - add feature x (repo: alpha)' "$subhome/data/backlog.md" >/dev/null \
+    || fail "feat-x did not arrive in the registry-resolved secondmate backlog"
+  pass "fm-backlog-handoff resolves the registry home past parentheses and punctuation in the charter summary"
+}
+
 test_backlog_handoff_creates_absent_section_and_refuses_non_secondmate_home() {
   local home subhome subhome_abs projhome projhome_abs markerhome markerhome_abs symlinkhome symlinkhome_abs outside
   home="$TMP_ROOT/handoff-safety-main"
@@ -2569,6 +2648,7 @@ test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
 test_secondmate_teardown_requires_seed_marker
 test_secondmate_teardown_refuses_registered_nested_home
 test_secondmate_teardown_refuses_child_registry_nested_home
+test_secondmate_teardown_refuses_registered_nested_home_with_parenthesis_in_summary
 test_secondmate_force_teardown_prevalidates_before_child_cleanup
 test_secondmate_force_teardown_refuses_child_active_home_descendant
 test_secondmate_force_teardown_refuses_child_repo_descendant
@@ -2578,4 +2658,5 @@ test_secondmate_teardown_refuses_home_descendants
 test_secondmate_idle_pane_is_not_stale
 test_secondmate_charter_brief_is_idle_by_default
 test_backlog_handoff_moves_in_scope_items
+test_backlog_handoff_resolves_registry_home_with_parenthesis_in_summary
 test_backlog_handoff_creates_absent_section_and_refuses_non_secondmate_home

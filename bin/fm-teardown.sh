@@ -278,7 +278,9 @@ backlog_refresh_reminder() {
 }
 
 registry_home_for_line() {
-  sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p'
+  # Greedy leading .* skips past any parentheses in free-form charter/scope
+  # prose instead of stopping at the first one (see bin/fm-spawn.sh).
+  sed -n 's/.*(home: \([^;)]*\);.*/\1/p'
 }
 
 path_is_ancestor_of() {
