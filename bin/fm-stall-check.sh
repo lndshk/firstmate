@@ -217,10 +217,6 @@ child_has_active_work() { # <child-state> <meta>
     return 0
   fi
 
-  # A PR-parked child is externally supervised by the merge poll, exactly like
-  # a PR-parked top-level task, so its lane is healthy rather than dormant.
-  meta_file_has_pr "$meta" && return 0
-
   id=$(basename "$meta" .meta)
   status="$child_state/$id.status"
   [ -f "$status" ] || return 1
@@ -241,6 +237,22 @@ secondmate_has_child_work() { # <home>
   return 1
 }
 
+# Whether every child in this home is parked on a PR awaiting the captain's
+# merge. This is a reporting distinction only: it never suppresses a finding,
+# because the secondmate's own health is what the idle check is judging and a
+# PR-parked child proves nothing about it. A single child without pr= means a
+# mixed lane, which still deserves the generic stall wording.
+secondmate_only_pr_parked_children() { # <home>
+  local child_state=$1/state meta found=1
+  [ -d "$child_state" ] || return 1
+  for meta in "$child_state"/*.meta; do
+    [ -e "$meta" ] || continue
+    found=0
+    meta_file_has_pr "$meta" || return 1
+  done
+  return "$found"
+}
+
 # A secondmate legitimately parked on needs-decision/blocked is waiting on the
 # captain, not stalled - do not nag it. Every other last status (working,
 # done, result, failed, or anything else) is a candidate for idle detection:
@@ -257,7 +269,8 @@ advisor_captain_gated() { # <status-file>
 
 # A task whose meta records pr= is a PR-ready task parked awaiting the captain's
 # merge; its advancement is already tracked by the merge poll fm-pr-check armed,
-# so it is externally supervised, not dormant. Skip it in the stall checks.
+# so it is externally supervised, not dormant. Skip it in the top-level stall
+# checks, whose merge poll this firstmate runs itself.
 # Children inside a secondmate home live outside $STATE, so the path-based form
 # is the primitive and the id-based form resolves against this home's state.
 meta_file_has_pr() { # <meta-file>
@@ -370,7 +383,11 @@ check_advisor_idle_stalls() {
     # Confirm the pane is readable before treating a non-busy result as idle.
     FM_GUARD_STALL_CHECK=0 "$SCRIPT_DIR/fm-peek.sh" "$window" 40 >/dev/null 2>&1 || continue
     if ! fm_pane_is_busy "$window"; then
-      printf 'advisor-idle?: %s - idle %ss, no active child work, route its next program step or confirm intentionally parked\n' "$id" "$age"
+      if secondmate_only_pr_parked_children "$home"; then
+        printf 'advisor-parked?: %s - idle %ss, only PR-parked children awaiting captain merge\n' "$id" "$age"
+      else
+        printf 'advisor-idle?: %s - idle %ss, no active child work, route its next program step or confirm intentionally parked\n' "$id" "$age"
+      fi
     fi
   done
 }

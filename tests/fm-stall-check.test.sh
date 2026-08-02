@@ -320,7 +320,7 @@ EOF
   pass "does not flag advisor with a busy child pane in its home"
 }
 
-test_advisor_with_pr_parked_child_not_flagged() {
+test_advisor_with_pr_parked_child_reported_as_parked() {
   local dir out capture home
   dir=$(make_case advisor_pr_parked_child)
   capture="$dir/capture.txt"
@@ -343,8 +343,47 @@ EOF
   printf '%s\n' 'all quiet' '> ' > "$capture"
 
   FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor pr-parked-child check exited non-zero"
-  [ -z "$out" ] || fail "expected silence for advisor whose only child is PR-parked, got: $out"
-  pass "does not flag advisor whose only child is parked awaiting captain merge"
+  printf '%s\n' "$out" | grep -E 'advisor-parked\?: ship-advisor - idle [0-9]+s, only PR-parked children awaiting captain merge' >/dev/null \
+    || fail "advisor-parked finding missing: $out"
+  printf '%s\n' "$out" | grep -F 'advisor-idle?:' >/dev/null \
+    && fail "PR-parked-only advisor must not be reported as idle: $out"
+  pass "reports advisor whose only children are PR-parked as parked, not idle"
+}
+
+test_advisor_with_mixed_pr_parked_and_stuck_child_flagged_idle() {
+  local dir out capture home
+  dir=$(make_case advisor_mixed_children)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/mixed-advisor.meta" <<EOF
+window=fm-mixed-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'working: crew has PR up, awaiting merge' > "$dir/state/mixed-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/mixed-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/mixed-advisor.status"
+  cat > "$home/state/child-p3.meta" <<'EOF'
+window=fm-child-p3
+kind=ship
+pr=https://github.com/lndshk/firstmate/pull/13
+EOF
+  printf '%s\n' 'done: PR https://github.com/lndshk/firstmate/pull/13 checks green' > "$home/state/child-p3.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/child-p3.status" 2>/dev/null || touch -t 200001010000 "$home/state/child-p3.status"
+  cat > "$home/state/child-stuck-q4.meta" <<'EOF'
+window=fm-child-stuck-q4
+kind=ship
+EOF
+  printf '%s\n' 'working: still grinding on the same step' > "$home/state/child-stuck-q4.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/child-stuck-q4.status" 2>/dev/null || touch -t 200001010000 "$home/state/child-stuck-q4.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor mixed-children check exited non-zero"
+  printf '%s\n' "$out" | grep -E 'advisor-idle\?: mixed-advisor - idle [0-9]+s, no active child work' >/dev/null \
+    || fail "generic advisor-idle finding missing for mixed lane: $out"
+  printf '%s\n' "$out" | grep -F 'advisor-parked?:' >/dev/null \
+    && fail "a stuck child alongside a PR-parked one must not read as parked: $out"
+  pass "reports a PR-parked child sitting next to a stuck child as idle, not parked"
 }
 
 test_advisor_with_terminal_idle_child_flagged() {
@@ -799,7 +838,8 @@ run_test test_pr_ready_task_not_flagged
 run_test test_advisor_idle_terminal_no_children_flagged
 run_test test_advisor_needs_decision_not_flagged
 run_test test_advisor_with_child_work_not_flagged
-run_test test_advisor_with_pr_parked_child_not_flagged
+run_test test_advisor_with_pr_parked_child_reported_as_parked
+run_test test_advisor_with_mixed_pr_parked_and_stuck_child_flagged_idle
 run_test test_advisor_with_terminal_idle_child_flagged
 run_test test_advisor_busy_not_flagged
 run_test test_advisor_working_idle_no_children_flagged
