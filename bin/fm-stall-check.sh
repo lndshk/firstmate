@@ -217,6 +217,10 @@ child_has_active_work() { # <child-state> <meta>
     return 0
   fi
 
+  # A PR-parked child is externally supervised by the merge poll, exactly like
+  # a PR-parked top-level task, so its lane is healthy rather than dormant.
+  meta_file_has_pr "$meta" && return 0
+
   id=$(basename "$meta" .meta)
   status="$child_state/$id.status"
   [ -f "$status" ] || return 1
@@ -253,9 +257,15 @@ advisor_captain_gated() { # <status-file>
 
 # A task whose meta records pr= is a PR-ready task parked awaiting the captain's
 # merge; its advancement is already tracked by the merge poll fm-pr-check armed,
-# so it is externally supervised, not dormant. Skip it in both stall checks.
+# so it is externally supervised, not dormant. Skip it in the stall checks.
+# Children inside a secondmate home live outside $STATE, so the path-based form
+# is the primitive and the id-based form resolves against this home's state.
+meta_file_has_pr() { # <meta-file>
+  grep -q '^pr=' "$1" 2>/dev/null
+}
+
 meta_has_pr() { # <id>
-  grep -q '^pr=' "$STATE/$1.meta" 2>/dev/null
+  meta_file_has_pr "$STATE/$1.meta"
 }
 
 check_finished_not_advanced() {
@@ -382,6 +392,16 @@ check_advisor_idle_stalls() {
 # for "this secondmate lane has gone quiet", long enough to not nag over
 # normal captain response latency, short enough to catch the class of
 # failure this fixes (hours-long silent stalls) well before real damage.
+#
+# Known follow-up (considered, not fixed): this check cannot distinguish an
+# escalation that already reached the captain and is merely pending a decision
+# from one nobody has seen, so it re-fires every heartbeat sweep either way
+# until the child's status advances. That is left as-is deliberately: it
+# matches the verify-candidate pattern every other finding in this file
+# already uses - advisor-idle?:, stall?:, unlanded?:, and dead?: all re-fire
+# the same way and rely on firstmate applying judgment rather than the script
+# tracking acknowledgement. Suppressing it would require a new acknowledgement
+# mechanism, which is a contract change beyond this detector's scope.
 check_secondmate_child_escalations() {
   local meta id kind home child_state cmeta cid cstatus clast cm cage cwindow verb
   for meta in "$STATE"/*.meta; do

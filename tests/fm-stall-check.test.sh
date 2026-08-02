@@ -320,6 +320,33 @@ EOF
   pass "does not flag advisor with a busy child pane in its home"
 }
 
+test_advisor_with_pr_parked_child_not_flagged() {
+  local dir out capture home
+  dir=$(make_case advisor_pr_parked_child)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/ship-advisor.meta" <<EOF
+window=fm-ship-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'working: crew has PR up, awaiting merge' > "$dir/state/ship-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/ship-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/ship-advisor.status"
+  cat > "$home/state/child-p2.meta" <<'EOF'
+window=fm-child-p2
+kind=ship
+pr=https://github.com/lndshk/firstmate/pull/12
+EOF
+  printf '%s\n' 'done: PR https://github.com/lndshk/firstmate/pull/12 checks green' > "$home/state/child-p2.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/child-p2.status" 2>/dev/null || touch -t 200001010000 "$home/state/child-p2.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor pr-parked-child check exited non-zero"
+  [ -z "$out" ] || fail "expected silence for advisor whose only child is PR-parked, got: $out"
+  pass "does not flag advisor whose only child is parked awaiting captain merge"
+}
+
 test_advisor_with_terminal_idle_child_flagged() {
   local dir out capture home
   dir=$(make_case advisor_idle_terminal_child)
@@ -772,6 +799,7 @@ run_test test_pr_ready_task_not_flagged
 run_test test_advisor_idle_terminal_no_children_flagged
 run_test test_advisor_needs_decision_not_flagged
 run_test test_advisor_with_child_work_not_flagged
+run_test test_advisor_with_pr_parked_child_not_flagged
 run_test test_advisor_with_terminal_idle_child_flagged
 run_test test_advisor_busy_not_flagged
 run_test test_advisor_working_idle_no_children_flagged
