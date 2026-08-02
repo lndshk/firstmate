@@ -190,9 +190,17 @@ secondmate_registry_value() {
   [ -f "$reg" ] || return 1
   line=$(grep -E "^- $id( |$)" "$reg" | tail -1 || true)
   [ -n "$line" ] || return 1
+  # Anchored to each field's own "key: value;" marker, not to "the first paren
+  # on the line": the leading .* is greedy, so it skips past any parentheses in
+  # free-form charter/scope prose that precedes the block instead of stopping
+  # at the first one, and picks the real (rightmost) occurrence of the marker
+  # over any decoy text earlier in the line. Deliberately independent per
+  # field (matches bin/fm-update.sh's existing home extraction) rather than
+  # requiring the whole home/scope/projects/added block to be well-formed, so
+  # a malformed scope or projects field can't also break home resolution.
   case "$key" in
-    home) value=$(printf '%s\n' "$line" | sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p') ;;
-    projects) value=$(printf '%s\n' "$line" | sed -n 's/^[^(]*(home: [^;)]*; scope: [^;)]*; projects: \([^;)]*\); added .*/\1/p') ;;
+    home) value=$(printf '%s\n' "$line" | sed -n 's/.*(home: \([^;)]*\);.*/\1/p') ;;
+    projects) value=$(printf '%s\n' "$line" | sed -n 's/.*; projects: \([^;)]*\);.*/\1/p') ;;
     *) return 1 ;;
   esac
   [ -n "$value" ] || return 1

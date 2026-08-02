@@ -40,7 +40,12 @@ usage() {
 }
 
 registry_home_for_line() {
-  sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p'
+  # Greedy leading .* skips past any parentheses in free-form charter/scope
+  # prose instead of stopping at the first one (see bin/fm-spawn.sh). Every
+  # caller here treats an empty result as "no registered home" and skips the
+  # line, so a leading-paren-anchored parser silently disabled the duplicate,
+  # nested, and overlapping home guards rather than failing loudly.
+  sed -n 's/.*(home: \([^;)]*\);.*/\1/p'
 }
 
 normalize_registry_text() {

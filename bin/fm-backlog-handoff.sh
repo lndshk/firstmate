@@ -33,7 +33,9 @@ secondmate_home() {
   [ -f "$REG" ] || { echo "error: no secondmate registry at $REG" >&2; return 1; }
   line=$(grep -E "^- $id( |$)" "$REG" | tail -1 || true)
   [ -n "$line" ] || { echo "error: secondmate $id is not registered in $REG" >&2; return 1; }
-  printf '%s\n' "$line" | sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p'
+  # Greedy leading .* skips past any parentheses in free-form charter/scope
+  # prose instead of stopping at the first one (see bin/fm-spawn.sh).
+  printf '%s\n' "$line" | sed -n 's/.*(home: \([^;)]*\);.*/\1/p'
 }
 
 path_is_ancestor_of() {
