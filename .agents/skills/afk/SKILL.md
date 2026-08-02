@@ -141,6 +141,20 @@ did not land instead of leaving it unsubmitted.
 `FM_INJECT_SKIP` (default `heartbeat`) force-self-handles matching kinds,
 overriding classification - use sparingly.
 
+**Second housekeeping catch-all: the fleet stall detector.** Independent of
+the per-wake classification above, the daemon also runs the full (never
+`--fast`) `bin/fm-stall-check.sh` sweep every `FM_STALL_CHECK_SCAN_SECS`
+(default 300s) and buffers any new finding through the same escalation path.
+This exists because two classes of stuck work have no wake to trigger on at
+all: an idle secondmate advisor with nothing left to change status, and a
+child parked on `needs-decision:`/`blocked:`/`failed:` inside a *different*
+secondmate's home, which the status-line catch-all above never reads. Present-mode
+firstmate already runs this same script by hand at every heartbeat and
+wake-handling turn (AGENTS.md §8); this is that same read-only sweep, on a
+cadence, for when nobody is watching. Findings are deduped by identity (kind +
+id) across sweeps, since the script itself re-fires an unresolved finding on
+every run - one escalation per occurrence, not a repeat every tick.
+
 ## Escalation format
 
 Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =
