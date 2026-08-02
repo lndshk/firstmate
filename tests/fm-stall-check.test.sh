@@ -72,6 +72,15 @@ run_check() {
     "$CHECK"
 }
 
+# Every fake-pane variable is set as a prefix on a bare "out=$(run_check ...)"
+# assignment, which bash keeps in the shell instead of scoping to that one
+# call, so each test starts from a cleared fake-pane environment rather than
+# whatever the previous test last configured.
+run_test() { # <test-fn>
+  unset FM_FAKE_TMUX_CAPTURE FM_FAKE_TMUX_CAPTURE_DIR
+  "$@"
+}
+
 test_finished_but_not_advanced() {
   local dir out
   dir=$(make_case finished)
@@ -306,8 +315,112 @@ EOF
   printf '%s\n' '• Working (10s • esc to interrupt)' > "$capture_dir/fm-child-a1"
 
   FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CAPTURE_DIR="$capture_dir" out=$(run_check "$dir") || fail "advisor child-work check exited non-zero"
+  unset FM_FAKE_TMUX_CAPTURE_DIR  # bash persists prefix assignments on a bare "out=$(...)" command; do not leak into later tests
   [ -z "$out" ] || fail "expected silence for advisor with child work, got: $out"
   pass "does not flag advisor with a busy child pane in its home"
+}
+
+test_advisor_with_pr_parked_child_reported_as_parked() {
+  local dir out capture home
+  dir=$(make_case advisor_pr_parked_child)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/ship-advisor.meta" <<EOF
+window=fm-ship-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'working: crew has PR up, awaiting merge' > "$dir/state/ship-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/ship-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/ship-advisor.status"
+  cat > "$home/state/child-p2.meta" <<'EOF'
+window=fm-child-p2
+kind=ship
+pr=https://github.com/lndshk/firstmate/pull/12
+EOF
+  printf '%s\n' 'done: PR https://github.com/lndshk/firstmate/pull/12 checks green' > "$home/state/child-p2.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/child-p2.status" 2>/dev/null || touch -t 200001010000 "$home/state/child-p2.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor pr-parked-child check exited non-zero"
+  printf '%s\n' "$out" | grep -E 'advisor-parked\?: ship-advisor - idle [0-9]+s, only PR-parked children awaiting captain merge' >/dev/null \
+    || fail "advisor-parked finding missing: $out"
+  printf '%s\n' "$out" | grep -F 'advisor-idle?:' >/dev/null \
+    && fail "PR-parked-only advisor must not be reported as idle: $out"
+  pass "reports advisor whose only children are PR-parked as parked, not idle"
+}
+
+test_advisor_with_mixed_pr_parked_and_stuck_child_flagged_idle() {
+  local dir out capture home
+  dir=$(make_case advisor_mixed_children)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/mixed-advisor.meta" <<EOF
+window=fm-mixed-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'working: crew has PR up, awaiting merge' > "$dir/state/mixed-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/mixed-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/mixed-advisor.status"
+  cat > "$home/state/child-p3.meta" <<'EOF'
+window=fm-child-p3
+kind=ship
+pr=https://github.com/lndshk/firstmate/pull/13
+EOF
+  printf '%s\n' 'done: PR https://github.com/lndshk/firstmate/pull/13 checks green' > "$home/state/child-p3.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/child-p3.status" 2>/dev/null || touch -t 200001010000 "$home/state/child-p3.status"
+  cat > "$home/state/child-stuck-q4.meta" <<'EOF'
+window=fm-child-stuck-q4
+kind=ship
+EOF
+  printf '%s\n' 'working: still grinding on the same step' > "$home/state/child-stuck-q4.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/child-stuck-q4.status" 2>/dev/null || touch -t 200001010000 "$home/state/child-stuck-q4.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor mixed-children check exited non-zero"
+  printf '%s\n' "$out" | grep -E 'advisor-idle\?: mixed-advisor - idle [0-9]+s, no active child work' >/dev/null \
+    || fail "generic advisor-idle finding missing for mixed lane: $out"
+  printf '%s\n' "$out" | grep -F 'advisor-parked?:' >/dev/null \
+    && fail "a stuck child alongside a PR-parked one must not read as parked: $out"
+  pass "reports a PR-parked child sitting next to a stuck child as idle, not parked"
+}
+
+test_advisor_with_failed_pr_child_flagged_idle() {
+  local dir out capture home
+  dir=$(make_case advisor_failed_pr_child)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/red-advisor.meta" <<EOF
+window=fm-red-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'working: crew has PRs up' > "$dir/state/red-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/red-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/red-advisor.status"
+  cat > "$home/state/child-green-p5.meta" <<'EOF'
+window=fm-child-green-p5
+kind=ship
+pr=https://github.com/lndshk/firstmate/pull/15
+EOF
+  printf '%s\n' 'done: PR https://github.com/lndshk/firstmate/pull/15 checks green' > "$home/state/child-green-p5.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/child-green-p5.status" 2>/dev/null || touch -t 200001010000 "$home/state/child-green-p5.status"
+  cat > "$home/state/child-red-p6.meta" <<'EOF'
+window=fm-child-red-p6
+kind=ship
+pr=https://github.com/lndshk/firstmate/pull/16
+EOF
+  printf '%s\n' 'failed: CI red after 3 attempts' > "$home/state/child-red-p6.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/child-red-p6.status" 2>/dev/null || touch -t 200001010000 "$home/state/child-red-p6.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor failed-pr-child check exited non-zero"
+  printf '%s\n' "$out" | grep -E 'advisor-idle\?: red-advisor - idle [0-9]+s, no active child work' >/dev/null \
+    || fail "generic advisor-idle finding missing for a failed PR child: $out"
+  printf '%s\n' "$out" | grep -F 'advisor-parked?:' >/dev/null \
+    && fail "a failed PR child must not read as awaiting captain merge: $out"
+  pass "reports a lane whose PR-parked child failed as idle, not parked"
 }
 
 test_advisor_with_terminal_idle_child_flagged() {
@@ -355,6 +468,267 @@ EOF
   FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor busy check exited non-zero"
   [ -z "$out" ] || fail "expected silence for busy advisor, got: $out"
   pass "does not flag advisor with a busy pane"
+}
+
+# THE regression test: this is the exact shape of the incident that slipped
+# through (rt-advisor sat on "working:" for 9.3 hours, never flagged, while
+# data-advisor in the identical situation but with a "done:" last line WAS
+# flagged). Before the fix, advisor_terminal_status gated the whole check on
+# done:/result:, so a "working:" advisor was structurally unreachable. A test
+# only over done:/result: would have passed against the broken code; this one
+# would not.
+test_advisor_working_idle_no_children_flagged() {
+  local dir out capture home
+  dir=$(make_case advisor_working_idle)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'working: still on task' > "$dir/state/rt-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/rt-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/rt-advisor.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "working-idle advisor check exited non-zero"
+  printf '%s\n' "$out" | grep -E 'advisor-idle\?: rt-advisor - idle [0-9]+s, no active child work, route its next program step or confirm intentionally parked' >/dev/null \
+    || fail "advisor idle finding missing for working: last status: $out"
+  pass "detects idle advisor whose last status is working:, not just done:/result:"
+}
+
+test_advisor_blocked_not_flagged() {
+  local dir out capture home
+  dir=$(make_case advisor_blocked)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'blocked: waiting on an upstream credential' > "$dir/state/rt-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/rt-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/rt-advisor.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor blocked check exited non-zero"
+  [ -z "$out" ] || fail "expected silence for captain-gated (blocked) advisor, got: $out"
+  pass "does not flag advisor parked on blocked"
+}
+
+test_advisor_working_busy_pane_not_flagged() {
+  local dir out capture home
+  dir=$(make_case advisor_working_busy)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'working: still on task' > "$dir/state/rt-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/rt-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/rt-advisor.status"
+  printf '%s\n' 'thinking' '• Working (10s • esc to interrupt)' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor working-busy check exited non-zero"
+  [ -z "$out" ] || fail "expected silence for genuinely busy advisor with working: status, got: $out"
+  pass "does not flag a genuinely busy advisor whose last status is working:"
+}
+
+test_advisor_working_with_child_work_not_flagged() {
+  local dir out capture capture_dir home
+  dir=$(make_case advisor_working_child_work)
+  capture="$dir/capture.txt"
+  capture_dir="$dir/captures"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state" "$capture_dir"
+  cat > "$dir/state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'working: still on task' > "$dir/state/rt-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/rt-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/rt-advisor.status"
+  cat > "$home/state/child-a1.meta" <<'EOF'
+window=fm-child-a1
+kind=ship
+EOF
+  printf '%s\n' 'working: actively running child task' > "$home/state/child-a1.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/child-a1.status" 2>/dev/null || touch -t 200001010000 "$home/state/child-a1.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+  printf '%s\n' 'all quiet' '> ' > "$capture_dir/fm-rt-advisor"
+  printf '%s\n' '• Working (10s • esc to interrupt)' > "$capture_dir/fm-child-a1"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CAPTURE_DIR="$capture_dir" out=$(run_check "$dir") || fail "advisor working-child-work check exited non-zero"
+  unset FM_FAKE_TMUX_CAPTURE_DIR  # bash persists prefix assignments on a bare "out=$(...)" command; do not leak into later tests
+  [ -z "$out" ] || fail "expected silence for advisor with active child work, got: $out"
+  pass "does not flag advisor whose last status is working: when it has active child work"
+}
+
+# Second defect: a child inside a secondmate home parked on needs-decision:/
+# blocked: that nobody has answered has no detector anywhere. The main-home
+# watcher only reads state/*.status in the main home; a secondmate is trusted
+# to relay its children's escalations up, and when the secondmate itself goes
+# idle that relay silently never happens. This is the backstop.
+test_secondmate_child_needs_decision_unrelayed_flagged() {
+  local dir out capture home
+  dir=$(make_case child_needs_decision)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  cat > "$home/state/rt-issue48.meta" <<'EOF'
+window=fm-rt-issue48
+kind=ship
+EOF
+  printf '%s\n' 'needs-decision: pick a rollout option' > "$home/state/rt-issue48.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/rt-issue48.status" 2>/dev/null || touch -t 200001010000 "$home/state/rt-issue48.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "unrelayed needs-decision check exited non-zero"
+  printf '%s\n' "$out" | grep -E 'unrelayed\?: rt-advisor/rt-issue48 - needs-decision: unanswered for [0-9]+s inside the secondmate home; confirm it reached you' >/dev/null \
+    || fail "unrelayed child escalation finding missing: $out"
+  pass "detects a needs-decision child inside a secondmate home nobody answered"
+}
+
+test_secondmate_child_failed_unrelayed_flagged() {
+  local dir out capture home
+  dir=$(make_case child_failed)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/ci-advisor.meta" <<EOF
+window=fm-ci-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'working: supervising the lane' > "$dir/state/ci-advisor.status"
+  cat > "$home/state/ci-child-r9.meta" <<'EOF'
+window=fm-ci-child-r9
+kind=ship
+EOF
+  printf '%s\n' 'failed: CI red after 3 attempts' > "$home/state/ci-child-r9.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/ci-child-r9.status" 2>/dev/null || touch -t 200001010000 "$home/state/ci-child-r9.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "unrelayed failed check exited non-zero"
+  printf '%s\n' "$out" | grep -E 'unrelayed\?: ci-advisor/ci-child-r9 - failed: unanswered for [0-9]+s inside the secondmate home; confirm it reached you' >/dev/null \
+    || fail "unrelayed failed-child finding missing: $out"
+  pass "detects a failed child inside a secondmate home nobody picked up"
+}
+
+test_secondmate_child_blocked_unrelayed_flagged() {
+  local dir out capture home
+  dir=$(make_case child_blocked)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  cat > "$home/state/rt-launcher.meta" <<'EOF'
+window=fm-rt-launcher
+kind=ship
+EOF
+  printf '%s\n' 'blocked: waiting on the grey single-home decision' > "$home/state/rt-launcher.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/rt-launcher.status" 2>/dev/null || touch -t 200001010000 "$home/state/rt-launcher.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "unrelayed blocked check exited non-zero"
+  printf '%s\n' "$out" | grep -E 'unrelayed\?: rt-advisor/rt-launcher - blocked: unanswered for [0-9]+s inside the secondmate home; confirm it reached you' >/dev/null \
+    || fail "unrelayed blocked child escalation finding missing: $out"
+  pass "detects a blocked child inside a secondmate home nobody answered"
+}
+
+test_secondmate_child_needs_decision_recent_not_flagged() {
+  local dir out capture home
+  dir=$(make_case child_needs_decision_recent)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  cat > "$home/state/rt-issue48.meta" <<'EOF'
+window=fm-rt-issue48
+kind=ship
+EOF
+  printf '%s\n' 'needs-decision: pick a rollout option' > "$home/state/rt-issue48.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "recent needs-decision check exited non-zero"
+  [ -z "$out" ] || fail "expected silence for a needs-decision child still within the threshold, got: $out"
+  pass "does not flag a needs-decision child still inside the age threshold"
+}
+
+test_secondmate_child_needs_decision_busy_pane_not_flagged() {
+  local dir out capture capture_dir home
+  dir=$(make_case child_needs_decision_busy)
+  capture="$dir/capture.txt"
+  capture_dir="$dir/captures"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state" "$capture_dir"
+  cat > "$dir/state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  cat > "$home/state/rt-issue48.meta" <<'EOF'
+window=fm-rt-issue48
+kind=ship
+EOF
+  printf '%s\n' 'needs-decision: pick a rollout option' > "$home/state/rt-issue48.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/rt-issue48.status" 2>/dev/null || touch -t 200001010000 "$home/state/rt-issue48.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+  printf '%s\n' 'all quiet' '> ' > "$capture_dir/fm-rt-advisor"
+  printf '%s\n' '• Working (10s • esc to interrupt)' > "$capture_dir/fm-rt-issue48"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CAPTURE_DIR="$capture_dir" out=$(run_check "$dir") || fail "busy-pane needs-decision check exited non-zero"
+  unset FM_FAKE_TMUX_CAPTURE_DIR  # bash persists prefix assignments on a bare "out=$(...)" command; do not leak into later tests
+  [ -z "$out" ] || fail "expected silence when the child pane is actively busy (likely already answered), got: $out"
+  pass "does not flag a needs-decision child whose pane is busy (already acting on an answer)"
+}
+
+# Independence check: the new detector must not depend on the secondmate's
+# own outer status/pane state. Here the secondmate itself is ALSO parked on
+# needs-decision (which exempts it from check_advisor_idle_stalls entirely),
+# yet its child's own separate, unanswered needs-decision must still surface.
+test_secondmate_child_escalation_independent_of_advisor_own_state() {
+  local dir out capture home
+  dir=$(make_case child_independent)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'needs-decision: pick a routing option' > "$dir/state/rt-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/rt-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/rt-advisor.status"
+  cat > "$home/state/rt-issue48.meta" <<'EOF'
+window=fm-rt-issue48
+kind=ship
+EOF
+  printf '%s\n' 'needs-decision: pick a rollout option' > "$home/state/rt-issue48.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/rt-issue48.status" 2>/dev/null || touch -t 200001010000 "$home/state/rt-issue48.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "independence check exited non-zero"
+  printf '%s\n' "$out" | grep -E 'unrelayed\?: rt-advisor/rt-issue48' >/dev/null \
+    || fail "unrelayed child escalation missing even though it does not depend on the advisor's own state: $out"
+  pass "flags an unanswered child escalation even when the secondmate's own status is also captain-gated"
 }
 
 # Build a fleet-shaped git layout under <dir>: a bare origin, a clone with a
@@ -517,19 +891,32 @@ EOF
   pass "fm-guard surfaces a stall-check pointer"
 }
 
-test_finished_but_not_advanced
-test_unblocked_parked_item
-test_unblocked_item_blocker_in_archive
-test_date_gate_ready
-test_idle_stall_candidate
-test_silent_when_clear_and_secondmate_skip
-test_pr_ready_task_not_flagged
-test_advisor_idle_terminal_no_children_flagged
-test_advisor_needs_decision_not_flagged
-test_advisor_with_child_work_not_flagged
-test_advisor_with_terminal_idle_child_flagged
-test_advisor_busy_not_flagged
-test_unlanded_work_matrix
-test_unlanded_work_fork_remote_is_landed
-test_unlanded_work_mid_rebase_exempt
-test_guard_surfaces_stall_pointer
+run_test test_finished_but_not_advanced
+run_test test_unblocked_parked_item
+run_test test_unblocked_item_blocker_in_archive
+run_test test_date_gate_ready
+run_test test_idle_stall_candidate
+run_test test_silent_when_clear_and_secondmate_skip
+run_test test_pr_ready_task_not_flagged
+run_test test_advisor_idle_terminal_no_children_flagged
+run_test test_advisor_needs_decision_not_flagged
+run_test test_advisor_with_child_work_not_flagged
+run_test test_advisor_with_pr_parked_child_reported_as_parked
+run_test test_advisor_with_mixed_pr_parked_and_stuck_child_flagged_idle
+run_test test_advisor_with_failed_pr_child_flagged_idle
+run_test test_advisor_with_terminal_idle_child_flagged
+run_test test_advisor_busy_not_flagged
+run_test test_advisor_working_idle_no_children_flagged
+run_test test_advisor_blocked_not_flagged
+run_test test_advisor_working_busy_pane_not_flagged
+run_test test_advisor_working_with_child_work_not_flagged
+run_test test_secondmate_child_needs_decision_unrelayed_flagged
+run_test test_secondmate_child_blocked_unrelayed_flagged
+run_test test_secondmate_child_failed_unrelayed_flagged
+run_test test_secondmate_child_needs_decision_recent_not_flagged
+run_test test_secondmate_child_needs_decision_busy_pane_not_flagged
+run_test test_secondmate_child_escalation_independent_of_advisor_own_state
+run_test test_unlanded_work_matrix
+run_test test_unlanded_work_fork_remote_is_landed
+run_test test_unlanded_work_mid_rebase_exempt
+run_test test_guard_surfaces_stall_pointer

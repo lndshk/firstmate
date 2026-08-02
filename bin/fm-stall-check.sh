@@ -237,20 +237,53 @@ secondmate_has_child_work() { # <home>
   return 1
 }
 
-advisor_terminal_status() { # <status-file>
+# Whether every child in this home is parked on a PR awaiting the captain's
+# merge. This is a reporting distinction only: it never suppresses a finding,
+# because the secondmate's own health is what the idle check is judging and a
+# PR-parked child proves nothing about it. A single child without pr= means a
+# mixed lane, which still deserves the generic stall wording, and so does a
+# child that opened a PR and then failed - a red PR is not awaiting a merge.
+secondmate_only_pr_parked_children() { # <home>
+  local child_state=$1/state meta cid found=1
+  [ -d "$child_state" ] || return 1
+  for meta in "$child_state"/*.meta; do
+    [ -e "$meta" ] || continue
+    found=0
+    meta_file_has_pr "$meta" || return 1
+    cid=$(basename "$meta" .meta)
+    case "$(last_status_line "$child_state/$cid.status")" in
+      failed:*) return 1 ;;
+    esac
+  done
+  return "$found"
+}
+
+# A secondmate legitimately parked on needs-decision/blocked is waiting on the
+# captain, not stalled - do not nag it. Every other last status (working,
+# done, result, failed, or anything else) is a candidate for idle detection:
+# "working" is exactly what a wedged, dead, or silently-abandoned advisor
+# leaves behind, so it must NOT be exempt just because it is not terminal.
+advisor_captain_gated() { # <status-file>
   local last
   last=$(last_status_line "$1")
   case "$last" in
-    done:*|result:*) return 0 ;;
+    needs-decision:*|blocked:*) return 0 ;;
     *) return 1 ;;
   esac
 }
 
 # A task whose meta records pr= is a PR-ready task parked awaiting the captain's
 # merge; its advancement is already tracked by the merge poll fm-pr-check armed,
-# so it is externally supervised, not dormant. Skip it in both stall checks.
+# so it is externally supervised, not dormant. Skip it in the top-level stall
+# checks, whose merge poll this firstmate runs itself.
+# Children inside a secondmate home live outside $STATE, so the path-based form
+# is the primitive and the id-based form resolves against this home's state.
+meta_file_has_pr() { # <meta-file>
+  grep -q '^pr=' "$1" 2>/dev/null
+}
+
 meta_has_pr() { # <id>
-  grep -q '^pr=' "$STATE/$1.meta" 2>/dev/null
+  meta_file_has_pr "$STATE/$1.meta"
 }
 
 check_finished_not_advanced() {
@@ -343,7 +376,7 @@ check_advisor_idle_stalls() {
     [ "$kind" = secondmate ] || continue
     status="$STATE/$id.status"
     [ -f "$status" ] || continue
-    advisor_terminal_status "$status" || continue
+    advisor_captain_gated "$status" && continue
     m=$(stat_mtime "$status") || continue
     age=$(( $(now_epoch) - m ))
     [ "$age" -ge "$ADVISOR_IDLE_SECS" ] || continue
@@ -355,8 +388,77 @@ check_advisor_idle_stalls() {
     # Confirm the pane is readable before treating a non-busy result as idle.
     FM_GUARD_STALL_CHECK=0 "$SCRIPT_DIR/fm-peek.sh" "$window" 40 >/dev/null 2>&1 || continue
     if ! fm_pane_is_busy "$window"; then
-      printf 'advisor-idle?: %s - idle %ss, no active child work, route its next program step or confirm intentionally parked\n' "$id" "$age"
+      if secondmate_only_pr_parked_children "$home"; then
+        printf 'advisor-parked?: %s - idle %ss, only PR-parked children awaiting captain merge\n' "$id" "$age"
+      else
+        printf 'advisor-idle?: %s - idle %ss, no active child work, route its next program step or confirm intentionally parked\n' "$id" "$age"
+      fi
     fi
+  done
+}
+
+# A secondmate is trusted to relay its children's needs-decision/blocked/failed
+# escalations up to the main firstmate's own status file; the main watcher
+# never reads status files inside a secondmate home directly. When the
+# secondmate itself goes quiet (wedged, dead, or just slow), that relay never
+# happens and the escalation sits invisible in the secondmate home forever -
+# the exact backstop check_advisor_idle_stalls above is disabled from
+# covering whenever the secondmate's OWN last status happens to be
+# captain-gated too, or its pane looks busy on something unrelated. This is
+# an independent sweep of every child status file inside every secondmate
+# home, so a stuck child is caught regardless of what its secondmate's own
+# outer state looks like.
+#
+# Threshold: reuses ADVISOR_IDLE_SECS (FM_ADVISOR_IDLE_STALL_SECS, default
+# 1800s/30min) rather than a new knob. It is already the established cadence
+# for "this secondmate lane has gone quiet", long enough to not nag over
+# normal captain response latency, short enough to catch the class of
+# failure this fixes (hours-long silent stalls) well before real damage.
+#
+# Known follow-up (considered, not fixed): this check cannot distinguish an
+# escalation that already reached the captain and is merely pending a decision
+# from one nobody has seen, so it re-fires every heartbeat sweep either way
+# until the child's status advances. That is left as-is deliberately: it
+# matches the verify-candidate pattern every other finding in this file
+# already uses - advisor-idle?:, stall?:, unlanded?:, and dead?: all re-fire
+# the same way and rely on firstmate applying judgment rather than the script
+# tracking acknowledgement. Suppressing it would require a new acknowledgement
+# mechanism, which is a contract change beyond this detector's scope.
+check_secondmate_child_escalations() {
+  local meta id kind home child_state cmeta cid cstatus clast cm cage cwindow verb
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    kind=$(kind_for_meta "$meta")
+    [ "$kind" = secondmate ] || continue
+    home=$(home_for_secondmate_meta "$id" "$meta" || true)
+    [ -n "$home" ] || continue
+    child_state="$home/state"
+    [ -d "$child_state" ] || continue
+    for cmeta in "$child_state"/*.meta; do
+      [ -e "$cmeta" ] || continue
+      cid=$(basename "$cmeta" .meta)
+      cstatus="$child_state/$cid.status"
+      [ -f "$cstatus" ] || continue
+      clast=$(last_status_line "$cstatus")
+      case "$clast" in
+        needs-decision:*|blocked:*|failed:*) : ;;
+        *) continue ;;
+      esac
+      cm=$(stat_mtime "$cstatus") || continue
+      cage=$(( $(now_epoch) - cm ))
+      [ "$cage" -ge "$ADVISOR_IDLE_SECS" ] || continue
+      cwindow=$(window_for_meta "$cmeta")
+      # A busy child pane most likely means it already received its answer
+      # and is acting on it, just hasn't appended a fresh status line yet -
+      # skip only that confirmed-busy case. An idle OR unreadable/dead pane
+      # is still a legitimate, unresolved stuck escalation.
+      if [ -n "$cwindow" ] && fm_pane_is_busy "$cwindow"; then
+        continue
+      fi
+      verb=${clast%%:*}
+      printf 'unrelayed?: %s/%s - %s: unanswered for %ss inside the secondmate home; confirm it reached you\n' "$id" "$cid" "$verb" "$cage"
+    done
   done
 }
 
@@ -421,4 +523,5 @@ if ! "$FAST"; then
   check_dead_agents
   check_idle_stalls
   check_advisor_idle_stalls
+  check_secondmate_child_escalations
 fi
