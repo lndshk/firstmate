@@ -158,10 +158,12 @@ every run - one escalation per re-alarm window, not a repeat every tick.
 The marker lifecycle obeys one principle: **an escalation may be deduplicated,
 but it may never be permanently suppressed by anything other than the condition
 actually going away.** Three rules enforce it. A marker silences its finding for
-`FM_MAX_DEFER_SECS` only (the same window the wedge alarm re-alarms on): if the
-sweep is still emitting the finding once the marker is that old, firstmate's
-answer to the first alarm demonstrably never landed (a real path - `fm-send.sh`
-refuses a dead pane), so it escalates again. A marker is cleared only after the
+`FM_STALL_REALARM_SECS` only (default 1800s - its own knob, deliberately well
+above the sweep cadence so the two cannot collide, and with no disable value:
+`<=0` means alarm on every sweep the condition persists): if the sweep is still
+emitting the finding once the marker is that old, firstmate's answer to the
+first alarm demonstrably never landed (a real path - `fm-send.sh` refuses a
+dead pane), so it escalates again. A marker is cleared only after the
 finding is missing from two consecutive sweeps, so one flapping sweep neither
 resolves the finding nor costs a duplicate escalation. And a sweep that cannot
 run at all (script missing, lost executable bit, tmux unreachable) prints

@@ -85,6 +85,12 @@
 #                                   full sweep as a housekeeping catch-all
 #                                   (default 300; always the full sweep, never
 #                                   --fast — see stall_check_scan)
+#          FM_STALL_REALARM_SECS    how long a stall-check finding stays deduped
+#                                   before an unresolved one alarms again
+#                                   (default 1800; <=0 means alarm on every sweep
+#                                   it persists — never a disable). Its own knob,
+#                                   deliberately independent of both the sweep
+#                                   cadence above and FM_MAX_DEFER_SECS below.
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
 #          FM_BUSY_REGEX            OR-ed busy signatures (mirrors fm-watch.sh)
@@ -135,6 +141,21 @@ STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 STALL_CHECK_SCAN_SECS_DEFAULT=300
+# How long a stall-check finding stays deduped before an unresolved one alarms
+# again. This is deliberately its OWN knob rather than a reuse of an existing
+# one: any window equal to (or below) STALL_CHECK_SCAN_SECS collapses the dedup
+# entirely, since the very next sweep is already past it, which would both alarm
+# on every sweep and make STALL_CHECK_MISSES_TO_CLEAR's flap absorption
+# unreachable. 1800 is (a) 6x the default sweep cadence, so no plausible
+# retuning of that cadence can make the two collide, and (b) the same value
+# fm-stall-check.sh already uses for FM_ADVISOR_IDLE_STALL_SECS, which is the
+# same class of how-long-is-too-long-to-stay-quiet judgment.
+# <=0 follows FM_ESCALATE_BATCH_SECS's "immediate" idiom, NOT
+# FM_MAX_DEFER_SECS's "disabled" idiom: it means alarm on every sweep the
+# condition persists. There is deliberately no disable value, because a disable
+# path is exactly the permanent suppression stall_check_scan's governing
+# principle forbids.
+STALL_REALARM_SECS_DEFAULT=1800
 HOUSEKEEPING_TICK_DEFAULT=15
 # Max time a buffered escalation may sit undelivered before the daemon retries
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
@@ -147,8 +168,8 @@ MAX_DEFER_SECS_DEFAULT=300
 # fm-peek.sh probe failure) re-escalates the identical finding. N=2 is the
 # smallest value that absorbs one dropped sweep, and costs only one further
 # cadence interval of latency before a genuinely resolved marker frees up.
-# FM_MAX_DEFER_SECS's re-alarm window independently bounds the cost of being
-# wrong in either direction, so N needs no defensive tuning beyond this.
+# FM_STALL_REALARM_SECS independently bounds the cost of being wrong in either
+# direction, so N needs no defensive tuning beyond this.
 STALL_CHECK_MISSES_TO_CLEAR=2
 CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 # Busy footers + composer-empty detection now live in bin/fm-tmux-lib.sh
@@ -577,8 +598,9 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 # that dedup from becoming suppression:
 #
 #   - Re-alarm, never mute. A marker only silences its finding for
-#     FM_MAX_DEFER_SECS (the same window and knob inject_wedge_alarm re-alarms
-#     on). Once a marker is that old and the sweep is STILL emitting the
+#     FM_STALL_REALARM_SECS (the same re-alarm-once-per-window pattern
+#     inject_wedge_alarm uses, on its own knob so the two windows cannot
+#     collide). Once a marker is that old and the sweep is STILL emitting the
 #     finding, the condition is demonstrably unresolved — firstmate's answer to
 #     the first alarm never landed, which is a real path (fm-send.sh refuses a
 #     dead pane) — so it escalates again and the marker's stamp is refreshed. A
@@ -620,7 +642,7 @@ stall_check_scan() {  # <state>
     return 1
   fi
   now_s=$(_now)
-  realarm=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
+  realarm=${FM_STALL_REALARM_SECS:-$STALL_REALARM_SECS_DEFAULT}
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     key=$(_stall_finding_key "$line")
@@ -629,7 +651,7 @@ stall_check_scan() {  # <state>
     rm -f "$state/.subsuper-stallcheck-miss-$key"
     if [ -e "$marker" ]; then
       age=$(( now_s - $(_read_int "$marker" 0) ))
-      if [ "$realarm" -le 0 ] || [ "$age" -lt "$realarm" ]; then
+      if [ "$realarm" -gt 0 ] && [ "$age" -lt "$realarm" ]; then
         continue
       fi
       log "escalate: stall-check re-alarm after ${age}s unresolved -> $line"

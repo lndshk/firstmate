@@ -1746,14 +1746,17 @@ test_stallcheck_scan_realarms_unresolved_finding() {
   # An escalation may be deduplicated, but never permanently suppressed by
   # anything other than the condition going away. Firstmate's answer to the
   # first alarm can fail to land (fm-send.sh refuses a dead pane), so a finding
-  # the sweep keeps emitting must alarm again once FM_MAX_DEFER_SECS has passed
-  # - not on the very next tick, and not never.
-  local dir state fakebin sent capture marker
+  # the sweep keeps emitting must alarm again once FM_STALL_REALARM_SECS has
+  # passed - not on the very next tick, and not never. The window is driven
+  # from a low env value here and probed on BOTH sides of it, so the assertion
+  # cannot pass merely because the ticks share a wall-clock second.
+  local dir state fakebin sent capture marker window
   dir=$(make_supercase stallcheck-realarm)
   state="$dir/state"
   fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
   capture="$dir/pane.txt"; : > "$capture"
+  window=60
 
   cat > "$fakebin/fm-stall-check.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1763,32 +1766,45 @@ SH
   chmod +x "$fakebin/fm-stall-check.sh"
   marker="$state/.subsuper-seen-stallcheck-$(_stall_finding_key 'advisor-idle?: rt-advisor - idle 1900s')"
 
+  tick() {
+    FM_DAEMON_DIR="$fakebin" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 \
+      FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
+      FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 \
+      FM_STALL_REALARM_SECS="${1:-$window}" housekeeping "$state"
+  }
+
   afk_enter "$state"
-  FM_DAEMON_DIR="$fakebin" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 \
-    FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
-    FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 FM_MAX_DEFER_SECS=300 \
-    housekeeping "$state"
+  tick
   grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
     || fail "first tick did not escalate the idle advisor: $(cat "$sent" 2>/dev/null)"
 
   : > "$sent"
-  FM_DAEMON_DIR="$fakebin" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 \
-    FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
-    FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 FM_MAX_DEFER_SECS=300 \
-    housekeeping "$state"
+  tick
   [ ! -s "$sent" ] \
     || fail "an unresolved finding re-alarmed on the very next tick instead of once per window: $(cat "$sent")"
 
-  # The re-alarm window is measured from the marker's CONTENT epoch (like the
-  # .subsuper-stale-* markers), so backdate the content, not the mtime.
-  printf '%s\n' "$(( $(date +%s) - 400 ))" > "$marker"
-  FM_DAEMON_DIR="$fakebin" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 \
-    FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
-    FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 FM_MAX_DEFER_SECS=300 \
-    housekeeping "$state"
+  # The window is measured from the marker's CONTENT epoch (like the
+  # .subsuper-stale-* markers), so backdate the content, not the mtime. Just
+  # inside the window must stay quiet; just outside it must alarm.
+  printf '%s\n' "$(( $(date +%s) - (window / 2) ))" > "$marker"
+  tick
+  [ ! -s "$sent" ] \
+    || fail "a finding re-alarmed while still inside FM_STALL_REALARM_SECS: $(cat "$sent")"
+
+  printf '%s\n' "$(( $(date +%s) - window - 10 ))" > "$marker"
+  tick
   grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
-    || fail "a still-unresolved finding never re-alarmed after FM_MAX_DEFER_SECS; the lane is silently stalled again: $(cat "$sent" 2>/dev/null)"
-  pass "an unresolved stall-check finding re-alarms once per FM_MAX_DEFER_SECS window"
+    || fail "a still-unresolved finding never re-alarmed after FM_STALL_REALARM_SECS; the lane is silently stalled again: $(cat "$sent" 2>/dev/null)"
+
+  # <=0 follows the FM_ESCALATE_BATCH_SECS "immediate" idiom, never a disable:
+  # a disable path would be exactly the permanent suppression the principle
+  # forbids, so it must alarm even on a marker just stamped by the tick above.
+  : > "$sent"
+  tick 0
+  grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
+    || fail "FM_STALL_REALARM_SECS=0 suppressed an unresolved finding instead of alarming every sweep: $(cat "$sent" 2>/dev/null)"
+  unset -f tick
+  pass "an unresolved stall-check finding re-alarms once per FM_STALL_REALARM_SECS window"
 }
 
 test_stallcheck_scan_single_absent_sweep_is_not_resolution() {
@@ -1815,10 +1831,13 @@ SH
   marker="$state/.subsuper-seen-stallcheck-$key"
   miss="$state/.subsuper-stallcheck-miss-$key"
 
+  # A wide re-alarm window keeps this test about the miss counter alone: the
+  # flap absorption it asserts is only observable while the re-alarm window has
+  # not elapsed, and a window at or below the sweep cadence would pre-empt it.
   tick() {
     FM_DAEMON_DIR="$fakebin" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 \
       FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
-      FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 FM_MAX_DEFER_SECS=300 \
+      FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 FM_STALL_REALARM_SECS=3600 \
       housekeeping "$state"
   }
 
