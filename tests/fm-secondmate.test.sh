@@ -901,6 +901,40 @@ EOF
   pass "home seeding refuses registered home overlaps"
 }
 
+test_home_seed_refuses_overlap_with_parenthesis_in_summary() {
+  local home registered_parent nested err summary
+  home="$TMP_ROOT/paren-overlap-seed-home"
+  registered_parent="$TMP_ROOT/paren-overlap-registered-parent"
+  nested="$registered_parent/nested"
+  err="$TMP_ROOT/paren-overlap-seed.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  make_git_project "$home/projects/alpha"
+  add_file_origin "$home/projects/alpha" "$TMP_ROOT/remotes/paren-overlap-alpha.git"
+  git clone --quiet "$ROOT" "$registered_parent"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  # Same fixture shape as the fm-spawn.sh and fm-teardown.sh regressions. Each
+  # seed guard does `[ -n "$registered_home" ] || continue`, so a parser that
+  # returns empty here does not refuse - it skips the line and reports no
+  # conflict, seeding a duplicate or nested home onto a registered one.
+  summary='Own the realtime pillar (this includes drawer sync, level draws, and pruning); handles edge-cases: sweeps, reclaims, and walls.'
+  printf -- '- parent - %s (home: %s; scope: realtime scope; projects: beta; added 2026-06-22)\n' \
+    "$summary" "$registered_parent" > "$home/data/secondmates.md"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$nested" alpha >/dev/null 2>"$err"; then
+    fail "seed accepted a home nested inside a registered home whose summary has a parenthesis"
+  fi
+  grep -F 'overlaps registered secondmate home' "$err" >/dev/null \
+    || fail "seed did not detect the registered ancestor once its summary contained a parenthesis"
+  [ ! -e "$nested" ] || fail "seed created a nested home despite the parenthesized-summary overlap"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$registered_parent" alpha >/dev/null 2>"$err"; then
+    fail "seed accepted a duplicate of a registered home whose summary has a parenthesis"
+  fi
+  grep -F 'already registered' "$err" >/dev/null \
+    || fail "seed did not detect the exact duplicate home once its summary contained a parenthesis"
+  pass "home seeding detects duplicate and nested registered homes whose charter summary contains a parenthesis"
+}
+
 test_home_seed_refuses_remote_backed_project_without_origin() {
   local home subhome err
   home="$TMP_ROOT/no-origin-home"
@@ -2617,6 +2651,7 @@ test_home_seed_refuses_home_marked_for_another_id
 test_home_seed_refuses_home_registered_to_another_id
 test_home_seed_refuses_reassigning_existing_id_to_different_home
 test_home_seed_refuses_home_overlapping_registered_home
+test_home_seed_refuses_overlap_with_parenthesis_in_summary
 test_home_seed_refuses_remote_backed_project_without_origin
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
 test_home_seed_resolves_relative_source_origins
