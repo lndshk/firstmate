@@ -121,8 +121,9 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
   The sidecar is bound to in-flight work: it only spawns while a task exists (`state/*.meta`), and it stops cleanly and stops re-arming once the fleet empties, so a torn-down or ended session never leaves a task-less watcher enqueueing heartbeats with no consumer.
   Routine watcher polling, restarts, elapsed waiting time, and unchanged heartbeat reviews stay silent; an idle crew costs you nothing.
   A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if tasks are in flight and that watcher stops running, queued wakes are waiting to be drained, or the fast read-only stall sweep it runs (`bin/fm-stall-check.sh --fast`) finds dormant workstreams - finished-but-not-advanced tasks, queued items whose blockers or date gates have cleared, or in-flight crews whose committed work is not pushed to any remote.
-  The pane and process checks - dead agent panes, idle in-flight panes, a live domain advisor idle past the threshold whose last status is not captain-gated, and a child escalation left unanswered inside a secondmate home - cost a peek per pane, so they stay in the full sweep that runs at heartbeats and wakes rather than on the guard's hot path.
+  The pane and process checks - dead agent panes, idle in-flight panes, a live domain advisor idle past the threshold whose last status is not captain-gated, and a child escalation left unanswered inside a secondmate home - cost a peek per pane, so they stay in the full sweep rather than on the guard's hot path.
   A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which it self-handles routine wakes in bash and escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
+  It also runs that full stall sweep itself every `FM_STALL_CHECK_SCAN_SECS`, so the two stuck-work classes with no wake to trigger on at all - an idle domain advisor, and a child escalation left unanswered inside a secondmate home - still reach you while nobody is watching; each finding is deduped by identity across sweeps and re-alarms only while it stays unresolved past `FM_STALL_REALARM_SECS`.
   Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 - **Worktrees, not branches in your checkout** - crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
 - **Two task shapes** - ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
@@ -170,7 +171,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval                                           |
 | `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
 | `fm-watch.sh`            | Singleton-safe one-shot watcher; blocks until supervision work is due, queues it durably, then exits with one reason line; `--keepalive` silently re-arms stale/missed one-shot watchers |
-| `fm-supervise-daemon.sh` | Presence-gated sub-supervisor for walk-away (`/afk`) supervision: wraps `fm-watch.sh`, self-handles routine wakes in bash, and escalates only captain-relevant events as one verified, batched, single-line digest prefixed with a sentinel marker |
+| `fm-supervise-daemon.sh` | Presence-gated sub-supervisor for walk-away (`/afk`) supervision: wraps `fm-watch.sh`, self-handles routine wakes in bash, runs the full stall sweep on its own cadence, and escalates only captain-relevant events as one verified, batched, single-line digest prefixed with a sentinel marker |
 | `fm-supervisor.sh`       | Always-on main-home, no-chat supervisor; reconciles wakes, snapshots direct-report contracts, records actionable failures, and refreshes the board |
 | `fm-board.sh`            | Render the Firstmate Board once from the current supervisor snapshot; it has no separate daemon owner |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes before handling supervision work                                              |
@@ -238,6 +239,8 @@ FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry pl
 FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once
 FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks
 FM_HEARTBEAT_SCAN_SECS=300         # cadence of the catch-all status scan for missed captain verbs
+FM_STALL_CHECK_SCAN_SECS=300       # cadence of the catch-all full fm-stall-check.sh sweep (never --fast)
+FM_STALL_REALARM_SECS=1800         # how long a stall finding stays deduped before an unresolved one alarms again; <=0 alarms every sweep
 FM_HOUSEKEEPING_TICK=15            # seconds between batch-flush, stale-recheck, and scan passes
 FM_SUPERVISOR_INTERVAL=15          # seconds between deterministic snapshot and board refresh cycles
 ```
@@ -269,7 +272,7 @@ The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides proact
 bash -n bin/*.sh                          # syntax-check the toolbelt
 shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests; CI enforces this
 for test_script in tests/*.test.sh; do "$test_script"; done   # behavior tests, matching CI
-tests/fm-wake-queue.test.sh               # durable wake queue, singleton behavior, sub-supervisor classifier, /afk presence-gating, border-aware composer, max-defer, and fm-send submit tests
+tests/fm-wake-queue.test.sh               # durable wake queue, singleton behavior, sub-supervisor classifier, /afk presence-gating, border-aware composer, max-defer, the away-mode stall-check scan (secondmate-child and idle-advisor escalation, cadence gate, dedup, re-alarm, single-absence and failed-sweep marker handling, afk-inactive buffering), and fm-send submit tests
 tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, NBSP-padded prompt detection, and escape-free peek tests
 tests/fm-safety-autoclear.test.sh         # strict Codex safety-dialog detection, Keep waiting key sequence, off switch, and recorded-window watcher wiring
 tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
