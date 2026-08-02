@@ -241,14 +241,19 @@ secondmate_has_child_work() { # <home>
 # merge. This is a reporting distinction only: it never suppresses a finding,
 # because the secondmate's own health is what the idle check is judging and a
 # PR-parked child proves nothing about it. A single child without pr= means a
-# mixed lane, which still deserves the generic stall wording.
+# mixed lane, which still deserves the generic stall wording, and so does a
+# child that opened a PR and then failed - a red PR is not awaiting a merge.
 secondmate_only_pr_parked_children() { # <home>
-  local child_state=$1/state meta found=1
+  local child_state=$1/state meta cid found=1
   [ -d "$child_state" ] || return 1
   for meta in "$child_state"/*.meta; do
     [ -e "$meta" ] || continue
     found=0
     meta_file_has_pr "$meta" || return 1
+    cid=$(basename "$meta" .meta)
+    case "$(last_status_line "$child_state/$cid.status")" in
+      failed:*) return 1 ;;
+    esac
   done
   return "$found"
 }
@@ -392,7 +397,7 @@ check_advisor_idle_stalls() {
   done
 }
 
-# A secondmate is trusted to relay its children's needs-decision/blocked
+# A secondmate is trusted to relay its children's needs-decision/blocked/failed
 # escalations up to the main firstmate's own status file; the main watcher
 # never reads status files inside a secondmate home directly. When the
 # secondmate itself goes quiet (wedged, dead, or just slow), that relay never
@@ -437,7 +442,7 @@ check_secondmate_child_escalations() {
       [ -f "$cstatus" ] || continue
       clast=$(last_status_line "$cstatus")
       case "$clast" in
-        needs-decision:*|blocked:*) : ;;
+        needs-decision:*|blocked:*|failed:*) : ;;
         *) continue ;;
       esac
       cm=$(stat_mtime "$cstatus") || continue

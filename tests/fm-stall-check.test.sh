@@ -386,6 +386,43 @@ EOF
   pass "reports a PR-parked child sitting next to a stuck child as idle, not parked"
 }
 
+test_advisor_with_failed_pr_child_flagged_idle() {
+  local dir out capture home
+  dir=$(make_case advisor_failed_pr_child)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/red-advisor.meta" <<EOF
+window=fm-red-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'working: crew has PRs up' > "$dir/state/red-advisor.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/red-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/red-advisor.status"
+  cat > "$home/state/child-green-p5.meta" <<'EOF'
+window=fm-child-green-p5
+kind=ship
+pr=https://github.com/lndshk/firstmate/pull/15
+EOF
+  printf '%s\n' 'done: PR https://github.com/lndshk/firstmate/pull/15 checks green' > "$home/state/child-green-p5.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/child-green-p5.status" 2>/dev/null || touch -t 200001010000 "$home/state/child-green-p5.status"
+  cat > "$home/state/child-red-p6.meta" <<'EOF'
+window=fm-child-red-p6
+kind=ship
+pr=https://github.com/lndshk/firstmate/pull/16
+EOF
+  printf '%s\n' 'failed: CI red after 3 attempts' > "$home/state/child-red-p6.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/child-red-p6.status" 2>/dev/null || touch -t 200001010000 "$home/state/child-red-p6.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "advisor failed-pr-child check exited non-zero"
+  printf '%s\n' "$out" | grep -E 'advisor-idle\?: red-advisor - idle [0-9]+s, no active child work' >/dev/null \
+    || fail "generic advisor-idle finding missing for a failed PR child: $out"
+  printf '%s\n' "$out" | grep -F 'advisor-parked?:' >/dev/null \
+    && fail "a failed PR child must not read as awaiting captain merge: $out"
+  pass "reports a lane whose PR-parked child failed as idle, not parked"
+}
+
 test_advisor_with_terminal_idle_child_flagged() {
   local dir out capture home
   dir=$(make_case advisor_idle_terminal_child)
@@ -559,6 +596,32 @@ EOF
   printf '%s\n' "$out" | grep -E 'unrelayed\?: rt-advisor/rt-issue48 - needs-decision: unanswered for [0-9]+s inside the secondmate home; confirm it reached you' >/dev/null \
     || fail "unrelayed child escalation finding missing: $out"
   pass "detects a needs-decision child inside a secondmate home nobody answered"
+}
+
+test_secondmate_child_failed_unrelayed_flagged() {
+  local dir out capture home
+  dir=$(make_case child_failed)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/ci-advisor.meta" <<EOF
+window=fm-ci-advisor
+kind=secondmate
+home=$home
+EOF
+  printf '%s\n' 'working: supervising the lane' > "$dir/state/ci-advisor.status"
+  cat > "$home/state/ci-child-r9.meta" <<'EOF'
+window=fm-ci-child-r9
+kind=ship
+EOF
+  printf '%s\n' 'failed: CI red after 3 attempts' > "$home/state/ci-child-r9.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/ci-child-r9.status" 2>/dev/null || touch -t 200001010000 "$home/state/ci-child-r9.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "unrelayed failed check exited non-zero"
+  printf '%s\n' "$out" | grep -E 'unrelayed\?: ci-advisor/ci-child-r9 - failed: unanswered for [0-9]+s inside the secondmate home; confirm it reached you' >/dev/null \
+    || fail "unrelayed failed-child finding missing: $out"
+  pass "detects a failed child inside a secondmate home nobody picked up"
 }
 
 test_secondmate_child_blocked_unrelayed_flagged() {
@@ -840,6 +903,7 @@ run_test test_advisor_needs_decision_not_flagged
 run_test test_advisor_with_child_work_not_flagged
 run_test test_advisor_with_pr_parked_child_reported_as_parked
 run_test test_advisor_with_mixed_pr_parked_and_stuck_child_flagged_idle
+run_test test_advisor_with_failed_pr_child_flagged_idle
 run_test test_advisor_with_terminal_idle_child_flagged
 run_test test_advisor_busy_not_flagged
 run_test test_advisor_working_idle_no_children_flagged
@@ -848,6 +912,7 @@ run_test test_advisor_working_busy_pane_not_flagged
 run_test test_advisor_working_with_child_work_not_flagged
 run_test test_secondmate_child_needs_decision_unrelayed_flagged
 run_test test_secondmate_child_blocked_unrelayed_flagged
+run_test test_secondmate_child_failed_unrelayed_flagged
 run_test test_secondmate_child_needs_decision_recent_not_flagged
 run_test test_secondmate_child_needs_decision_busy_pane_not_flagged
 run_test test_secondmate_child_escalation_independent_of_advisor_own_state
