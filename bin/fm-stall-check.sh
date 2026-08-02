@@ -237,11 +237,16 @@ secondmate_has_child_work() { # <home>
   return 1
 }
 
-advisor_terminal_status() { # <status-file>
+# A secondmate legitimately parked on needs-decision/blocked is waiting on the
+# captain, not stalled - do not nag it. Every other last status (working,
+# done, result, failed, or anything else) is a candidate for idle detection:
+# "working" is exactly what a wedged, dead, or silently-abandoned advisor
+# leaves behind, so it must NOT be exempt just because it is not terminal.
+advisor_captain_gated() { # <status-file>
   local last
   last=$(last_status_line "$1")
   case "$last" in
-    done:*|result:*) return 0 ;;
+    needs-decision:*|blocked:*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -343,7 +348,7 @@ check_advisor_idle_stalls() {
     [ "$kind" = secondmate ] || continue
     status="$STATE/$id.status"
     [ -f "$status" ] || continue
-    advisor_terminal_status "$status" || continue
+    advisor_captain_gated "$status" && continue
     m=$(stat_mtime "$status") || continue
     age=$(( $(now_epoch) - m ))
     [ "$age" -ge "$ADVISOR_IDLE_SECS" ] || continue
@@ -357,6 +362,61 @@ check_advisor_idle_stalls() {
     if ! fm_pane_is_busy "$window"; then
       printf 'advisor-idle?: %s - idle %ss, no active child work, route its next program step or confirm intentionally parked\n' "$id" "$age"
     fi
+  done
+}
+
+# A secondmate is trusted to relay its children's needs-decision/blocked
+# escalations up to the main firstmate's own status file; the main watcher
+# never reads status files inside a secondmate home directly. When the
+# secondmate itself goes quiet (wedged, dead, or just slow), that relay never
+# happens and the escalation sits invisible in the secondmate home forever -
+# the exact backstop check_advisor_idle_stalls above is disabled from
+# covering whenever the secondmate's OWN last status happens to be
+# captain-gated too, or its pane looks busy on something unrelated. This is
+# an independent sweep of every child status file inside every secondmate
+# home, so a stuck child is caught regardless of what its secondmate's own
+# outer state looks like.
+#
+# Threshold: reuses ADVISOR_IDLE_SECS (FM_ADVISOR_IDLE_STALL_SECS, default
+# 1800s/30min) rather than a new knob. It is already the established cadence
+# for "this secondmate lane has gone quiet", long enough to not nag over
+# normal captain response latency, short enough to catch the class of
+# failure this fixes (hours-long silent stalls) well before real damage.
+check_secondmate_child_escalations() {
+  local meta id kind home child_state cmeta cid cstatus clast cm cage cwindow verb
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    kind=$(kind_for_meta "$meta")
+    [ "$kind" = secondmate ] || continue
+    home=$(home_for_secondmate_meta "$id" "$meta" || true)
+    [ -n "$home" ] || continue
+    child_state="$home/state"
+    [ -d "$child_state" ] || continue
+    for cmeta in "$child_state"/*.meta; do
+      [ -e "$cmeta" ] || continue
+      cid=$(basename "$cmeta" .meta)
+      cstatus="$child_state/$cid.status"
+      [ -f "$cstatus" ] || continue
+      clast=$(last_status_line "$cstatus")
+      case "$clast" in
+        needs-decision:*|blocked:*) : ;;
+        *) continue ;;
+      esac
+      cm=$(stat_mtime "$cstatus") || continue
+      cage=$(( $(now_epoch) - cm ))
+      [ "$cage" -ge "$ADVISOR_IDLE_SECS" ] || continue
+      cwindow=$(window_for_meta "$cmeta")
+      # A busy child pane most likely means it already received its answer
+      # and is acting on it, just hasn't appended a fresh status line yet -
+      # skip only that confirmed-busy case. An idle OR unreadable/dead pane
+      # is still a legitimate, unresolved stuck escalation.
+      if [ -n "$cwindow" ] && fm_pane_is_busy "$cwindow"; then
+        continue
+      fi
+      verb=${clast%%:*}
+      printf 'unrelayed?: %s/%s - %s: unanswered for %ss inside the secondmate home; confirm it reached you\n' "$id" "$cid" "$verb" "$cage"
+    done
   done
 }
 
@@ -421,4 +481,5 @@ if ! "$FAST"; then
   check_dead_agents
   check_idle_stalls
   check_advisor_idle_stalls
+  check_secondmate_child_escalations
 fi
