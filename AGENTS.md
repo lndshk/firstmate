@@ -77,7 +77,8 @@ README.md            public overview and development notes
 .claude/skills       symlink to .agents/skills for claude compatibility
 bin/                 helper scripts, committed, including fm-fleet-sync.sh for clean default-branch refreshes and gone-branch pruning, and fm-update.sh for fast-forward-only self-updates; read each script's header before first use
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate
-config/crew-model    model pin for claude crewmates (a bare model name, e.g. "sonnet"); LOCAL, gitignored; absent = the CLI's own default
+config/crew-model    model pin for claude and codex crewmates (a bare model name, e.g. "sonnet" or "gpt-5.6-terra"); LOCAL, gitignored; absent = the CLI's own default
+config/crew-effort   Codex reasoning-effort pin (a bare word, e.g. "high"); LOCAL, gitignored; absent = the CLI's own default
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style - approval posture, communication style, release habits; LOCAL, gitignored; compact rewrite-and-prune counterpart to shared AGENTS.md; canonical harness-portable home, even if harness memory mirrors it as a recall cache
@@ -151,9 +152,9 @@ Crewmates default to the same harness you are running on.
 The captain may override this at any time, typically at bootstrap: record the choice in `config/crew-harness` (a single word - an adapter name below; the file is local and gitignored, so each machine keeps its own; absent or `default` means mirror your own harness).
 The recorded harness is used for every dispatch until changed; a per-task instruction from the captain ("run this one on codex") overrides it for that dispatch only.
 Resolve `default` by detecting your own harness (below).
-Orthogonal to which harness, `config/crew-model` pins which model a claude crewmate launches on - write a bare model name such as `sonnet` to conserve a constrained allotment, or leave the file absent to take the CLI's own default.
-It is local and gitignored exactly like `config/crew-harness`, and both resolve home-scoped (`FM_CONFIG_OVERRIDE`, else `$FM_HOME/config`), so each firstmate home - including every secondmate - keeps its own pin.
-`bin/fm-spawn.sh` ignores anything that is not a bare model name, so the value can never become part of the command typed into a crewmate's shell.
+Orthogonal to which harness, `config/crew-model` pins which model claude and codex crewmates launch on - write a bare model name such as `sonnet` or `gpt-5.6-terra`, or leave the file absent to take the CLI's own default. For codex, `config/crew-effort` also pins the reasoning effort (a bare word such as `high`); when absent, Codex uses its normal default.
+Both files are local and gitignored exactly like `config/crew-harness`, and resolve home-scoped (`FM_CONFIG_OVERRIDE`, else `$FM_HOME/config`), so each firstmate home - including every secondmate - keeps its own pins.
+`bin/fm-spawn.sh` ignores anything that is not a bare model-name/effort value, so neither can become part of the command typed into a crewmate's shell.
 
 Each adapter splits into mechanics and knowledge.
 The mechanics (launch command, autonomy flag, turn-end hook) live in `bin/fm-spawn.sh`; the knowledge you need while supervising (busy signature, exit, interrupt, dialogs, quirks) lives in the tables below.

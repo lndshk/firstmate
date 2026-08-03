@@ -7,9 +7,11 @@
 #   falling back to firstmate's own harness). A bare adapter name (claude|codex|
 #   opencode|pi) overrides it for this spawn. A non-flag string containing whitespace
 #   is treated as a RAW launch command - the escape hatch for verifying new adapters.
-#   For claude, config/crew-model optionally pins the model (a bare model name, e.g.
-#   "sonnet"); absent means the CLI's own default, and any other value is ignored
-#   with a warning. Both config files resolve home-scoped, like every other knob.
+#   config/crew-model optionally pins the model for claude and codex (a bare model
+#   name, e.g. "sonnet" or "gpt-5.6-terra"); config/crew-effort optionally pins
+#   Codex's reasoning effort (a bare word, e.g. "high"). Absent files preserve the
+#   CLI defaults; malformed values are ignored with a warning. Both files resolve
+#   home-scoped, like every other knob.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md section 7); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home, normally with its safely refreshed primary-project
@@ -125,22 +127,8 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    # Model tier: config/crew-model (local, gitignored) pins the claude model for spawned
-    # crewmates - e.g. "sonnet" to conserve a constrained allotment. Absent = CLI default.
-    # Resolved home-scoped like every other config knob (see fm-harness.sh), so a
-    # secondmate home reads its own pin instead of the bin/ repo's.
     claude)
-      _fm_model=""
-      [ -f "$CONFIG/crew-model" ] && _fm_model=$(tr -d '[:space:]' < "$CONFIG/crew-model" 2>/dev/null)
-      # This value is interpolated into a launch string that is typed into a live
-      # shell, so accept only model-name characters; anything else is ignored rather
-      # than executed. shell_quote is defined below and is not in scope here.
-      case "$_fm_model" in
-        *[!A-Za-z0-9._-]*)
-          echo "warning: ignoring $CONFIG/crew-model: '$_fm_model' is not a bare model name" >&2
-          _fm_model=""
-          ;;
-      esac
+      _fm_model=$(crew_config_bare_value crew-model "model name")
       if [ -n "$_fm_model" ]; then
         printf '%s' "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model $_fm_model --dangerously-skip-permissions \"\$(cat __BRIEF__)\""
       else
@@ -148,10 +136,15 @@ launch_template() {
       fi
       ;;
     codex)
+      _fm_model=$(crew_config_bare_value crew-model "model name")
+      _fm_effort=$(crew_config_bare_value crew-effort "reasoning effort")
+      _fm_codex_options=""
+      [ -z "$_fm_model" ] || _fm_codex_options="$_fm_codex_options -m $_fm_model"
+      [ -z "$_fm_effort" ] || _fm_codex_options="$_fm_codex_options -c model_reasoning_effort=\"$_fm_effort\""
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox -c __CODEX_TRUST__ "$(cat __BRIEF__)"'
+        printf '%s' "codex --dangerously-bypass-approvals-and-sandbox$_fm_codex_options -c __CODEX_TRUST__ \"\$(cat __BRIEF__)\""
       else
-        printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
+        printf '%s' "codex --dangerously-bypass-approvals-and-sandbox$_fm_codex_options -c \"notify=[\\\"bash\\\",\\\"-c\\\",\\\"touch __TURNEND__\\\"]\" \"\$(cat __BRIEF__)\""
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode --prompt "$(cat __BRIEF__)"' ;;
@@ -166,9 +159,25 @@ launch_template() {
   esac
 }
 
+# Values from config are interpolated into a launch string that is typed into a live
+# shell. Restrict every value to the existing bare-name character set before it can
+# reach that string; malformed input falls back to the relevant CLI default.
+crew_config_bare_value() {
+  local name=$1 description=$2 value=""
+  [ -f "$CONFIG/$name" ] && value=$(tr -d '[:space:]' < "$CONFIG/$name" 2>/dev/null)
+  case "$value" in
+    *[!A-Za-z0-9._-]*)
+      echo "warning: ignoring $CONFIG/$name: '$value' is not a bare $description" >&2
+      value=""
+      ;;
+  esac
+  printf '%s' "$value"
+}
+
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
+    RAW_LAUNCH=1
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
@@ -176,11 +185,11 @@ case "$ARG3" in
     ;;
   '')
     HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from config/crew-harness or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    RAW_LAUNCH=0
     ;;
   *)
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    RAW_LAUNCH=0
     ;;
 esac
 
@@ -397,6 +406,23 @@ else
   WT=""
   WINDOW_CWD="$PROJ_ABS"
   BRIEF="$DATA/$ID/brief.md"
+fi
+
+# A secondmate runs from its persistent firstmate home. Unless a caller supplied
+# FM_CONFIG_OVERRIDE explicitly, its launch knobs must therefore come from that
+# home's config directory rather than the parent supervisor's config.
+if [ "$KIND" = secondmate ] && [ -z "${FM_CONFIG_OVERRIDE:-}" ]; then
+  CONFIG="$PROJ_ABS/config"
+fi
+if [ "$RAW_LAUNCH" -eq 0 ]; then
+  LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
+    if [ -z "$ARG3" ]; then
+      echo "error: no launch template for harness '$HARNESS' (from config/crew-harness or detection); pass a raw launch command to use an unverified adapter" >&2
+    else
+      echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2
+    fi
+    exit 1
+  }
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
