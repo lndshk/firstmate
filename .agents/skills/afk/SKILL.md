@@ -113,9 +113,9 @@ A submit "landed" only when the composer is confirmed empty afterward, using
 the same corrected, border-aware detector as the composer guard.
 A bordered-empty claude composer is recognized as submitted rather than
 mistaken for a swallowed Enter.
-`fm-send.sh` uses the same primitive and exits non-zero
-when a steer's Enter is positively swallowed, so firstmate learns an instruction
-did not land instead of leaving it unsubmitted.
+`fm-send.sh` uses the same primitive and exits non-zero on any composer state
+short of confirmed empty (see `bin/fm-send.sh`), so firstmate learns an
+instruction did not land instead of leaving it unsubmitted.
 
 ## Classification policy (per wake)
 

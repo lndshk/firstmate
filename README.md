@@ -175,7 +175,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | `fm-supervisor.sh`       | Always-on main-home, no-chat supervisor; reconciles wakes, snapshots direct-report contracts, records actionable failures, and refreshes the board |
 | `fm-board.sh`            | Render the Firstmate Board once from the current supervisor snapshot; it has no separate daemon owner |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes before handling supervision work                                              |
-| `fm-send.sh`             | Send one verified literal line (or `--key Escape`) to a live crewmate window; refuses panes whose agent process is gone and exits non-zero when Enter is positively swallowed |
+| `fm-send.sh`             | Send one verified literal line (or `--key Escape`) to a live crewmate window; refuses panes whose agent process is gone and exits non-zero unless the composer is confirmed empty afterward |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, dim-ghost-aware and border-aware composer detection, process-tree agent liveness and pane existence, Codex safety-prompt clearing, and verified submit retry |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate pane                                                                             |
 | `fm-pr-check.sh`         | Record a PR-ready task and arm the watcher's merge poll                                                             |
@@ -229,7 +229,6 @@ FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, shar
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
-FM_SEND_AMBIGUOUS_SETTLE=1.5   # extra fm-send settle before downgrading ambiguous pending reads
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables

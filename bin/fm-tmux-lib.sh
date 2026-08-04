@@ -181,7 +181,9 @@ fm_tmux_composer_text() {  # <target>
 #             acknowledgement that a submit landed.
 #   pending - real, unsubmitted text on the cursor line (a human mid-typing, or a
 #             previous injection whose Enter was swallowed). Defer / retry.
-#   unknown - the pane could not be read (tmux error). The caller decides.
+#   unknown - the pane could not be read (tmux error), or a busy footer landed on
+#             the cursor row: it cannot confirm a submit, since a prior turn may
+#             still be finishing with our text unsubmitted. The caller decides.
 #
 # The cursor line is captured WITH ANSI styling (capture-pane -e) and bounded to
 # the single composer row (-S/-E), then run through fm_tmux_strip_ghost so dim/faint
