@@ -1468,16 +1468,18 @@ test_fm_send_exits_nonzero_on_confirmed_swallow() {
   pass "fm-send exits non-zero on a confirmed swallow, zero on a clean submit"
 }
 
-test_fm_send_ambiguous_pending_without_sent_text_succeeds() {
+test_fm_send_unconfirmed_pending_without_sent_text_fails() {
   local dir fakebin err
   dir=$(make_bordered_case send-ambiguous-pending)
   fakebin="$dir/fakebin"; err="$dir/send.err"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
-    FM_FAKE_AFTER_ENTER_TEXT='windows bridge redraw' FM_SEND_SLEEP=0.05 FM_SEND_AMBIGUOUS_SETTLE=0.05 \
-    "$ROOT/bin/fm-send.sh" sess:win 'route this work' >/dev/null 2>"$err" \
-    || fail "fm-send failed on ambiguous pending without sent text: $(cat "$err")"
-  grep -F 'reported pending' "$err" >/dev/null || fail "fm-send did not warn on ambiguous pending: $(cat "$err")"
-  pass "fm-send treats ambiguous pending without sent text as delivered"
+  if PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
+    FM_FAKE_AFTER_ENTER_TEXT='windows bridge redraw' FM_SEND_SLEEP=0.05 \
+    "$ROOT/bin/fm-send.sh" sess:win 'route this work' >/dev/null 2>"$err"; then
+    fail "fm-send treated an unconfirmed composer as delivered"
+  fi
+  grep -F 'not submitted' "$err" >/dev/null \
+    || fail "fm-send did not explain the unconfirmed submit: $(cat "$err")"
+  pass "fm-send fails when the composer remains pending, even with different text"
 }
 
 test_fm_send_exits_nonzero_on_initial_send_failure() {
@@ -1938,7 +1940,7 @@ test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm
 test_fm_send_exits_nonzero_on_confirmed_swallow
-test_fm_send_ambiguous_pending_without_sent_text_succeeds
+test_fm_send_unconfirmed_pending_without_sent_text_fails
 test_fm_send_exits_nonzero_on_initial_send_failure
 # Stall-check integration (housekeeping job 4).
 test_stallcheck_scan_escalates_unrelayed_secondmate_child
