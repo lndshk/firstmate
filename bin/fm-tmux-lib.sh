@@ -176,12 +176,14 @@ fm_tmux_composer_text() {  # <target>
 }
 
 # fm_tmux_composer_state: classify the cursor/composer line of <target> as
-#   empty   - no pending input (blank, a bare prompt, a busy footer, or only dim
+#   empty   - no pending input (blank, a bare prompt, or only dim
 #             ghost/placeholder text). Safe to inject; also the positive
 #             acknowledgement that a submit landed.
 #   pending - real, unsubmitted text on the cursor line (a human mid-typing, or a
 #             previous injection whose Enter was swallowed). Defer / retry.
-#   unknown - the pane could not be read (tmux error). The caller decides.
+#   unknown - the pane could not be read (tmux error), or a busy footer landed on
+#             the cursor row: it cannot confirm a submit, since a prior turn may
+#             still be finishing with our text unsubmitted. The caller decides.
 #
 # The cursor line is captured WITH ANSI styling (capture-pane -e) and bounded to
 # the single composer row (-S/-E), then run through fm_tmux_strip_ghost so dim/faint
@@ -201,11 +203,22 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   fi
   # Just a bare prompt glyph = empty composer (idle).
   case "$stripped" in
-    '>'|'❯'|'$'|'%'|'#') printf 'empty'; return 0 ;;
+    '>'|'❯'|'›'|'$'|'%'|'#') printf 'empty'; return 0 ;;
   esac
-  # A busy footer landing on the cursor line is not pending input.
+  # Codex renders its empty composer with normal-intensity suggestion text in
+  # some themes. These exact built-in placeholders are not user input.
+  case "$stripped" in
+    'Implement {feature}'|'Run /review on my current changes'|\
+    '> Implement {feature}'|'> Run /review on my current changes'|\
+    '❯ Implement {feature}'|'❯ Run /review on my current changes'|\
+    '› Implement {feature}'|'› Run /review on my current changes')
+      printf 'empty'; return 0
+      ;;
+  esac
+  # A busy footer on the cursor row is not composer evidence. It cannot confirm
+  # a submit because a prior turn may still be finishing with text unsubmitted.
   if printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
-    printf 'empty'; return 0
+    printf 'unknown'; return 0
   fi
   printf 'pending'; return 0
 }
@@ -305,20 +318,18 @@ fm_clear_safety_prompt() {  # <target>
 # verifying the composer cleared. Retries Enter ONLY — never retypes, because a
 # swallowed Enter leaves our text in the composer and retyping would duplicate
 # it. Echoes the final verdict on stdout (empty|pending|unknown|send-failed) so callers can
-# pick their own success policy:
-#   - the daemon clears its buffer only on "empty" (strict: an unknown pane must
-#     not be mistaken for a delivered escalation).
-#   - fm-send fails only on "pending" (lenient: a positively-confirmed swallow),
-#     so an unreadable pane never turns a normal steer into a false error.
+# pick their own success policy. Both current callers require "empty": every
+# other state is retried with Enter only and remains unconfirmed if the bounded
+# retry budget expires.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
   local target=$1 retries=$2 sleep_s=$3 i=0 state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target")
-    [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
+    [ "$state" = empty ] && { printf 'empty'; return 0; }
     i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
+    [ "$i" -lt "$retries" ] || { printf '%s' "$state"; return 0; }
   done
 }
 
