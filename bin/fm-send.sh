@@ -75,7 +75,7 @@ else
       exit 1
       ;;
     unknown)
-      echo "error: submit to $T could not be verified (composer unreadable after $retries Enter retries)" >&2
+      echo "error: submit to $T could not be verified (composer not confirmed empty after $retries Enter retries; unreadable or still busy)" >&2
       exit 1
       ;;
     send-failed)

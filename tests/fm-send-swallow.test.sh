@@ -64,7 +64,9 @@ case "${1:-}" in
         -l) literal=1 ;;
         Enter)
           printf '[ENTER]\n' >> "${FM_FAKE_SENT:-/dev/null}"
-          if [ "${FM_FAKE_SUBMIT:-0}" = 1 ]; then
+          if [ "${FM_FAKE_BUSY_ON_ROW:-0}" = 1 ]; then
+            printf '• Working (4s • esc to interrupt)\n' > "$composer"
+          elif [ "${FM_FAKE_SUBMIT:-0}" = 1 ]; then
             printf '› Implement {feature}\n' > "$composer"
           fi
           ;;
@@ -157,6 +159,34 @@ test_busy_previous_turn_is_not_delivery_proof() {
   pass 'busy previous turn cannot prove a pending steer submitted'
 }
 
+test_busy_on_cursor_row_is_unverified_not_misreported() {
+  # A busy footer can land directly ON the composer/cursor row (single-line
+  # composer harnesses, where the working indicator replaces the prompt in
+  # place). Whether that busy text predates our Enter (a stale previous turn)
+  # or appears because our own submit just started a new turn, one composer
+  # read cannot tell the difference, so it must stay unconfirmed — never a
+  # false "delivered", and never a misleading "not submitted" that would
+  # invite a caller to retype (and duplicate) an instruction that may have
+  # already landed.
+  local composer="$TMP_ROOT/composer" err="$TMP_ROOT/busyrow.err" sent="$TMP_ROOT/busyrow.sent"
+  printf '› route this work\n' > "$composer"
+  : > "$sent"
+  if PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$TMP_ROOT/home" FM_STATE_OVERRIDE="$TMP_ROOT/state" \
+    FM_FAKE_COMPOSER_FILE="$composer" FM_FAKE_SENT="$sent" FM_FAKE_BUSY_ON_ROW=1 \
+    FM_FAKE_PANE_PID="$FAKE_AGENT_PID" FM_SEND_RETRIES=3 FM_SEND_SLEEP=0 \
+    "$SEND" fake:pane 'route this work' >/dev/null 2>"$err"; then
+    fail 'busy footer on the cursor row was reported as delivered'
+  fi
+  grep -F 'fake:pane could not be verified' "$err" >/dev/null \
+    || fail "busy-on-row failure did not say unverified: $(cat "$err")"
+  case "$(cat "$err")" in
+    *'not submitted'*) fail "busy-on-row was misreported as a confirmed non-submission: $(cat "$err")" ;;
+  esac
+  entries=$(grep -c '^\[ENTER\]$' "$sent" 2>/dev/null || true)
+  [ "$entries" -eq 3 ] || fail "busy-on-row retried $entries times, expected three"
+  pass 'a busy footer on the composer row is unverified, not misreported as failed or delivered'
+}
+
 test_empty_composer_cannot_be_read_fails() {
   local composer="$TMP_ROOT/composer" err="$TMP_ROOT/unreadable.err"
   printf '› Implement {feature}\n' > "$composer"
@@ -175,5 +205,6 @@ test_empty_composer_variants
 test_normal_submit_succeeds_without_submit_warning
 test_swallowed_enter_fails_with_window_name
 test_busy_previous_turn_is_not_delivery_proof
+test_busy_on_cursor_row_is_unverified_not_misreported
 test_empty_composer_cannot_be_read_fails
 printf 'all fm-send submit verification tests passed\n'
