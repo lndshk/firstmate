@@ -230,6 +230,22 @@ fm_pane_input_pending() {  # <target>
   [ "$(fm_tmux_composer_state "$1")" = pending ]
 }
 
+# fm_tmux_composer_escape_probe: send one Escape to a PENDING composer, then
+# report its state after a short settle. This is deliberately NOT a general
+# clear operation: callers must still treat pending/unknown as unsafe and must
+# never type into either state. It exists for the away-mode daemon's max-defer
+# recovery only. On a real Claude Code v2.1.224 pane, one Escape left normal
+# unsubmitted text intact (pending before and after), while it can dismiss a
+# transient UI layer that is being mistaken for composer text.
+fm_tmux_composer_escape_probe() {  # <target> [settle-seconds] -> empty|pending|unknown
+  local target=$1 settle=${2:-0.1} state
+  state=$(fm_tmux_composer_state "$target")
+  [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
+  tmux send-keys -t "$target" Escape 2>/dev/null || { printf 'unknown'; return 0; }
+  sleep "$settle"
+  fm_tmux_composer_state "$target"
+}
+
 # fm_pane_busy_state: print busy, idle, or unknown after scanning a 40-line tail.
 fm_pane_busy_state() {  # <target>
   local win=$1 tail40

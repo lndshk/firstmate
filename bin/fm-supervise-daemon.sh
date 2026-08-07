@@ -98,9 +98,14 @@
 #                                   and structural border stripping (default:
 #                                   bare prompt glyphs plus busy footers)
 #          FM_MAX_DEFER_SECS        max seconds a buffered escalation may sit
-#                                   undelivered before one normal flush attempt;
+#                                   undelivered before one normal flush attempt
+#                                   plus one idle-only Escape recovery probe;
 #                                   if that cannot confirm a submit, a wedge
-#                                   alarm fires (default 300; 0 disables)
+#                                   alarm fires and is queued for Firstmate's
+#                                   next turn (default 300; 0 disables)
+#          FM_INJECT_ESCAPE_SETTLE   seconds to wait after that single Escape
+#                                   probe before re-reading the composer
+#                                   (default 0.1)
 #          FM_INJECT_CONFIRM_RETRIES Enter-retry attempts on a swallowed Enter
 #                                   (default 3); the digest is typed once, only
 #                                   Enter is retried. Composer-empty detection is
@@ -178,6 +183,7 @@ CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
+INJECT_ESCAPE_SETTLE_DEFAULT=0.1
 CRASH_THRESHOLD_DEFAULT=10
 CRASH_WINDOW_DEFAULT=60
 CRASH_BACKOFF_DEFAULT=60
@@ -528,13 +534,14 @@ escalate_flush() {  # <state>
 }
 
 # Raise a loud, rate-limited alarm when escalations cannot be delivered after
-# max-defer (the supervisor pane is genuinely busy/wedged, or the submit's Enter
-# is swallowed). The daemon must NEVER silently wedge: this logs
-# an ERROR, drops a durable marker firstmate/recovery can surface, and flashes
-# the supervisor client's status line. Nothing is lost — the buffer and the
-# wake-queue both survive — but the stall stops being invisible.
+# max-defer (the supervisor pane is genuinely busy/wedged, the compositor is
+# misread, or the submit's Enter is swallowed). The daemon must NEVER silently
+# wedge: this logs an ERROR, drops a durable marker, enqueues a durable signal
+# for Firstmate's next turn, and flashes the supervisor client's status line.
+# Nothing is lost — the buffer and the wake-queue both survive — but the stall
+# stops being invisible even when injection itself is impossible.
 inject_wedge_alarm() {  # <state> <age-seconds>
-  local state=$1 age=$2 marker target
+  local state=$1 age=$2 marker target payload
   marker="$state/.subsuper-inject-wedged"
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
   if [ "$(_file_age "$marker")" -lt "${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}" ]; then
@@ -546,6 +553,19 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
   } > "$marker" 2>/dev/null || true
+  # The display-message flash is useful only while someone happens to be
+  # looking. Queue the alarm through the same durable wake primitive the normal
+  # supervisor consumes, so its next turn sees this condition even if the
+  # composer can never accept an injected digest. Source the full wake helper
+  # in a subshell because this daemon normally imports its parsers only.
+  payload="away-mode inject wedged ${age}s; buffered escalations preserved at $marker"
+  (
+    FM_STATE_OVERRIDE="$state"
+    export FM_STATE_OVERRIDE
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$FM_DAEMON_DIR/fm-wake-lib.sh"
+    fm_wake_append signal subsuper-inject-wedged "$payload"
+  ) || log "ERROR: failed to enqueue durable inject-wedged wake"
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
 }
@@ -689,8 +709,9 @@ stall_check_scan() {  # <state>
 #  1) batch flush: if the escalation buffer's oldest content is older than
 #     ESCALATE_BATCH_SECS (or batching is disabled), inject one digest.
 #  1b) max-defer escape: if the buffer is STILL undelivered past MAX_DEFER_SECS,
-#     attempt one normal delivery; if it cannot confirm, raise the wedge alarm.
-#     Never silently defer forever.
+#     attempt one normal delivery, then one idle-only Escape probe if the guard
+#     remains pending. It retries only after the probe reads empty; real text
+#     remains untouched. Otherwise raise a wedge alarm plus durable wake.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
@@ -714,9 +735,9 @@ housekeeping() {  # <state>
     fi
   fi
 
-  # (1b) max-defer escape. If anything is still buffered past MAX_DEFER_SECS,
-  # retry the normal delivery path. If that still cannot confirm, raise a loud
-  # wedge alarm while preserving the buffer.
+  # (1b) max-defer escape. If the normal path still cannot deliver, an
+  # idle-only Escape probe gets exactly one chance to dismiss a false-positive
+  # UI layer. It never clears or types into remaining human input.
   max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
   if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
     oldest=$(_oldest_line_age "$state/.subsuper-escalations")
@@ -725,7 +746,7 @@ housekeeping() {  # <state>
     # and waits.
     if [ "$oldest" -ge "$max_defer" ] \
        && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
-      if escalate_flush "$state"; then
+      if escalate_flush "$state" || max_defer_escape_recover "$state"; then
         log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
         rm -f "$state/.subsuper-inject-wedged"
       else
@@ -849,6 +870,30 @@ inject_msg() {  # <message> [state]
   fi
   log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
   return 1
+}
+
+# max_defer_escape_recover: one bounded, idle-only recovery probe for the
+# narrow case where the composer guard itself is stuck false-positive. Escape
+# was verified on a disposable real Claude Code v2.1.224 pane: normal typed,
+# unsubmitted text remained pending and byte-for-byte visible after one Escape.
+# Therefore a remaining pending/unknown state is fail-closed: we never type,
+# submit, or otherwise disturb it. If Escape dismisses a transient renderer/UI
+# layer and the shared detector becomes empty, retry the ordinary strict path.
+max_defer_escape_recover() {  # <state>
+  local state=$1 target before after settle
+  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
+  fm_pane_exists "$target" || return 1
+  [ "$(fm_pane_busy_state "$target")" = idle ] || return 1
+  before=$(fm_tmux_composer_state "$target")
+  [ "$before" = pending ] || return 1
+  settle=${FM_INJECT_ESCAPE_SETTLE:-$INJECT_ESCAPE_SETTLE_DEFAULT}
+  after=$(fm_tmux_composer_escape_probe "$target" "$settle")
+  if [ "$after" != empty ]; then
+    log "inject max-defer Escape probe left composer $after; preserving input and buffer"
+    return 1
+  fi
+  log "inject max-defer Escape probe recovered an empty composer; retrying strict flush"
+  escalate_flush "$state"
 }
 
 # --- INJECT_SKIP prefix match (literal prefixes, no regex) ------------------
