@@ -8,6 +8,7 @@ FAKEBIN="$TMP_ROOT/bin"
 BOARD_DIR="$TMP_ROOT/board"
 TMUX_LOG="$TMP_ROOT/tmux.log"
 SLEEP_LOG="$TMP_ROOT/sleep.log"
+export FM_WINDOWS_SCRATCH_SWEEP_INTERVAL=0
 mkdir -p "$HOME_DIR/state" "$FAKEBIN" "$BOARD_DIR"
 
 fail() {
@@ -798,7 +799,9 @@ REVISION_HOME="$TMP_ROOT/revision-home"
 REVISION_BOARD="$TMP_ROOT/revision-board"
 mkdir -p "$REVISION_BIN" "$REVISION_HOME/state" "$REVISION_BOARD"
 cp "$ROOT/bin/fm-supervisor.sh" "$ROOT/bin/fm-board.sh" \
-  "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-tmux-lib.sh" "$REVISION_BIN/"
+  "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-tmux-lib.sh" \
+  "$ROOT/bin/fm-windows-scratch-sweep.sh" \
+  "$ROOT/bin/fm-windows-scratch-sweep.ps1" "$REVISION_BIN/"
 FM_SUPERVISOR_INTERVAL=1 \
   PATH="$FAKEBIN:$PATH" \
   FM_TEST_TMUX_LOG="$TMUX_LOG" \
@@ -831,7 +834,9 @@ revision_expected=$(
   for runtime_file in \
     "$REVISION_BIN/fm-supervisor.sh" \
     "$REVISION_BIN/fm-wake-lib.sh" \
-    "$REVISION_BIN/fm-tmux-lib.sh"; do
+    "$REVISION_BIN/fm-tmux-lib.sh" \
+    "$REVISION_BIN/fm-windows-scratch-sweep.sh" \
+    "$REVISION_BIN/fm-windows-scratch-sweep.ps1"; do
     printf '%s\t' "${runtime_file##*/}"
     cksum < "$runtime_file"
   done | cksum | awk '{ print $1 "-" $2 }'

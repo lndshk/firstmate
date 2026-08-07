@@ -101,6 +101,7 @@ state/               volatile runtime signals; gitignored
   .subsuper-* .supervise-daemon.*   sub-supervisor internals (stale markers, escalation buffer, inject-wedged marker, seen-status dedup, log, lock, pid); never touch
   firstmate-supervisor.tsv  generated machine-readable direct-report snapshot; never hand-edit
   .firstmate-supervisor.*   always-on supervisor lock, PID, heartbeat, escalation, error, and log state; never touch
+  .windows-scratch-sweep.last   timestamp of the last Windows scratch sweep cycle; never touch
   board/             generated Firstmate Board; never hand-edit
 .no-mistakes/        local validation state and evidence; gitignored
 ```
@@ -133,6 +134,11 @@ Otherwise it prints one line per problem or capability fact; handle each:
   It is never a missing tool to install: its absence or incompatibility only falls back to hand-editing and never blocks work.
 
 Bootstrap's fleet refresh is bounded by `FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT` seconds, default 20; a timeout is reported as a `FLEET_SYNC` skip and does not block startup.
+
+On WSL hosts with `powershell.exe`, the main home's supervisor also runs `bin/fm-windows-scratch-sweep.sh` at startup and then at most once per 24 hours (`FM_WINDOWS_SCRATCH_SWEEP_INTERVAL` controls the interval; `0` disables it).
+The sweep's production scope is intentionally narrow: only stale direct-child `bridge-*` directories under `C:\temp` and `puppeteer_dev_chrome_profile-*` directories under `C:\tmp`, older than seven days by default.
+It never deletes either root, skips reparse points, and obtains a fresh `Win32_Process` `ExecutablePath`/`CommandLine` scan immediately before each deletion (twice for a live run); a candidate referenced by any live process is skipped, and an unreadable process table fails the sweep closed.
+Use `bin/fm-windows-scratch-sweep.sh -DryRun` to inspect the current Windows targets; do not run a live cleanup manually without the captain's explicit direction.
 
 Then read `data/projects.md`, the fleet registry, to load what each project is.
 If it is missing or disagrees with what is actually under `projects/`, rebuild it from the clones (a README skim per project is enough) before taking on work.

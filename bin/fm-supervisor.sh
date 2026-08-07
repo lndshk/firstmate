@@ -16,7 +16,9 @@ SCRIPT_REVISION=$(
   for runtime_file in \
     "$SCRIPT_DIR/fm-supervisor.sh" \
     "$SCRIPT_DIR/fm-wake-lib.sh" \
-    "$SCRIPT_DIR/fm-tmux-lib.sh"; do
+    "$SCRIPT_DIR/fm-tmux-lib.sh" \
+    "$SCRIPT_DIR/fm-windows-scratch-sweep.sh" \
+    "$SCRIPT_DIR/fm-windows-scratch-sweep.ps1"; do
     printf '%s\t' "${runtime_file##*/}"
     cksum < "$runtime_file"
   done | cksum | awk '{ print $1 "-" $2 }'
@@ -38,6 +40,8 @@ SNAPSHOT="${FM_SUPERVISOR_SNAPSHOT:-$STATE/firstmate-supervisor.tsv}"
 ESCALATIONS="$STATE/.firstmate-supervisor.escalations"
 LOG="$STATE/.firstmate-supervisor.log"
 ERROR="$STATE/.firstmate-supervisor.error"
+WINDOWS_SCRATCH_SWEEP_STAMP="$STATE/.windows-scratch-sweep.last"
+WINDOWS_SCRATCH_SWEEP_INTERVAL="${FM_WINDOWS_SCRATCH_SWEEP_INTERVAL:-86400}"
 CURRENT_TASK_DIR=
 CURRENT_TASK_GENERATION=
 CURRENT_STATUS_START_LINE=
@@ -60,6 +64,25 @@ is_uint() {
 }
 is_epoch() {
   is_uint "$1" && [ "${#1}" -le 10 ]
+}
+
+maybe_sweep_windows_scratch() {
+  local now last tmp
+  case "$WINDOWS_SCRATCH_SWEEP_INTERVAL" in ''|0|*[!0-9]*) return 0 ;; esac
+  [ -x "$SCRIPT_DIR/fm-windows-scratch-sweep.sh" ] || return 0
+  now=$(now_epoch)
+  last=$(cat "$WINDOWS_SCRATCH_SWEEP_STAMP" 2>/dev/null || true)
+  if is_uint "$last" && [ $((now - last)) -lt "$WINDOWS_SCRATCH_SWEEP_INTERVAL" ]; then
+    return 0
+  fi
+  if ! "$SCRIPT_DIR/fm-windows-scratch-sweep.sh"; then
+    return 1
+  fi
+  tmp="$WINDOWS_SCRATCH_SWEEP_STAMP.tmp.$$"
+  printf '%s\n' "$now" > "$tmp" && mv -f "$tmp" "$WINDOWS_SCRATCH_SWEEP_STAMP" || {
+    rm -f "$tmp"
+    return 1
+  }
 }
 clean_field() { LC_ALL=C tr '\t\r\n' '   '; }
 snapshot_field() {
@@ -1075,6 +1098,7 @@ cycle_failed() {
 
 cycle() {
   mkdir -p "$STATE" || return 1
+  maybe_sweep_windows_scratch || true
   if ! write_snapshot; then
     cycle_failed snapshot-write-failed
     return
