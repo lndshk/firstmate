@@ -213,7 +213,7 @@ real message. This is why fewer, cheaper firstmate turns handle the same fleet.
 ## Reliability properties (must hold)
 
 Nothing is lost (the durable wake queue plus `fm-wake-drain.sh` recover any
-missed or crashed injection, including a compositor wedge alarm); wedge recovery
+missed or crashed injection, including a composer wedge alarm); wedge recovery
 and alarm delivery are bounded-latency, not lossy; the catch-all scan backs up
 the keyword classifier; and the daemon preserves its
 single-instance portable lock, crash-loop backoff, a pane-gone guard, and a

@@ -560,6 +560,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # in a subshell because this daemon normally imports its parsers only.
   payload="away-mode inject wedged ${age}s; buffered escalations preserved at $marker"
   (
+    # shellcheck disable=SC2030 # deliberately subshell-local: scopes the override to this sourced call only
     FM_STATE_OVERRIDE="$state"
     export FM_STATE_OVERRIDE
     # shellcheck source=bin/fm-wake-lib.sh
