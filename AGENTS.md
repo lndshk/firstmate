@@ -134,6 +134,11 @@ Otherwise it prints one line per problem or capability fact; handle each:
 
 Bootstrap's fleet refresh is bounded by `FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT` seconds, default 20; a timeout is reported as a `FLEET_SYNC` skip and does not block startup.
 
+On WSL hosts with `powershell.exe`, the main home's supervisor also runs `bin/fm-windows-scratch-sweep.sh` at startup and then at most once per 24 hours (`FM_WINDOWS_SCRATCH_SWEEP_INTERVAL` controls the interval; `0` disables it).
+The sweep's production scope is intentionally narrow: only stale direct-child `bridge-*` directories under `C:\temp` and `puppeteer_dev_chrome_profile-*` directories under `C:\tmp`, older than seven days by default.
+It never deletes either root, skips reparse points, and obtains a fresh `Win32_Process` `ExecutablePath`/`CommandLine` scan immediately before each deletion (twice for a live run); a candidate referenced by any live process is skipped, and an unreadable process table fails the sweep closed.
+Use `bin/fm-windows-scratch-sweep.sh -DryRun` to inspect the current Windows targets; do not run a live cleanup manually without the captain's explicit direction.
+
 Then read `data/projects.md`, the fleet registry, to load what each project is.
 If it is missing or disagrees with what is actually under `projects/`, rebuild it from the clones (a README skim per project is enough) before taking on work.
 Then read `data/secondmates.md` if present so intake can route work by registered secondmate scope (section 7).

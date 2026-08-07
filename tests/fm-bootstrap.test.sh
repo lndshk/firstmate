@@ -4,6 +4,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT=
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+export FM_WINDOWS_SCRATCH_SWEEP_INTERVAL=0
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2

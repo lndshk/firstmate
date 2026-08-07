@@ -150,6 +150,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
 - **Restart-proof** - all state lives in tmux, status files, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
   Every incoming request is recorded in the local backlog before clarification, routing, or dispatch, so later messages and restarts do not silently drop it.
   Kill the first mate session anytime; the next one reconciles and carries on.
+- **Windows scratch backstop** - on WSL hosts, the main supervisor checks the known bridge and Chromium-profile scratch families at startup and daily, deleting only directories older than seven days after a fresh Windows process-table scan proves no live command or executable references each candidate.
 
 ## The bin/ toolbelt
 
@@ -158,6 +159,7 @@ The first mate drives these; you rarely need to, but they work by hand too.
 | Script                   | Description                                                                                                         |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------- |
 | `fm-bootstrap.sh`        | Detect required toolchain problems and optional capability facts; refresh clones best-effort; install tools only after consent |
+| `fm-windows-scratch-sweep.sh` | On WSL, safely reclaims stale known Windows scratch directories; use `-DryRun` to inspect candidates |
 | `fm-fleet-sync.sh`       | Fetch clones, clean-fast-forward their checked-out default branches, and safely prune branches whose remote is gone |
 | `fm-update.sh`           | Self-update the running firstmate repo and registered secondmate homes with fast-forward-only pulls from origin     |
 | `fm-backlog-handoff.sh`  | Move already-judged in-scope queued backlog items from the main home into a seeded secondmate home                 |
