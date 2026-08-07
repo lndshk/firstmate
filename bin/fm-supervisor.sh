@@ -1098,10 +1098,7 @@ cycle_failed() {
 
 cycle() {
   mkdir -p "$STATE" || return 1
-  if ! maybe_sweep_windows_scratch; then
-    cycle_failed windows-scratch-sweep-failed
-    return
-  fi
+  maybe_sweep_windows_scratch || true
   if ! write_snapshot; then
     cycle_failed snapshot-write-failed
     return
