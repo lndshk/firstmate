@@ -1237,17 +1237,23 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   send-keys)
     shift
-    text=""; is_enter=0; lit=0
+    text=""; is_enter=0; is_escape=0; lit=0
     while [ "$#" -gt 0 ]; do
       case "$1" in
         -t) shift ;;
         -l) lit=1 ;;
         Enter) is_enter=1 ;;
+        Escape) is_escape=1 ;;
         *) [ "$lit" = 1 ] && text="$1" ;;
       esac
       shift
     done
-    if [ "$is_enter" = 1 ]; then
+    if [ "$is_escape" = 1 ]; then
+      [ -n "${FM_FAKE_SENT:-}" ] && printf '[ESCAPE]\n' >> "$FM_FAKE_SENT"
+      if [ "${FM_FAKE_ESCAPE_CLEARS:-0}" = 1 ]; then
+        printf '│ > │\n' > "$COMPOSER"
+      fi
+    elif [ "$is_enter" = 1 ]; then
       if [ -n "${FM_FAKE_SWALLOW:-}" ] && [ -f "$FM_FAKE_SWALLOW" ]; then
         [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$FM_FAKE_SWALLOW"
       else
@@ -1376,6 +1382,32 @@ test_max_defer_flushes_empty_idle_pane() {
   pass "max-defer flushes and clears the buffer on an empty bordered pane"
 }
 
+test_max_defer_escape_probe_recovers_false_pending() {
+  # Reproduce the incident shape: an idle pane's renderer leaves a normal-text
+  # artifact on the cursor row, so the shared guard reports pending forever.
+  # The first normal flush defers; the max-defer escape probe dismisses only the
+  # artifact, re-reads empty, and delivers in this same housekeeping cycle.
+  local dir state fakebin sent
+  dir=$(make_bordered_case maxdefer-escape-recover)
+  state="$dir/state"; fakebin="$dir/fakebin"; sent="$dir/sent.log"; : > "$sent"
+  printf '│ > stale renderer artifact │\n' > "$dir/composer"
+  escalate_add "$state" "advisor-idle?: rt-advisor"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_ESCAPE_CLEARS=1 FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 \
+    FM_INJECT_CONFIRM_SLEEP=0.05 FM_INJECT_ESCAPE_SETTLE=0.01 housekeeping "$state"
+  [ "$(grep -c '\[ESCAPE\]' "$sent" 2>/dev/null || true)" -eq 1 ] \
+    || fail "max-defer did not make exactly one Escape recovery probe"
+  [ "$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)" -eq 1 ] \
+    || fail "max-defer did not deliver exactly one recovered digest"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "recovered false pending left escalation buffered"
+  [ ! -e "$state/.subsuper-inject-wedged" ] \
+    || fail "recovered false pending raised a wedge alarm"
+  pass "max-defer Escape probe recovers a false pending composer within one cycle"
+}
+
 test_max_defer_pending_composer_alarms_without_typing() {
   local dir state fakebin sent
   dir=$(make_bordered_case maxdefer-pending-digest)
@@ -1388,11 +1420,32 @@ test_max_defer_pending_composer_alarms_without_typing() {
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
     housekeeping "$state"
-  [ ! -s "$sent" ] || fail "max-defer typed into a pending composer"
+  [ "$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)" -eq 0 ] \
+    || fail "max-defer typed into a pending composer"
   [ -s "$state/.subsuper-inject-wedged" ] || fail "pending composer did not raise a wedge alarm marker"
   [ -s "$state/.subsuper-escalations" ] || fail "buffer lost while composer was pending"
   grep -F 'human draft' "$dir/composer" >/dev/null || fail "pending composer content changed"
-  pass "max-defer on a pending composer alarms without typing"
+  [ "$(grep -c '\[ESCAPE\]' "$sent" 2>/dev/null || true)" -eq 1 ] \
+    || fail "max-defer did not make its bounded Escape probe"
+  [ "$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)" -eq 0 ] \
+    || fail "max-defer typed into a genuine pending composer after Escape"
+  grep -F 'human draft' "$dir/composer" >/dev/null || fail "Escape clobbered genuine pending composer content"
+  pass "max-defer preserves genuine pending composer text after Escape probe"
+}
+
+test_wedge_alarm_enqueues_durable_next_turn_wake() {
+  local dir state fakebin drained
+  dir=$(make_bordered_case wedge-next-turn-wake)
+  state="$dir/state"; fakebin="$dir/fakebin"; drained="$dir/drained"
+  printf 'needs-decision: retained escalation\n' > "$state/.subsuper-escalations"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_STATE_OVERRIDE="$state" \
+    inject_wedge_alarm "$state" 600
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drained" || fail "could not drain wedge alarm wake"
+  grep -F $'\tsignal\tsubsuper-inject-wedged\t' "$drained" >/dev/null \
+    || fail "wedge alarm did not enqueue a durable next-turn signal: $(cat "$drained")"
+  grep -F 'away-mode inject wedged 600s' "$drained" >/dev/null \
+    || fail "wedge wake omitted its actionable reason"
+  pass "wedge alarm enqueues a durable signal for Firstmate's next turn"
 }
 
 test_normal_flush_clears_stale_wedge_marker() {
@@ -1935,7 +1988,9 @@ test_submit_ack_confirms_on_bordered_empty_composer
 test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
+test_max_defer_escape_probe_recovers_false_pending
 test_max_defer_pending_composer_alarms_without_typing
+test_wedge_alarm_enqueues_durable_next_turn_wake
 test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm

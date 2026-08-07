@@ -97,12 +97,21 @@ message landing, and against the daemon's own previous injection sitting unsent.
 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
-attempts one normal flush, which still requires an idle pane and empty composer.
-If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
-an ERROR in the daemon log, a durable
-`state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
-catch-up if present), and a flash on the supervisor client's status line.
-So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
+attempts one normal flush. If the only remaining block is a pending composer on
+an otherwise idle pane, it sends **one Escape recovery probe** and re-reads the
+composer before retrying. This was verified on a real Claude pane: Escape left
+normal unsubmitted text intact, so `pending` or `unknown` after the probe still
+fails closed—no digest is typed and the text is never clobbered. Only a newly
+confirmed-empty composer is retried.
+
+If delivery still cannot be confirmed, it raises a loud, rate-limited wedge
+alarm: an ERROR in the daemon log, a durable
+`state/.subsuper-inject-wedged` marker, a flash on the supervisor client's
+status line, **and a durable `signal` wake** keyed
+`subsuper-inject-wedged`. That wake is consumed by Firstmate's normal next-turn
+drain, so the alarm is not limited to a log tail or the later afk-exit catch-up.
+So a guard false-positive becomes a bounded recovery attempt plus a visible
+stall, never an unbounded silent no-op.
 
 ## Submit model
 
@@ -204,7 +213,8 @@ real message. This is why fewer, cheaper firstmate turns handle the same fleet.
 ## Reliability properties (must hold)
 
 Nothing is lost (the durable wake queue plus `fm-wake-drain.sh` recover any
-missed or crashed injection); wedge detection is bounded-latency, not lossy; the
-catch-all scan backs up the keyword classifier; and the daemon preserves its
+missed or crashed injection, including a composer wedge alarm); wedge recovery
+and alarm delivery are bounded-latency, not lossy; the catch-all scan backs up
+the keyword classifier; and the daemon preserves its
 single-instance portable lock, crash-loop backoff, a pane-gone guard, and a
 signal-trapped shutdown that flushes buffered escalations before exit.

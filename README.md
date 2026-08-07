@@ -124,7 +124,7 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
   The pane and process checks - dead agent panes, idle in-flight panes, a live domain advisor idle past the threshold whose last status is not captain-gated, and a child escalation left unanswered inside a secondmate home - cost a peek per pane, so they stay in the full sweep rather than on the guard's hot path.
   A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which it self-handles routine wakes in bash and escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
   It also runs that full stall sweep itself every `FM_STALL_CHECK_SCAN_SECS`, so the two stuck-work classes with no wake to trigger on at all - an idle domain advisor, and a child escalation left unanswered inside a secondmate home - still reach you while nobody is watching; each finding is deduped by identity across sweeps and re-alarms only while it stays unresolved past `FM_STALL_REALARM_SECS`.
-  Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; stalled escalation delivery raises `state/.subsuper-inject-wedged` after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
+  Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; when a buffered escalation is still undelivered after `FM_MAX_DEFER_SECS`, the daemon retries once via a bounded, idle-only Escape probe (verified non-destructive to genuine unsubmitted text) before raising the `state/.subsuper-inject-wedged` marker and a durable next-turn wake, instead of silently deferring forever.
 - **Worktrees, not branches in your checkout** - crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
 - **Two task shapes** - ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
 - **Advisory direct work** - each firstmate home normally keeps at most three ordinary ship/scout reports active, while persistent secondmates remain outside that budget.
@@ -235,6 +235,7 @@ FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing cla
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a stale pane escalates as a possible wedge
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
 FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
+FM_INJECT_ESCAPE_SETTLE=0.1        # seconds to wait after the max-defer Escape recovery probe before re-reading the composer
 FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once
 FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks
 FM_HEARTBEAT_SCAN_SECS=300         # cadence of the catch-all status scan for missed captain verbs
