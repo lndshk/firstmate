@@ -101,6 +101,7 @@ state/               volatile runtime signals; gitignored
   .subsuper-* .supervise-daemon.*   sub-supervisor internals (stale markers, escalation buffer, inject-wedged marker, seen-status dedup, log, lock, pid); never touch
   firstmate-supervisor.tsv  generated machine-readable direct-report snapshot; never hand-edit
   .firstmate-supervisor.*   always-on supervisor lock, PID, heartbeat, escalation, error, and log state; never touch
+  .windows-scratch-sweep.last   timestamp of the last Windows scratch sweep cycle; never touch
   board/             generated Firstmate Board; never hand-edit
 .no-mistakes/        local validation state and evidence; gitignored
 ```

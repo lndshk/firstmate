@@ -245,6 +245,7 @@ FM_STALL_CHECK_SCAN_SECS=300       # cadence of the catch-all full fm-stall-chec
 FM_STALL_REALARM_SECS=1800         # how long a stall finding stays deduped before an unresolved one alarms again; <=0 alarms every sweep
 FM_HOUSEKEEPING_TICK=15            # seconds between batch-flush, stale-recheck, and scan passes
 FM_SUPERVISOR_INTERVAL=15          # seconds between deterministic snapshot and board refresh cycles
+FM_WINDOWS_SCRATCH_SWEEP_INTERVAL=86400   # seconds between the supervisor's Windows scratch sweeps; 0 disables it
 ```
 
 ### Always-on supervisor runbook
