@@ -111,6 +111,13 @@ composer_state_with_footer() {  # <composer-line> <line below composer>
     fm_tmux_composer_state fake:pane
 }
 
+composer_state_c_locale() {  # <line>
+  local file="$TMP_ROOT/composer-state"
+  printf '%s\n' "$1" > "$file"
+  LC_ALL=C LANG=C LC_CTYPE=C PATH="$FAKEBIN:$PATH" FM_FAKE_COMPOSER_FILE="$file" \
+    fm_tmux_composer_state fake:pane
+}
+
 run_send() {  # <initial composer> <submit 0|1> <busy 0|1> <text...>
   local initial=$1 submit=$2 busy=$3 err="$TMP_ROOT/send.err" sent="$TMP_ROOT/sent.log"
   shift 3
@@ -154,6 +161,31 @@ test_missing_prompt_fails_closed() {
   [ "$(composer_state 'gpt-5.6-terra high · ~/.treehouse/example')" = unknown ] \
     || fail 'pane without a prompt-bearing composer row did not fail closed'
   pass 'composer selector returns unknown when no prompt row can be located'
+}
+
+test_composer_selector_is_locale_independent() {
+  # Supervisors and daemons are nohup'd with no LANG, so the shell runs in the
+  # C/POSIX locale where a glob wildcard matches one BYTE, not one character. A
+  # multibyte composer border must still be recognized there, otherwise every
+  # claude pane reads unknown: fm-send cannot confirm a delivered steer, and
+  # unknown is not-pending, so the away-mode daemon types over a human's draft.
+  [ "$(composer_state_c_locale '│ > │')" = empty ] \
+    || fail 'Claude bordered composer was not empty in the C locale'
+  [ "$(composer_state_c_locale '┃ > ┃')" = empty ] \
+    || fail 'heavy-bordered composer was not empty in the C locale'
+  [ "$(composer_state_c_locale '│ > route this work │')" = pending ] \
+    || fail 'bordered composer with typed text was not pending in the C locale'
+  [ "$(composer_state_c_locale '❯ ')" = empty ] \
+    || fail 'multibyte bare prompt was not empty in the C locale'
+  pass 'composer selector recognizes multibyte borders and prompts in the C locale'
+}
+
+test_bordered_alt_prompt_glyphs_are_composers() {
+  [ "$(composer_state '│ ❯ │')" = empty ] \
+    || fail 'bordered ❯ composer was not empty'
+  [ "$(composer_state '│ › [Pasted Content 42 chars] │')" = pending ] \
+    || fail 'bordered › composer with pasted content was not pending'
+  pass 'bordered composers are recognized for every supported prompt glyph'
 }
 
 test_normal_submit_succeeds_without_submit_warning() {
@@ -249,6 +281,8 @@ test_empty_composer_cannot_be_read_fails() {
 test_empty_composer_variants
 test_composer_selector_ignores_footer_below_input
 test_missing_prompt_fails_closed
+test_composer_selector_is_locale_independent
+test_bordered_alt_prompt_glyphs_are_composers
 test_normal_submit_succeeds_without_submit_warning
 test_swallowed_enter_fails_with_window_name
 test_busy_previous_turn_is_not_delivery_proof
