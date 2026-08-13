@@ -191,7 +191,7 @@ Ghost text (prompt suggestions): claude renders a predicted-next-prompt suggesti
 A plain `tmux capture-pane` cannot tell that ghost text apart from text a human typed, so left unhandled it makes firstmate misread an idle composer as holding pending input.
 Firstmate launches every claude crewmate and secondmate with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` (a per-launch env prefix in `bin/fm-spawn.sh`, scoped to firstmate-launched agents - it never touches the captain's global config), which disables the interactive ghost text at the source.
 The CLI's `--prompt-suggestions` flag is print/SDK-mode only and does NOT suppress the interactive composer ghost text (verified empirically on v2.1.186), so the env var is the correct control.
-As defense in depth for any pane that flag cannot reach (such as the captain's own firstmate composer the away-mode daemon reads), the pane reader in `bin/fm-tmux-lib.sh` captures only the composer line with ANSI styling, drops dim/faint (SGR 2) runs, and ignores them, so only normal-intensity typed text counts as pending input.
+As defense in depth for any pane that flag cannot reach (such as the captain's own firstmate composer the away-mode daemon reads), the pane reader in `bin/fm-tmux-lib.sh` captures the visible pane with ANSI styling, drops dim/faint (SGR 2) runs, then selects the lowest prompt-bearing row as the composer (so a harness that draws its status footer below the input cannot be mistaken for it), so only normal-intensity typed text counts as pending input.
 That styled capture is internal to the boolean detector only; `fm-peek` and every other human/LLM-facing capture path stay plain `tmux capture-pane` with no escape codes.
 
 ### codex (VERIFIED 2026-06-11, codex-cli 0.139.0)

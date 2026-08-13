@@ -1077,9 +1077,16 @@ test_pane_input_pending_honors_idle_override_after_border_strip() {
   fakebin="$dir/fakebin"
   capture="$dir/pane.txt"
   printf '│ custom idle> │\n' > "$capture"
+  # Assert the positive state, not merely "not pending": unknown also satisfies
+  # not-pending, so a dead override would pass that check vacuously.
+  local got
+  got=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+    FM_COMPOSER_IDLE_RE='^custom idle>$' fm_tmux_composer_state "fakepane")
+  [ "$got" = empty ] \
+    || fail "FM_COMPOSER_IDLE_RE was not applied after border stripping (got $got)"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
     FM_COMPOSER_IDLE_RE='^custom idle>$' pane_input_pending "fakepane" \
-    && fail "FM_COMPOSER_IDLE_RE was not applied after border stripping"
+    && fail "an idle composer matching FM_COMPOSER_IDLE_RE was treated as pending"
   pass "pane_input_pending honors FM_COMPOSER_IDLE_RE after border stripping"
 }
 
