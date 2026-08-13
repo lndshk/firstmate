@@ -39,19 +39,32 @@ composer=${FM_FAKE_COMPOSER_FILE:?FM_FAKE_COMPOSER_FILE unset}
 emit_composer() {
   cat "$composer"
   if [ -n "${FM_FAKE_FOOTER:-}" ]; then
-    printf '\n%s\n' "$FM_FAKE_FOOTER"
+    if [ "${FM_FAKE_FOOTER_DIM:-0}" = 1 ]; then
+      printf '\033[2m%s\033[0m\n' "$FM_FAKE_FOOTER"
+    else
+      printf '%s\n' "$FM_FAKE_FOOTER"
+    fi
   fi
 }
 case "${1:-}" in
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
+    for a in "$@"; do case "$a" in *cursor_y*) printf '%s\n' "${FM_FAKE_CY:-0}"; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
     [ "${FM_FAKE_UNREADABLE:-0}" = 1 ] && exit 1
-    styled=0
-    for a in "$@"; do [ "$a" = '-e' ] && styled=1; done
+    styled=0 start='' end='' prev=''
+    for a in "$@"; do
+      case "$prev" in -S) start=$a ;; -E) end=$a ;; esac
+      [ "$a" = '-e' ] && styled=1
+      prev=$a
+    done
     if [ "$styled" = 1 ]; then
-      emit_composer
+      # Honour -S/-E so a cursor_y-based reader really sees only that row.
+      if [ -n "$start" ] && [ -n "$end" ]; then
+        emit_composer | sed -n "$((start + 1)),$((end + 1))p"
+      else
+        emit_composer
+      fi
     elif [ "${FM_FAKE_BUSY:-0}" = 1 ]; then
       printf '• Working (4s • esc to interrupt)\n'
     else
@@ -111,6 +124,22 @@ composer_state_with_footer() {  # <composer-line> <line below composer>
     fm_tmux_composer_state fake:pane
 }
 
+# <composer-line> <footer> <footer-dim 0|1> <cursor_y>: the production shape,
+# where cursor_y points at the footer instead of the composer above it.
+composer_state_footer_at_cursor() {
+  local file="$TMP_ROOT/composer-state"
+  printf '%s\n' "$1" > "$file"
+  PATH="$FAKEBIN:$PATH" FM_FAKE_COMPOSER_FILE="$file" FM_FAKE_FOOTER="$2" \
+    FM_FAKE_FOOTER_DIM="$3" FM_FAKE_CY="$4" fm_tmux_composer_state fake:pane
+}
+
+pending_guard() {  # <line> -> "unsafe" when fm_pane_input_pending defers
+  local file="$TMP_ROOT/composer-state"
+  printf '%s\n' "$1" > "$file"
+  if PATH="$FAKEBIN:$PATH" FM_FAKE_COMPOSER_FILE="$file" \
+     fm_pane_input_pending fake:pane; then printf 'unsafe'; else printf 'safe'; fi
+}
+
 composer_state_c_locale() {  # <line>
   local file="$TMP_ROOT/composer-state"
   printf '%s\n' "$1" > "$file"
@@ -126,7 +155,9 @@ run_send() {  # <initial composer> <submit 0|1> <busy 0|1> <text...>
   : > "$sent"
   PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$TMP_ROOT/home" FM_STATE_OVERRIDE="$TMP_ROOT/state" \
     FM_FAKE_COMPOSER_FILE="$composer" FM_FAKE_SENT="$sent" FM_FAKE_SUBMIT="$submit" \
-    FM_FAKE_BUSY="$busy" FM_FAKE_FOOTER="${FM_TEST_FOOTER:-}" FM_FAKE_PANE_PID="$FAKE_AGENT_PID" FM_SEND_RETRIES=3 FM_SEND_SLEEP=0 \
+    FM_FAKE_BUSY="$busy" FM_FAKE_FOOTER="${FM_TEST_FOOTER:-}" \
+    FM_FAKE_FOOTER_DIM="${FM_TEST_FOOTER_DIM:-0}" FM_FAKE_CY="${FM_TEST_CY:-0}" \
+    FM_FAKE_PANE_PID="$FAKE_AGENT_PID" FM_SEND_RETRIES=3 FM_SEND_SLEEP=0 \
     "$SEND" fake:pane "$@" >/dev/null 2>"$err"
   RC=$?
   ERR=$(cat "$err")
@@ -157,10 +188,64 @@ test_composer_selector_ignores_footer_below_input() {
   pass 'composer selector reads the prompt row above the Codex footer'
 }
 
-test_missing_prompt_fails_closed() {
-  [ "$(composer_state 'gpt-5.6-terra high · ~/.treehouse/example')" = unknown ] \
-    || fail 'pane without a prompt-bearing composer row did not fail closed'
-  pass 'composer selector returns unknown when no prompt row can be located'
+test_unlocatable_composer_is_never_empty_or_safe() {
+  # 'empty' is the submit acknowledgement and the only safe-to-type-into state,
+  # so a pane whose composer cannot be located must reach neither.
+  [ "$(composer_state 'gpt-5.6-terra high · ~/.treehouse/example')" != empty ] \
+    || fail 'a pane with no locatable composer was reported empty'
+  [ "$(pending_guard 'gpt-5.6-terra high · ~/.treehouse/example')" = unsafe ] \
+    || fail 'injection guard treated an unlocatable composer as safe to type into'
+  [ "$(pending_guard 'human draft text')" = unsafe ] \
+    || fail 'injection guard treated a human draft as safe to type into'
+  pass 'an unlocatable composer is never empty and never safe to inject into'
+}
+
+test_unreadable_pane_is_unknown_and_unsafe() {
+  local state guard
+  state=$(PATH="$FAKEBIN:$PATH" FM_FAKE_COMPOSER_FILE="$TMP_ROOT/composer-state" \
+    FM_FAKE_UNREADABLE=1 fm_tmux_composer_state fake:pane)
+  [ "$state" = unknown ] || fail "unreadable pane was $state, expected unknown"
+  if PATH="$FAKEBIN:$PATH" FM_FAKE_COMPOSER_FILE="$TMP_ROOT/composer-state" \
+     FM_FAKE_UNREADABLE=1 fm_pane_input_pending fake:pane; then guard=unsafe; else guard=safe; fi
+  [ "$guard" = unsafe ] || fail 'injection guard treated an unreadable pane as safe'
+  pass 'an unreadable pane is unknown and never safe to inject into'
+}
+
+test_blank_and_ghost_only_composers_are_empty() {
+  local esc
+  esc=$(printf '\033')
+  # A submit that landed must be acknowledgeable, or fm-send reports a delivered
+  # steer as failed and the daemon re-injects the same digest.
+  [ "$(composer_state '')" = empty ] \
+    || fail 'a blank composer was not empty (submit could never be acknowledged)'
+  [ "$(composer_state "│ ${esc}[2mtry the other approach instead${esc}[0m │")" = empty ] \
+    || fail 'a bordered composer holding only dim ghost text was not empty'
+  pass 'blank and dim-ghost-only composers are empty, so a real submit is acknowledged'
+}
+
+test_dim_footer_at_cursor_cannot_mask_pasted_composer() {
+  local footer='gpt-5.6-terra high · ~/.treehouse/example'
+  # The exact production shape: the composer holds a collapsed paste, Codex
+  # draws its footer BELOW it, and cursor_y points at that footer. A cursor_y
+  # reader captures only the dim footer, strips it to nothing, and calls the
+  # composer empty - a false submit acknowledgement.
+  [ "$(composer_state_footer_at_cursor '› [Pasted Content 1024 chars]' "$footer" 1 1)" = pending ] \
+    || fail 'a dim footer on the cursor row masked a pasted composer'
+  [ "$(composer_state_footer_at_cursor '│ > route this work │' "$footer" 1 1)" = pending ] \
+    || fail 'a dim footer on the cursor row masked a bordered composer'
+  pass 'a dim footer on the cursor row cannot mask unsubmitted composer input'
+}
+
+test_dim_paste_chip_is_still_pending() {
+  local esc
+  esc=$(printf '\033')
+  # A paste chip is unsubmitted content, not a placeholder, so dim rendering
+  # must not erase it the way it erases a suggestion.
+  [ "$(composer_state "${esc}[1m›${esc}[0m ${esc}[2m[Pasted Content 1024 chars]${esc}[0m")" = pending ] \
+    || fail 'a dim-rendered paste chip was erased and read as empty'
+  [ "$(composer_state "│ ${esc}[2m[Pasted Content 42 chars]${esc}[0m │")" = pending ] \
+    || fail 'a dim-rendered paste chip in a bordered composer was erased'
+  pass 'a collapsed paste chip stays pending even when rendered dim'
 }
 
 test_composer_selector_is_locale_independent() {
@@ -223,10 +308,16 @@ test_busy_previous_turn_is_not_delivery_proof() {
 }
 
 test_pasted_input_above_footer_fails_submit_verification() {
-  local saved_footer=${FM_TEST_FOOTER:-}
+  local saved_footer=${FM_TEST_FOOTER:-} saved_dim=${FM_TEST_FOOTER_DIM:-} saved_cy=${FM_TEST_CY:-}
+  # End to end through fm-send in the production shape: unsubmitted text in the
+  # composer, a DIM Codex footer below it, and cursor_y pointing at that footer.
+  # A cursor_y reader sees only the footer, strips its dim run to nothing, and
+  # reports the steer delivered. fm-send must refuse instead.
   FM_TEST_FOOTER='gpt-5.6-terra high · ~/.treehouse/example'
+  FM_TEST_FOOTER_DIM=1
+  FM_TEST_CY=1
   run_send '› [Pasted Content 1024 chars]' 0 0 'route this work'
-  FM_TEST_FOOTER=$saved_footer
+  FM_TEST_FOOTER=$saved_footer; FM_TEST_FOOTER_DIM=$saved_dim; FM_TEST_CY=$saved_cy
   [ "$RC" -ne 0 ] || fail 'pasted input above a footer was reported as delivered'
   case "$ERR" in
     *'not submitted to fake:pane'*) : ;;
@@ -280,7 +371,11 @@ test_empty_composer_cannot_be_read_fails() {
 
 test_empty_composer_variants
 test_composer_selector_ignores_footer_below_input
-test_missing_prompt_fails_closed
+test_unlocatable_composer_is_never_empty_or_safe
+test_unreadable_pane_is_unknown_and_unsafe
+test_blank_and_ghost_only_composers_are_empty
+test_dim_footer_at_cursor_cannot_mask_pasted_composer
+test_dim_paste_chip_is_still_pending
 test_composer_selector_is_locale_independent
 test_bordered_alt_prompt_glyphs_are_composers
 test_normal_submit_succeeds_without_submit_warning

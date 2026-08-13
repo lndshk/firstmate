@@ -97,8 +97,8 @@ fm_pane_exists() { # <target>
 # alike pass through or drop intact without locale-dependent character classes.
 # A reset (SGR 0) or normal-intensity (SGR 22) ends a dim run; codes are processed
 # left to right within a sequence so "ESC[0;2m" (reset then dim) reads as dim.
-fm_tmux_strip_ghost() {
-  LC_ALL=C awk '
+fm_tmux_strip_ghost() {  # [keep-dim]
+  LC_ALL=C awk -v keepdim="${1:-}" '
     function sgr_code(v, b) {
       b = v
       sub(/:.*/, "", b)
@@ -143,7 +143,7 @@ fm_tmux_strip_ghost() {
           }
           i = i + 1; continue          # lone/other ESC: drop the ESC byte only
         }
-        if (dim == 0) out = out c        # keep only normal-intensity bytes
+        if (dim == 0 || keepdim != "") out = out c   # keep normal-intensity bytes
         i++
       }
       print out
@@ -151,13 +151,28 @@ fm_tmux_strip_ghost() {
   '
 }
 
-# fm_tmux_is_composer_line: return success when a normalized visible-pane row has
-# a prompt glyph in its structural composer position. The prompt must be the first
-# non-border, non-whitespace character: this deliberately avoids treating output
-# that merely mentions a glyph as a composer. Codex and pi use ›/❯; claude's
-# bordered composer uses │ > ... │. A bare > remains supported for simple TUIs.
-# The leading border is removed by literal-string substitution per glyph, never
-# by a single-character pattern: `${line#?}` drops one CHARACTER, which under the
+# fm_tmux_has_paste_chip: recognize a harness's collapsed paste marker. A paste
+# chip is REAL unsubmitted content no matter how it is rendered, so it must never
+# be treated as ghost text: some harnesses draw it dim/faint, which would
+# otherwise erase it and make a full composer look empty (a false submit ack).
+# This is a structural marker, not a suggestion-text allowlist.
+fm_tmux_has_paste_chip() {  # <text>
+  case "$1" in
+    *'[Pasted Content '*' chars]'*) return 0 ;;
+    *'[Pasted text '*' chars]'*) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_tmux_is_composer_line: return success when a normalized visible-pane row is
+# structurally a composer. Two shapes qualify: a row whose first non-border,
+# non-whitespace character is a prompt glyph (Codex and pi use ›/❯; claude's
+# bordered composer uses │ > ... │; a bare > covers simple TUIs), and a bordered
+# row that holds nothing at all (claude renders an idle composer that way once
+# its dim ghost suggestion is stripped). Requiring the glyph to come first
+# deliberately avoids treating output that merely mentions one as a composer.
+# Borders are removed by literal-string substitution per glyph, never by a
+# single-character pattern: `${line#?}` drops one CHARACTER, which under the
 # C/POSIX locale (an unset LANG, as a nohup'd supervisor or cron job sees) is one
 # BYTE, leaving the tail of a 3-byte │ behind and hiding every claude composer.
 fm_tmux_is_composer_line() {  # <normalized line>
@@ -169,42 +184,76 @@ fm_tmux_is_composer_line() {  # <normalized line>
     '›'|'› '*|'❯'|'❯ '*|'>'|'> '*) return 0 ;;
   esac
   case "$line" in
-    '│'*) inner=${line#'│'} ;;
-    '┃'*) inner=${line#'┃'} ;;
-    '|'*) inner=${line#'|'} ;;
+    '│'*|'┃'*|'|'*) ;;
     *) return 1 ;;
   esac
+  inner=${line//│/}
+  inner=${inner//┃/}
+  inner=${inner//|/}
   inner="${inner#"${inner%%[![:space:]]*}"}"
+  inner="${inner%"${inner##*[![:space:]]}"}"
+  [ -n "$inner" ] || return 0
   case "$inner" in
     '›'|'› '*|'❯'|'❯ '*|'>'|'> '*) return 0 ;;
   esac
   return 1
 }
 
-# fm_tmux_composer_text: print the normalized prompt-bearing composer line of
-# <target>. Codex draws its status footer below the composer, so cursor_y points
-# at the footer rather than the input. Scan the visible styled pane instead and
-# select the lowest structural prompt row; if none is present, fail closed.
+# fm_tmux_composer_text: print the normalized composer line of <target>.
+# Codex draws its status footer BELOW the composer, so cursor_y points at the
+# footer rather than the input; trusting it reads a dim footer as an empty
+# composer and fakes a submit acknowledgement. So scan the visible styled pane
+# and select the lowest structural composer row (fm_tmux_is_composer_line).
+# Only when the pane shows no such row at all does cursor_y decide, which keeps
+# a blank cursor line, a shell prompt, and a harness whose idle composer needs
+# FM_COMPOSER_IDLE_RE readable instead of collapsing them all into 'unknown'.
+# A row's collapsed paste chip is kept even when the harness renders it dim,
+# because it is unsubmitted content rather than a placeholder.
 # The result has dim/faint ghost text removed, composer borders stripped, NBSP and
 # narrow-NBSP prompt padding normalized to spaces, and surrounding whitespace
-# trimmed. Returns non-zero if the pane cannot be read or holds no prompt row.
+# trimmed. Returns non-zero only when the pane's state cannot be established.
 # The whole capture is de-ghosted in ONE awk pass, not once per row: these reads
 # are hot (every Enter retry, every daemon inject attempt) and fork/exec is not.
 # That is byte-identical to per-row stripping because the awk program resets its
 # dim state at the start of every input record.
 fm_tmux_composer_text() {  # <target>
-  local target=$1 raw plain line candidate stripped
+  local target=$1 raw plain line stripped cy idx i n rows
   raw=$(tmux capture-pane -e -p -t "$target" 2>/dev/null) || return 1
   plain=$(printf '%s\n' "$raw" | fm_tmux_strip_ghost)
-  candidate=''
+  local -a rows_plain rows_raw
+  rows_plain=(); rows_raw=()
+  n=0
   while IFS= read -r line || [ -n "$line" ]; do
-    fm_tmux_is_composer_line "$line" || continue
-    candidate=$line
+    rows_plain[$n]=$line
+    n=$((n + 1))
   done <<EOF
 $plain
 EOF
-  [ -n "$candidate" ] || return 1
-  line=$candidate
+  rows=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    rows_raw[$rows]=$line
+    rows=$((rows + 1))
+  done <<EOF
+$raw
+EOF
+  idx=-1
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    fm_tmux_is_composer_line "${rows_plain[$i]}" && idx=$i
+    i=$((i + 1))
+  done
+  if [ "$idx" -lt 0 ]; then
+    cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
+    case "$cy" in ''|*[!0-9]*) return 1 ;; esac
+    # A cursor past the captured rows means nothing is drawn there: an empty
+    # composer, the same answer a single-row capture of that line would give.
+    [ "$cy" -lt "$n" ] || { printf ''; return 0; }
+    idx=$cy
+  fi
+  line=${rows_plain[$idx]}
+  if [ "$idx" -lt "$rows" ] && fm_tmux_has_paste_chip "${rows_raw[$idx]}"; then
+    line=$(printf '%s\n' "${rows_raw[$idx]}" | fm_tmux_strip_ghost keep-dim)
+  fi
   # Strip the composer box borders (literal glyphs — no character classes).
   stripped=${line//│/}      # U+2502 light vertical (claude)
   stripped=${stripped//┃/}  # U+2503 heavy vertical
@@ -225,14 +274,15 @@ EOF
 #             acknowledgement that a submit landed.
 #   pending - real, unsubmitted text on the cursor line (a human mid-typing, or a
 #             previous injection whose Enter was swallowed). Defer / retry.
-#   unknown - the composer could not be located or trusted: the pane could not be
-#             read (tmux error), no prompt-bearing row was visible at all (fail
-#             closed - see below), or a busy footer landed on the selected row.
-#             None of those can confirm a submit, since a prior turn may still be
-#             finishing with our text unsubmitted. The caller decides.
+#   unknown - the composer's state could not be established: the pane could not
+#             be read (tmux error), cursor_y was unavailable or unusable for a
+#             pane showing no composer row, or a busy footer landed on the
+#             selected row. None of those can confirm a submit, since a prior
+#             turn may still be finishing with our text unsubmitted, and none of
+#             them is safe to type into - see fm_pane_input_pending.
 #
 # The visible pane is captured WITH ANSI styling (capture-pane -e); its lowest
-# prompt-bearing row is the composer, even when a Codex footer is below it. The
+# structural composer row wins, even when a Codex footer is drawn below it. The
 # capture is run through fm_tmux_strip_ghost so dim/faint ghost text drops out
 # before both row selection and classification. The styled capture is internal
 # only, never surfaced. The detector then strips the harness's box-drawing
@@ -240,12 +290,10 @@ EOF
 # literal-string substitution (bash 3.2 safe, locale-independent — no \u escapes,
 # no multibyte character classes), and asks whether anything real is left.
 #
-# Selecting the row by prompt glyph rather than by cursor_y is what makes the
-# fail-closed 'unknown' the dominant unknown in practice, and it narrows the two
-# arms below to residual guards: a shell prompt row ($/%/#) and a busy footer row
-# carry no prompt glyph, so neither is selectable as the composer any more. They
-# still cover a composer row whose own contents look like one (e.g. a harness
-# that renders "› esc to interrupt" in place of the prompt), so they stay.
+# 'empty' is the submit acknowledgement, so it is only ever reported for a row
+# that was actually located and actually holds nothing. Any row that carries
+# real text classifies as pending or unknown, never empty, whether it was found
+# by prompt glyph or by the cursor_y fallback.
 fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 stripped
   stripped=$(fm_tmux_composer_text "$target") || { printf 'unknown'; return 0; }
@@ -267,11 +315,18 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   printf 'pending'; return 0
 }
 
-# fm_pane_input_pending: 0 (pending) if the cursor line holds real unsubmitted
-# text, 1 otherwise. An unreadable pane is treated as NOT pending (fail-safe:
-# the same bias the old daemon used — an unknown pane defers nothing here).
+# fm_pane_input_pending: 0 when it is NOT safe to type into <target> - the
+# composer holds real unsubmitted text, or its state could not be established.
+# 'unknown' counts as pending on purpose. This is the one caller where the two
+# answers are not symmetric: injecting into a pane we cannot read can overwrite a
+# human's half-typed line, while deferring an escalation only delays it (and the
+# away-mode daemon's max-defer path exists for exactly that). Only a composer
+# positively confirmed empty is safe to type into.
 fm_pane_input_pending() {  # <target>
-  [ "$(fm_tmux_composer_state "$1")" = pending ]
+  case "$(fm_tmux_composer_state "$1")" in
+    pending|unknown) return 0 ;;
+  esac
+  return 1
 }
 
 # fm_tmux_composer_escape_probe: send one Escape to a PENDING composer, then
