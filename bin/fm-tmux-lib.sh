@@ -20,13 +20,13 @@
 # "suggestion" as dim/faint text inside an otherwise-empty composer. A plain
 # capture cannot tell it apart from text a human typed, so the old reader saw an
 # idle pane as holding pending input and the daemon deferred injection / firstmate
-# misjudged the pane. The composer reader now captures just the cursor line WITH
-# ANSI styling (tmux capture-pane -e), drops dim/faint (SGR 2) runs, and decides on
-# what is left, so ghost/placeholder text never counts as real input. The styled
-# capture is consumed internally and parsed into a boolean here; it is NEVER
-# surfaced (fm-peek and every human/LLM-facing path stay plain), and only the
-# single composer row is captured, so no escape-laden pane bulk is produced. This
-# is harness-generic: any harness that dims placeholder/ghost text benefits.
+# misjudged the pane. The composer reader captures the visible pane WITH ANSI
+# styling (tmux capture-pane -e), finds the prompt-bearing composer row, then drops
+# dim/faint (SGR 2) runs from that row before deciding. This recognizes rendered
+# placeholders without maintaining a brittle list of another program's UI strings.
+# The styled capture is consumed internally and parsed into a boolean here; it is
+# NEVER surfaced (fm-peek and every human/LLM-facing path stay plain). This is
+# harness-generic: any harness that dims placeholder/ghost text benefits.
 #
 # Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
 # dim-ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
@@ -151,16 +151,51 @@ fm_tmux_strip_ghost() {
   '
 }
 
-# fm_tmux_composer_text: print the normalized cursor/composer line of <target>.
+# fm_tmux_is_composer_line: return success when a normalized visible-pane row has
+# a prompt glyph in its structural composer position. The prompt must be the first
+# non-border, non-whitespace character: this deliberately avoids treating output
+# that merely mentions a glyph as a composer. Codex and pi use ›/❯; claude's
+# bordered composer uses │ > ... │. A bare > remains supported for simple TUIs.
+fm_tmux_is_composer_line() {  # <normalized line>
+  local line=$1 inner
+  line=${line//$'\302\240'/ }
+  line=${line//$'\342\200\257'/ }
+  line="${line#"${line%%[![:space:]]*}"}"
+  case "$line" in
+    '›'|'› '*) return 0 ;;
+    '❯'|'❯ '*) return 0 ;;
+    '>'|'> '*) return 0 ;;
+  esac
+  case "$line" in
+    '│'*|'┃'*|'|'*)
+      inner=${line#?}
+      inner="${inner#"${inner%%[![:space:]]*}"}"
+      case "$inner" in '>'|'> '*) return 0 ;; esac
+      ;;
+  esac
+  return 1
+}
+
+# fm_tmux_composer_text: print the normalized prompt-bearing composer line of
+# <target>. Codex draws its status footer below the composer, so cursor_y points
+# at the footer rather than the input. Scan the visible styled pane instead and
+# select the lowest structural prompt row; if none is present, fail closed.
 # The result has dim/faint ghost text removed, composer borders stripped, NBSP and
 # narrow-NBSP prompt padding normalized to spaces, and surrounding whitespace
 # trimmed. Returns non-zero if the pane cannot be read.
 fm_tmux_composer_text() {  # <target>
-  local target=$1 cy raw line stripped
-  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
-  case "$cy" in ''|*[!0-9]*) return 1 ;; esac
-  raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || return 1
-  line=$(printf '%s\n' "$raw" | fm_tmux_strip_ghost)
+  local target=$1 raw raw_line candidate line stripped
+  raw=$(tmux capture-pane -e -p -t "$target" 2>/dev/null) || return 1
+  candidate=''
+  while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+    line=$(printf '%s\n' "$raw_line" | fm_tmux_strip_ghost)
+    fm_tmux_is_composer_line "$line" || continue
+    candidate=$raw_line
+  done <<EOF
+$raw
+EOF
+  [ -n "$candidate" ] || return 1
+  line=$(printf '%s\n' "$candidate" | fm_tmux_strip_ghost)
   # Strip the composer box borders (literal glyphs — no character classes).
   stripped=${line//│/}      # U+2502 light vertical (claude)
   stripped=${stripped//┃/}  # U+2503 heavy vertical
@@ -175,7 +210,7 @@ fm_tmux_composer_text() {  # <target>
   printf '%s' "$stripped"
 }
 
-# fm_tmux_composer_state: classify the cursor/composer line of <target> as
+# fm_tmux_composer_state: classify the prompt-bearing composer line of <target> as
 #   empty   - no pending input (blank, a bare prompt, or only dim
 #             ghost/placeholder text). Safe to inject; also the positive
 #             acknowledgement that a submit landed.
@@ -185,10 +220,11 @@ fm_tmux_composer_text() {  # <target>
 #             the cursor row: it cannot confirm a submit, since a prior turn may
 #             still be finishing with our text unsubmitted. The caller decides.
 #
-# The cursor line is captured WITH ANSI styling (capture-pane -e) and bounded to
-# the single composer row (-S/-E), then run through fm_tmux_strip_ghost so dim/faint
-# ghost text drops out before classification. The styled capture is internal only,
-# never surfaced. The detector then strips the harness's box-drawing composer
+# The visible pane is captured WITH ANSI styling (capture-pane -e); its lowest
+# prompt-bearing row is the composer, even when a Codex footer is below it. That
+# row is run through fm_tmux_strip_ghost so dim/faint ghost text drops out before
+# classification. The styled capture is internal only, never surfaced. The
+# detector then strips the harness's box-drawing composer
 # borders ("│ … │", heavy "┃", or a plain ASCII "|") using literal-string
 # substitution (bash 3.2 safe, locale-independent — no \u escapes, no multibyte
 # character classes), and asks whether anything real is left.
@@ -204,16 +240,6 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   # Just a bare prompt glyph = empty composer (idle).
   case "$stripped" in
     '>'|'❯'|'›'|'$'|'%'|'#') printf 'empty'; return 0 ;;
-  esac
-  # Codex renders its empty composer with normal-intensity suggestion text in
-  # some themes. These exact built-in placeholders are not user input.
-  case "$stripped" in
-    'Implement {feature}'|'Run /review on my current changes'|\
-    '> Implement {feature}'|'> Run /review on my current changes'|\
-    '❯ Implement {feature}'|'❯ Run /review on my current changes'|\
-    '› Implement {feature}'|'› Run /review on my current changes')
-      printf 'empty'; return 0
-      ;;
   esac
   # A busy footer on the cursor row is not composer evidence. It cannot confirm
   # a submit because a prior turn may still be finishing with text unsubmitted.

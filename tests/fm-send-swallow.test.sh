@@ -36,6 +36,12 @@ make_fake_tmux() {  # <dir>
 #!/usr/bin/env bash
 set -u
 composer=${FM_FAKE_COMPOSER_FILE:?FM_FAKE_COMPOSER_FILE unset}
+emit_composer() {
+  cat "$composer"
+  if [ -n "${FM_FAKE_FOOTER:-}" ]; then
+    printf '\n%s\n' "$FM_FAKE_FOOTER"
+  fi
+}
 case "${1:-}" in
   display-message)
     for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
@@ -45,7 +51,7 @@ case "${1:-}" in
     styled=0
     for a in "$@"; do [ "$a" = '-e' ] && styled=1; done
     if [ "$styled" = 1 ]; then
-      cat "$composer"
+      emit_composer
     elif [ "${FM_FAKE_BUSY:-0}" = 1 ]; then
       printf '• Working (4s • esc to interrupt)\n'
     else
@@ -67,7 +73,7 @@ case "${1:-}" in
           if [ "${FM_FAKE_BUSY_ON_ROW:-0}" = 1 ]; then
             printf '• Working (4s • esc to interrupt)\n' > "$composer"
           elif [ "${FM_FAKE_SUBMIT:-0}" = 1 ]; then
-            printf '› Implement {feature}\n' > "$composer"
+            printf '\033[1m›\033[0m \033[2mAny rendered Codex suggestion\033[0m\n' > "$composer"
           fi
           ;;
         *)
@@ -98,6 +104,13 @@ composer_state() {  # <line>
   PATH="$FAKEBIN:$PATH" FM_FAKE_COMPOSER_FILE="$file" fm_tmux_composer_state fake:pane
 }
 
+composer_state_with_footer() {  # <composer-line> <line below composer>
+  local file="$TMP_ROOT/composer-state"
+  printf '%s\n' "$1" > "$file"
+  PATH="$FAKEBIN:$PATH" FM_FAKE_COMPOSER_FILE="$file" FM_FAKE_FOOTER="$2" \
+    fm_tmux_composer_state fake:pane
+}
+
 run_send() {  # <initial composer> <submit 0|1> <busy 0|1> <text...>
   local initial=$1 submit=$2 busy=$3 err="$TMP_ROOT/send.err" sent="$TMP_ROOT/sent.log"
   shift 3
@@ -106,7 +119,7 @@ run_send() {  # <initial composer> <submit 0|1> <busy 0|1> <text...>
   : > "$sent"
   PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$TMP_ROOT/home" FM_STATE_OVERRIDE="$TMP_ROOT/state" \
     FM_FAKE_COMPOSER_FILE="$composer" FM_FAKE_SENT="$sent" FM_FAKE_SUBMIT="$submit" \
-    FM_FAKE_BUSY="$busy" FM_FAKE_PANE_PID="$FAKE_AGENT_PID" FM_SEND_RETRIES=3 FM_SEND_SLEEP=0 \
+    FM_FAKE_BUSY="$busy" FM_FAKE_FOOTER="${FM_TEST_FOOTER:-}" FM_FAKE_PANE_PID="$FAKE_AGENT_PID" FM_SEND_RETRIES=3 FM_SEND_SLEEP=0 \
     "$SEND" fake:pane "$@" >/dev/null 2>"$err"
   RC=$?
   ERR=$(cat "$err")
@@ -114,15 +127,33 @@ run_send() {  # <initial composer> <submit 0|1> <busy 0|1> <text...>
 }
 
 test_empty_composer_variants() {
-  [ "$(composer_state '› Implement {feature}')" = empty ] \
-    || fail 'Codex Implement placeholder was not empty'
-  [ "$(composer_state '› Run /review on my current changes')" = empty ] \
-    || fail 'Codex review placeholder was not empty'
+  local esc
+  esc=$(printf '\033')
+  # Suggestions are detected from their dim rendering, not their mutable text.
+  [ "$(composer_state "${esc}[1m›${esc}[0m ${esc}[2mImplement {feature}${esc}[0m")" = empty ] \
+    || fail 'dim Codex Implement placeholder was not empty'
+  [ "$(composer_state "${esc}[1m›${esc}[0m ${esc}[2mWrite tests for @filename${esc}[0m")" = empty ] \
+    || fail 'new dim Codex suggestion was not empty'
   [ "$(composer_state '│ > │')" = empty ] \
     || fail 'Claude bordered composer was not empty'
-  [ "$(composer_state '[Pasted Content 42 chars]')" = pending ] \
+  [ "$(composer_state '› [Pasted Content 42 chars]')" = pending ] \
     || fail 'Pasted Content composer was not pending'
-  pass 'composer reader recognizes Codex and Claude empty states but keeps pasted content pending'
+  pass 'composer reader uses rendering for arbitrary Codex suggestions and keeps pasted content pending'
+}
+
+test_composer_selector_ignores_footer_below_input() {
+  local footer='gpt-5.6-terra high · ~/.treehouse/example'
+  # The reported production shape: cursor_y points at this footer, while the
+  # actual composer directly above it has collapsed but unsubmitted input.
+  [ "$(composer_state_with_footer '› [Pasted Content 1024 chars]' "$footer")" = pending ] \
+    || fail 'composer selector read the footer below pasted Codex input'
+  pass 'composer selector reads the prompt row above the Codex footer'
+}
+
+test_missing_prompt_fails_closed() {
+  [ "$(composer_state 'gpt-5.6-terra high · ~/.treehouse/example')" = unknown ] \
+    || fail 'pane without a prompt-bearing composer row did not fail closed'
+  pass 'composer selector returns unknown when no prompt row can be located'
 }
 
 test_normal_submit_succeeds_without_submit_warning() {
@@ -157,6 +188,20 @@ test_busy_previous_turn_is_not_delivery_proof() {
   case "$ERR" in *'treating as delivered'*) fail "busy pane used delivery fallback: $ERR" ;; esac
   [ "$ENTERS" -eq 3 ] || fail "busy pending steer retried $ENTERS times, expected three"
   pass 'busy previous turn cannot prove a pending steer submitted'
+}
+
+test_pasted_input_above_footer_fails_submit_verification() {
+  local saved_footer=${FM_TEST_FOOTER:-}
+  FM_TEST_FOOTER='gpt-5.6-terra high · ~/.treehouse/example'
+  run_send '› [Pasted Content 1024 chars]' 0 0 'route this work'
+  FM_TEST_FOOTER=$saved_footer
+  [ "$RC" -ne 0 ] || fail 'pasted input above a footer was reported as delivered'
+  case "$ERR" in
+    *'not submitted to fake:pane'*) : ;;
+    *) fail "pasted-input failure was unclear: $ERR" ;;
+  esac
+  [ "$ENTERS" -eq 3 ] || fail "pasted input retried $ENTERS Enters, expected three"
+  pass 'fm-send rejects an unsubmitted pasted composer even with a footer below it'
 }
 
 test_busy_on_cursor_row_is_unverified_not_misreported() {
@@ -202,9 +247,12 @@ test_empty_composer_cannot_be_read_fails() {
 }
 
 test_empty_composer_variants
+test_composer_selector_ignores_footer_below_input
+test_missing_prompt_fails_closed
 test_normal_submit_succeeds_without_submit_warning
 test_swallowed_enter_fails_with_window_name
 test_busy_previous_turn_is_not_delivery_proof
+test_pasted_input_above_footer_fails_submit_verification
 test_busy_on_cursor_row_is_unverified_not_misreported
 test_empty_composer_cannot_be_read_fails
 printf 'all fm-send submit verification tests passed\n'
