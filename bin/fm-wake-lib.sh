@@ -33,7 +33,61 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+FM_LOCK_USE_FLOCK=${FM_LOCK_USE_FLOCK:-}
+if [ -z "$FM_LOCK_USE_FLOCK" ]; then
+  command -v flock >/dev/null 2>&1 && FM_LOCK_USE_FLOCK=1 || FM_LOCK_USE_FLOCK=0
+fi
+# A few callers hold a supervisory lock while taking the queue lock, so one
+# global flock descriptor is not enough: opening the second lock must not
+# silently close and release the first one.  Keep four independent descriptors
+# (the code never nests more than two today) and refuse rather than weaken the
+# lock if that invariant ever changes.
+FM_LOCK_FLOCK_9=${FM_LOCK_FLOCK_9:-}
+FM_LOCK_FLOCK_8=${FM_LOCK_FLOCK_8:-}
+FM_LOCK_FLOCK_7=${FM_LOCK_FLOCK_7:-}
+FM_LOCK_FLOCK_6=${FM_LOCK_FLOCK_6:-}
 mkdir -p "$STATE"
+
+fm_lock_flock_open() {
+  local lockdir=$1
+  if [ -z "$FM_LOCK_FLOCK_9" ]; then
+    exec 9>"$lockdir.flock" || return 1
+    flock -n -x 9 || { exec 9>&-; return 1; }
+    FM_LOCK_FLOCK_9=$lockdir
+    return 0
+  fi
+  if [ -z "$FM_LOCK_FLOCK_8" ]; then
+    exec 8>"$lockdir.flock" || return 1
+    flock -n -x 8 || { exec 8>&-; return 1; }
+    FM_LOCK_FLOCK_8=$lockdir
+    return 0
+  fi
+  if [ -z "$FM_LOCK_FLOCK_7" ]; then
+    exec 7>"$lockdir.flock" || return 1
+    flock -n -x 7 || { exec 7>&-; return 1; }
+    FM_LOCK_FLOCK_7=$lockdir
+    return 0
+  fi
+  if [ -z "$FM_LOCK_FLOCK_6" ]; then
+    exec 6>"$lockdir.flock" || return 1
+    flock -n -x 6 || { exec 6>&-; return 1; }
+    FM_LOCK_FLOCK_6=$lockdir
+    return 0
+  fi
+  printf 'fm_lock_try_acquire: too many nested locks\n' >&2
+  return 1
+}
+
+fm_lock_flock_close() {
+  local lockdir=$1
+  case "$lockdir" in
+    "$FM_LOCK_FLOCK_9") flock -u 9 2>/dev/null || true; exec 9>&-; FM_LOCK_FLOCK_9= ;;
+    "$FM_LOCK_FLOCK_8") flock -u 8 2>/dev/null || true; exec 8>&-; FM_LOCK_FLOCK_8= ;;
+    "$FM_LOCK_FLOCK_7") flock -u 7 2>/dev/null || true; exec 7>&-; FM_LOCK_FLOCK_7= ;;
+    "$FM_LOCK_FLOCK_6") flock -u 6 2>/dev/null || true; exec 6>&-; FM_LOCK_FLOCK_6= ;;
+    *) return 1 ;;
+  esac
+}
 
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
@@ -61,55 +115,78 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
-fm_lock_remove_stale() {
-  local lockdir=$1 expected_pid=$2 current_pid
-  current_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  [ "$current_pid" = "$expected_pid" ] || return 1
-  if fm_pid_alive "$current_pid"; then
-    return 1
-  fi
-  case "$current_pid" in
-    ''|*[!0-9]*)
-      [ "$(fm_path_age "$lockdir")" -ge "$FM_LOCK_STALE_AFTER" ] || return 1
-      ;;
-  esac
-  rm -f "$lockdir/pid" 2>/dev/null || return 1
-  rmdir "$lockdir" 2>/dev/null
-}
-
 fm_lock_try_acquire() {
-  local lockdir=$1 pid
+  local lockdir=$1 pid owner attempt
+  owner=${BASHPID:-$$}
   FM_LOCK_HELD_PID=
-  if mkdir "$lockdir" 2>/dev/null; then
-    if { fm_current_pid > "$lockdir/pid"; } 2>/dev/null; then
-      return 0
+  if [ "$FM_LOCK_USE_FLOCK" = 1 ]; then
+    # The lock directory is retained as a human-readable owner receipt, but
+    # flock is the serialization primitive.  It closes the mkdir->pid and
+    # pid-remove->rmdir handoff windows that let the directory protocol create
+    # two owners under contention.
+    if ! fm_lock_flock_open "$lockdir"; then
+      # The advisory lock is acquired just before the creator writes its
+      # human-readable receipt. Give that tiny handoff a bounded chance to
+      # publish, so callers can report the owning PID instead of a misleading
+      # anonymous "already running" result.
+      attempt=0
+      while [ "$attempt" -lt 10 ]; do
+        FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+        [ -n "$FM_LOCK_HELD_PID" ] && break
+        sleep 0.01
+        attempt=$((attempt + 1))
+      done
+      return 1
     fi
-    rm -f "$lockdir/pid" 2>/dev/null || true
-    rmdir "$lockdir" 2>/dev/null || true
-    return 1
-  fi
-
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if fm_pid_alive "$pid"; then
-    FM_LOCK_HELD_PID=$pid
-    return 1
-  fi
-  case "$pid" in
-    ''|*[!0-9]*)
-      if [ "$(fm_path_age "$lockdir")" -lt "$FM_LOCK_STALE_AFTER" ]; then
+    if [ -e "$lockdir" ]; then
+      pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+      if fm_pid_alive "$pid"; then
         FM_LOCK_HELD_PID=$pid
+        fm_lock_flock_close "$lockdir"
         return 1
       fi
-      ;;
-  esac
-
-  fm_lock_remove_stale "$lockdir" "$pid" || true
-  if mkdir "$lockdir" 2>/dev/null; then
-    if { fm_current_pid > "$lockdir/pid"; } 2>/dev/null; then
+      case "$pid" in
+        ''|*[!0-9]*)
+          # An old-process handoff can be empty too; retain fail-closed
+          # behavior during a rolling upgrade rather than stealing it.
+          fm_lock_flock_close "$lockdir"
+          return 1
+          ;;
+      esac
+      rm -f "$lockdir/pid" 2>/dev/null || {
+        fm_lock_flock_close "$lockdir"
+        return 1
+      }
+      rmdir "$lockdir" 2>/dev/null || {
+        fm_lock_flock_close "$lockdir"
+        return 1
+      }
+    fi
+    if ! mkdir "$lockdir" 2>/dev/null || ! printf '%s\n' "$owner" > "$lockdir/pid"; then
+      rm -f "$lockdir/pid" 2>/dev/null || true
+      rmdir "$lockdir" 2>/dev/null || true
+      fm_lock_flock_close "$lockdir"
+      return 1
+    fi
+    return 0
+  fi
+  # Portable fallback: noclobber supplies an O_EXCL gate file. The directory is
+  # still the readable owner receipt, but no contender may examine/reclaim it
+  # without first owning the gate. In particular, stale receipts fail closed;
+  # there is no lock-free compare-and-delete operation that can reclaim one
+  # safely. Normal release removes the receipt and gate in that order.
+  if ( set -C; : > "$lockdir.guard" ) 2>/dev/null; then
+    if [ -e "$lockdir" ]; then
+      FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+      rm -f "$lockdir.guard" 2>/dev/null || true
+      return 1
+    fi
+    if mkdir "$lockdir" 2>/dev/null && printf '%s\n' "$owner" > "$lockdir/pid"; then
       return 0
     fi
     rm -f "$lockdir/pid" 2>/dev/null || true
     rmdir "$lockdir" 2>/dev/null || true
+    rm -f "$lockdir.guard" 2>/dev/null || true
     return 1
   fi
 
@@ -127,15 +204,44 @@ fm_lock_acquire_wait() {
 }
 
 fm_lock_release() {
-  local lockdir=$1 pid current
+  local lockdir=$1 pid current release_dir
   current=${BASHPID:-$$}
+  if [ "$FM_LOCK_USE_FLOCK" = 1 ] && { [ "$FM_LOCK_FLOCK_9" = "$lockdir" ] || [ "$FM_LOCK_FLOCK_8" = "$lockdir" ] || [ "$FM_LOCK_FLOCK_7" = "$lockdir" ] || [ "$FM_LOCK_FLOCK_6" = "$lockdir" ]; }; then
+    local status=0
+    pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+    case "$pid" in
+      ''|*[!0-9]*|"$current") ;;
+      *) status=1 ;;
+    esac
+    [ "$pid" = "$current" ] || status=1
+    if [ "$status" -eq 0 ]; then
+      rm -f "$lockdir/pid" 2>/dev/null || status=1
+      rmdir "$lockdir" 2>/dev/null || status=1
+    fi
+    fm_lock_flock_close "$lockdir" || status=1
+    return "$status"
+  fi
   pid=$(cat "$lockdir/pid" 2>/dev/null) || return 1
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
   [ "$pid" = "$current" ] || return 1
-  rm -f "$lockdir/pid" 2>/dev/null || return 1
-  rmdir "$lockdir" 2>/dev/null
+
+  # Do not expose an empty live lock.  The old rm(pid); rmdir(lock) sequence
+  # left a window where a waiter could treat an old directory as stale, remove
+  # it, and acquire a second lock while this owner was still returning.  Rename
+  # the whole directory first: that releases the canonical name atomically, and
+  # the private tombstone can be removed without a competing acquirer seeing it.
+  release_dir="$lockdir.release.${current}.${RANDOM}"
+  while [ -e "$release_dir" ]; do
+    release_dir="$lockdir.release.${current}.${RANDOM}"
+  done
+  mv "$lockdir" "$release_dir" 2>/dev/null || return 1
+  rm -f "$release_dir/pid" 2>/dev/null || return 1
+  rmdir "$release_dir" 2>/dev/null || return 1
+  if [ "$FM_LOCK_USE_FLOCK" != 1 ]; then
+    rm -f "$lockdir.guard" 2>/dev/null
+  fi
 }
 
 fm_wake_clean_field() {

@@ -532,6 +532,7 @@ It costs zero tokens while running and exits with one reason line when something
 It is a mechanical exception alarm, not another manager and not an interpreter of task semantics.
 It wakes on objective state changes and deadlines already encoded in status, tmux, checks, and heartbeat timing; Firstmate reads the brief and decides what those signals mean.
 It also writes each detected wake to the durable queue at `state/.wake-queue` before advancing suppression markers such as `.seen-*`, `.stale-*`, `.last-check`, or `.last-heartbeat`.
+The queue lock is a safety boundary: on WSL/Linux it holds an advisory `flock` while the lock directory remains only a PID receipt; an empty or malformed receipt is fail-closed, never stale-reclaimed. On platforms without `flock`, the portable `noclobber` gate is likewise fail-closed for abandoned receipts. Do not replace either with a lock-free PID/mtime stale reclaimer: a lost wake is worse than a visible wedged lock.
 At the start of every wake-handling turn and every recovery turn, run `bin/fm-wake-drain.sh` before peeking panes, reading status files beyond the reason line, or starting new work.
 The printed one-shot reason line is still useful, but the drained queue is the lossless backlog.
 After handling drained wakes, re-arm `bin/fm-watch.sh` before you end the turn.

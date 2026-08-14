@@ -2,6 +2,13 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Direct invocations get their own process group too.  --wait keeps the caller
+# blocked when util-linux must fork because this shell is already a group leader.
+if [ "${FM_TEST_PROCESS_GUARD:-0}" != 1 ] && [ "${FM_TEST_ISOLATED:-0}" != 1 ] \
+  && command -v setsid >/dev/null 2>&1 \
+  && setsid --help 2>&1 | grep -q -- '--wait'; then
+  exec setsid --wait env FM_TEST_ISOLATED=1 "$0" "$@"
+fi
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
@@ -15,6 +22,7 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   . "$DAEMON"
 fi
 TMP_ROOT=
+CLEANUP_RUNNING=0
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
@@ -26,12 +34,42 @@ pass() {
 }
 
 cleanup() {
+  # The concurrent queue test launches appenders and a drain in the background.
+  # A failed wait used to make fail() exit immediately, while this EXIT trap only
+  # removed TMP_ROOT.  The remaining appenders were then reparented and kept
+  # retrying the queue lock forever.  Reap every shell job before removing its
+  # state, including on TERM/INT below.
+  [ "${CLEANUP_RUNNING:-0}" = 1 ] && return
+  CLEANUP_RUNNING=1
+  local pids pid group group_pids
+  pids=$(jobs -pr 2>/dev/null || true)
+  # Under the suite guard (or direct Linux invocation above), every descendant
+  # shares an otherwise-private process group.  jobs can omit work after a
+  # failed wait, so include those escaped entries as well.
+  group_pids=
+  if [ "${FM_TEST_PROCESS_GUARD:-0}" = 1 ] || [ "${FM_TEST_ISOLATED:-0}" = 1 ]; then
+    group=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$group" ]; then
+      group_pids=$(ps -eo pid=,pgid=,stat= 2>/dev/null | awk -v group="$group" -v self="$$" '
+        $2 == group && $1 != self && $3 !~ /^Z/ { print $1 }
+      ')
+    fi
+  fi
+  for pid in $pids $group_pids; do
+    kill "$pid" 2>/dev/null || true
+  done
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
   if [ -n "${TMP_ROOT:-}" ]; then
     rm -rf "$TMP_ROOT"
   fi
 }
 
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-wake-tests.XXXXXX")
 export FM_WATCH_KEEPALIVE=0
@@ -210,24 +248,36 @@ hash_text() {
 }
 
 test_concurrent_append_and_drain() {
-  local dir state out1 out2 all pids i pid count unique malformed
+  local dir state out1 out2 all append_pids drain_pid i pid count unique malformed append_failed drain_failed append_failures
   dir=$(make_case concurrent)
   state="$dir/state"
   out1="$dir/drain-one.out"
   out2="$dir/drain-two.out"
   all="$dir/all.out"
-  pids=
+  append_pids=
   i=1
   while [ "$i" -le 40 ]; do
     append_wake "$state" signal "status-$i" "signal: $state/status-$i.status" &
-    pids="$pids $!"
+    append_pids="$append_pids $!"
     i=$((i + 1))
   done
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out1" &
-  pids="$pids $!"
-  for pid in $pids; do
-    wait "$pid" || fail "concurrent append/drain subprocess failed"
+  drain_pid=$!
+  # Used only by the process-cleanup regression.  It exits at the exact point
+  # where the old test leaked its un-waited appenders.
+  [ "${FM_TEST_FAIL_AFTER_BACKGROUND:-0}" = 1 ] && fail "injected concurrent failure"
+  append_failed=0
+  append_failures=
+  for pid in $append_pids; do
+    if ! wait "$pid"; then
+      append_failed=1
+      append_failures="$append_failures $pid"
+    fi
   done
+  drain_failed=0
+  wait "$drain_pid" || drain_failed=1
+  [ "$append_failed" -eq 0 ] || fail "concurrent append subprocess(es) failed:$append_failures"
+  [ "$drain_failed" -eq 0 ] || fail "concurrent drain subprocess failed"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" || fail "final drain failed"
   cat "$out1" "$out2" > "$all"
   count=$(awk 'NF { count++ } END { print count + 0 }' "$all")
@@ -378,6 +428,55 @@ SH
   grep "$(printf '\theartbeat\theartbeat\theartbeat')" "$out" >/dev/null \
     || fail "release-failure drain lost its emitted wake"
   pass "drain propagates queue lock release failure"
+}
+
+test_empty_lock_is_not_stolen() {
+  local dir state result
+  dir=$(make_case empty-lock)
+  state="$dir/state"
+  mkdir "$state/.wake-queue.lock"
+  # An empty directory is the creator-pid handoff state.  Its age cannot make
+  # it safe to steal: a visible wedge is safer than two queue writers.
+  result=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$FM_WAKE_QUEUE_LOCK"; then
+      printf acquired
+    else
+      printf held
+    fi
+  ' -- "$LIB")
+  [ "$result" = held ] || fail "empty queue lock was stolen: $result"
+  [ -d "$state/.wake-queue.lock" ] || fail "empty queue lock was removed"
+  pass "empty queue lock fails closed instead of permitting dual owners"
+}
+
+test_nested_locks_do_not_release_the_outer_lock() {
+  local dir state outer inner
+  dir=$(make_case nested-locks)
+  state="$dir/state"
+  outer="$state/.outer.lock"
+  inner="$state/.inner.lock"
+  (
+    FM_STATE_OVERRIDE="$state"
+    . "$LIB"
+    fm_lock_try_acquire "$outer" || exit 1
+    fm_lock_try_acquire "$inner" || exit 1
+    # This is the supervisor pattern: acquiring an inner control/queue lock
+    # must retain the outer lock's descriptor until its own release.
+    if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_try_acquire "$2"' -- "$LIB" "$outer"; then
+      exit 2
+    fi
+    fm_lock_release "$inner" || exit 3
+    if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_try_acquire "$2"' -- "$LIB" "$outer"; then
+      exit 4
+    fi
+    fm_lock_release "$outer" || exit 5
+  ) || fail "nested lock acquisition released its outer lock"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" && fm_lock_release "$2"
+  ' -- "$LIB" "$outer" || fail "outer lock remained held after its owner released it"
+  pass "nested locks retain outer exclusion until their own release"
 }
 
 test_drain_dedupes_obvious_duplicates() {
@@ -1942,6 +2041,8 @@ test_check_output_is_queued
 test_singleton_start
 test_atomic_double_drain
 test_drain_reports_lock_release_failure
+test_empty_lock_is_not_stolen
+test_nested_locks_do_not_release_the_outer_lock
 test_drain_dedupes_obvious_duplicates
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable

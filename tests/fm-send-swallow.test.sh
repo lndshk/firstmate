@@ -17,9 +17,21 @@ LIB="$ROOT/bin/fm-tmux-lib.sh"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-send-tests.XXXXXX")
 cleanup() {
   [ -n "${FAKE_AGENT_PID:-}" ] && kill "$FAKE_AGENT_PID" 2>/dev/null || true
+  [ -n "${FAKE_AGENT_PID:-}" ] && wait "$FAKE_AGENT_PID" 2>/dev/null || true
+  local pids pid
+  pids=$(jobs -pr 2>/dev/null || true)
+  for pid in $pids; do
+    kill "$pid" 2>/dev/null || true
+  done
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
   [ -n "${TMP_ROOT:-}" ] && rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }

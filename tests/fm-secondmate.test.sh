@@ -3,7 +3,13 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ "${FM_TEST_PROCESS_GUARD:-0}" != 1 ] && [ "${FM_TEST_ISOLATED:-0}" != 1 ] \
+  && command -v setsid >/dev/null 2>&1 \
+  && setsid --help 2>&1 | grep -q -- '--wait'; then
+  exec setsid --wait env FM_TEST_ISOLATED=1 "$0" "$@"
+fi
 TMP_ROOT=
+CLEANUP_RUNNING=0
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
@@ -15,12 +21,36 @@ pass() {
 }
 
 cleanup() {
+  # This test starts a long-lived watcher in the idle-pane case.  Do not let a
+  # failed assertion or an interrupted test orphan it before TMP_ROOT vanishes.
+  [ "${CLEANUP_RUNNING:-0}" = 1 ] && return
+  CLEANUP_RUNNING=1
+  local pids pid group group_pids
+  pids=$(jobs -pr 2>/dev/null || true)
+  group_pids=
+  if [ "${FM_TEST_PROCESS_GUARD:-0}" = 1 ] || [ "${FM_TEST_ISOLATED:-0}" = 1 ]; then
+    group=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$group" ]; then
+      group_pids=$(ps -eo pid=,pgid=,stat= 2>/dev/null | awk -v group="$group" -v self="$$" '
+        $2 == group && $1 != self && $3 !~ /^Z/ { print $1 }
+      ')
+    fi
+  fi
+  for pid in $pids $group_pids; do
+    kill "$pid" 2>/dev/null || true
+  done
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
   if [ -n "${TMP_ROOT:-}" ]; then
     rm -rf "$TMP_ROOT"
   fi
 }
 
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-secondmate-tests.XXXXXX")
 
@@ -1657,10 +1687,13 @@ EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/send-fake")
   log="$TMP_ROOT/send-fake/tmux.log"
   err="$TMP_ROOT/send-fake/send.err"
+  # fm-send now verifies that the target composer is empty after Enter; model
+  # an idle Codex-style prompt rather than the generic busy-pane fixture.
+  printf '›\n' > "$TMP_ROOT/send-fake/pane.txt"
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW="other-session:fm-domain" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/send-fake/pane.txt" \
     "$ROOT/bin/fm-send.sh" fm-domain 'route this work' >/dev/null 2>"$err" \
-    || fail "fm-send failed for a bare firstmate window with home metadata"
+    || { cat "$err" >&2; fail "fm-send failed for a bare firstmate window with home metadata"; }
 
   grep -F 'send-keys -t current-session:fm-domain -l route this work' "$log" >/dev/null \
     || fail "fm-send did not use the window recorded in this home's meta"

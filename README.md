@@ -274,7 +274,7 @@ The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides proact
 ```sh
 bash -n bin/*.sh                          # syntax-check the toolbelt
 shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests; CI enforces this
-for test_script in tests/*.test.sh; do "$test_script"; done   # behavior tests, matching CI
+tests/run-tests.sh                         # behavior tests, matching CI; fails and reaps leaked test descendants
 tests/fm-wake-queue.test.sh               # durable wake queue, singleton behavior, sub-supervisor classifier, /afk presence-gating, border-aware composer, max-defer, the away-mode stall-check scan (secondmate-child and idle-advisor escalation, cadence gate, dedup, re-alarm, single-absence and failed-sweep marker handling, afk-inactive buffering), and fm-send submit tests
 tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, NBSP-padded prompt detection, and escape-free peek tests
 tests/fm-safety-autoclear.test.sh         # strict Codex safety-dialog detection, Keep waiting key sequence, off switch, and recorded-window watcher wiring
