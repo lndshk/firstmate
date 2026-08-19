@@ -13,6 +13,10 @@ BACKLOG="$DATA/backlog.md"
 DONE_ARCHIVE="$DATA/done-archive.md"
 IDLE_SECS=${FM_STALL_IDLE_SECS:-600}
 ADVISOR_IDLE_SECS=${FM_ADVISOR_IDLE_STALL_SECS:-1800}
+# A lane that has never written a status file is invisible to every supervision
+# path that reads status CONTENT (the wake classifier, the away-mode daemon).
+# Grace is short: a healthy lane writes its first status within a turn or two.
+SILENT_LANE_SECS=${FM_SILENT_LANE_SECS:-300}
 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
@@ -367,6 +371,31 @@ check_idle_stalls() {
   done
 }
 
+# A recorded lane with NO status file at all is a defect in its own right, not a
+# quiet lane. Every other detector here keys on status mtime or content, so a
+# lane that never writes one is skipped by all of them - check_idle_stalls
+# literally `continue`s on a missing status file. That is how a lane ran for
+# hours, hit a blocking question, and was never reported (2026-08-18).
+# Reported once past a short grace, measured from the metadata that recorded the
+# spawn, so a just-started lane is not flagged before it can speak.
+check_silent_lanes() {
+  local meta id kind status age m
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    kind=$(kind_for_meta "$meta")
+    # A secondmate legitimately rests without writing status; it has its own
+    # idle detector above.
+    [ "$kind" = secondmate ] && continue
+    status="$STATE/$id.status"
+    [ -f "$status" ] && continue
+    m=$(stat_mtime "$meta") || continue
+    age=$(( $(now_epoch) - m ))
+    [ "$age" -ge "$SILENT_LANE_SECS" ] || continue
+    printf 'silent?: %s - no status file after %ss; invisible to every status-based check, confirm it is reporting\n' "$id" "$age"
+  done
+}
+
 check_advisor_idle_stalls() {
   local meta id kind status m age window home
   for meta in "$STATE"/*.meta; do
@@ -519,6 +548,7 @@ check_finished_not_advanced
 check_unblocked_queued
 check_date_gates
 check_unlanded_work
+check_silent_lanes
 if ! "$FAST"; then
   check_dead_agents
   check_idle_stalls
