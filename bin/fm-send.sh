@@ -44,7 +44,30 @@ resolve() {
 }
 
 T=$(resolve "$1")
+TARGET_ARG="$1"
 shift
+
+# A lane that never writes status is invisible to every status-based check (see
+# fm-stall-check.sh check_silent_lanes). Only the fm-brief.sh scaffold carries
+# the reporting contract, so follow-up work sent straight into a live lane
+# arrived without it and lanes ran silent for hours (2026-08-18).
+#
+# Attach the contract to the FIRST steer a lane receives and no later: once its
+# status file exists it has demonstrably learned to report, so every subsequent
+# steer stays a clean one-liner. Set FM_SEND_NO_CONTRACT=1 to suppress.
+status_contract_suffix() {
+  local id status
+  case "$TARGET_ARG" in
+    fm-*) id="${TARGET_ARG#fm-}" ;;
+    *) return 0 ;;
+  esac
+  [ -n "${FM_SEND_NO_CONTRACT:-}" ] && return 0
+  status="$STATE/$id.status"
+  [ -f "$status" ] && return 0
+  [ -f "$STATE/$id.meta" ] || return 0
+  printf ' -- Report status by appending one line for each supervisor-actionable phase change and for needs-decision/blocked/done/failed: printf %s\\t%s\\n "{state}: {one short line}" "$(date +%%s)" >> %s' \
+    '%s' '%s' "$status"
+}
 
 agent_state=$(fm_pane_agent_state "$T")
 if [ "$agent_state" = dead ]; then
@@ -62,11 +85,12 @@ else
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing. Give popups time to settle.
   case "$*" in /*) settle=1.2 ;; *) settle=0.3 ;; esac
+  MSG="$*$(status_contract_suffix)"
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Success means the shared composer reader confirms
   # empty; retry Enter only for every other state, never retype the instruction.
-  verdict=$(fm_tmux_submit_core "$T" "$*" "$retries" "$sleep_s" "$settle")
+  verdict=$(fm_tmux_submit_core "$T" "$MSG" "$retries" "$sleep_s" "$settle")
   case "$verdict" in
     empty)
       ;;
