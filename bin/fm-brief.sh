@@ -99,6 +99,16 @@ States: working, needs-decision, blocked, done, failed.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
+# Definition of done - traced work
+Before calling anything done, these must hold. "Done" is defined, not felt (captain, 2026-08-20):
+1. Every artifact you produced came from main code, with the commit SHA recorded next to it.
+2. Every file is accounted for - none present you cannot explain, AND nothing superseded is still reachable. Explained is not retired.
+3. Every claim you make is re-runnable by the captain from a single command.
+4. Drift after sign-off goes red on its own rather than being rediscovered months later.
+5. The scheduled path and the hand-run path are the SAME commands - not equivalent, not tested-to-match, literally the same invocation.
+State these criteria in your plan BEFORE starting, so done is agreed up front rather than negotiated at the end.
+Rebuilding a thing is NOT the same as repointing what launches it: name the launcher separately, every time.
+
 # Definition of done
 You are persistent by default. Do not exit just because your queue is empty.
 On startup and restart, run normal firstmate bootstrap and recovery for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home.
@@ -151,6 +161,16 @@ The report is the only thing that survives, so anything worth keeping must be in
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
 
+# Definition of done - traced work
+Before calling anything done, these must hold. "Done" is defined, not felt (captain, 2026-08-20):
+1. Every artifact you produced came from main code, with the commit SHA recorded next to it.
+2. Every file is accounted for - none present you cannot explain, AND nothing superseded is still reachable. Explained is not retired.
+3. Every claim you make is re-runnable by the captain from a single command.
+4. Drift after sign-off goes red on its own rather than being rediscovered months later.
+5. The scheduled path and the hand-run path are the SAME commands - not equivalent, not tested-to-match, literally the same invocation.
+State these criteria in your plan BEFORE starting, so done is agreed up front rather than negotiated at the end.
+Rebuilding a thing is NOT the same as repointing what launches it: name the launcher separately, every time.
+
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
@@ -173,6 +193,16 @@ case "$MODE" in
 2. As soon as you have your first commit, push your branch so committed work is never local-only: \`git push -u origin fm/$ID\`. Keep it pushed as you commit."
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     DOD=$(cat <<EOF
+# Definition of done - traced work
+Before calling anything done, these must hold. "Done" is defined, not felt (captain, 2026-08-20):
+1. Every artifact you produced came from main code, with the commit SHA recorded next to it.
+2. Every file is accounted for - none present you cannot explain, AND nothing superseded is still reachable. Explained is not retired.
+3. Every claim you make is re-runnable by the captain from a single command.
+4. Drift after sign-off goes red on its own rather than being rediscovered months later.
+5. The scheduled path and the hand-run path are the SAME commands - not equivalent, not tested-to-match, literally the same invocation.
+State these criteria in your plan BEFORE starting, so done is agreed up front rather than negotiated at the end.
+Rebuilding a thing is NOT the same as repointing what launches it: name the launcher separately, every time.
+
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
@@ -185,6 +215,16 @@ EOF
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     DOD=$(cat <<EOF
+# Definition of done - traced work
+Before calling anything done, these must hold. "Done" is defined, not felt (captain, 2026-08-20):
+1. Every artifact you produced came from main code, with the commit SHA recorded next to it.
+2. Every file is accounted for - none present you cannot explain, AND nothing superseded is still reachable. Explained is not retired.
+3. Every claim you make is re-runnable by the captain from a single command.
+4. Drift after sign-off goes red on its own rather than being rediscovered months later.
+5. The scheduled path and the hand-run path are the SAME commands - not equivalent, not tested-to-match, literally the same invocation.
+State these criteria in your plan BEFORE starting, so done is agreed up front rather than negotiated at the end.
+Rebuilding a thing is NOT the same as repointing what launches it: name the launcher separately, every time.
+
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
@@ -200,6 +240,16 @@ EOF
 3. As soon as you have your first commit, push your branch so committed work is never local-only: \`git push -u origin fm/$ID\`. Keep it pushed as you commit; the no-mistakes pipeline still handles the validation-phase history rewrite."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
+# Definition of done - traced work
+Before calling anything done, these must hold. "Done" is defined, not felt (captain, 2026-08-20):
+1. Every artifact you produced came from main code, with the commit SHA recorded next to it.
+2. Every file is accounted for - none present you cannot explain, AND nothing superseded is still reachable. Explained is not retired.
+3. Every claim you make is re-runnable by the captain from a single command.
+4. Drift after sign-off goes red on its own rather than being rediscovered months later.
+5. The scheduled path and the hand-run path are the SAME commands - not equivalent, not tested-to-match, literally the same invocation.
+State these criteria in your plan BEFORE starting, so done is agreed up front rather than negotiated at the end.
+Rebuilding a thing is NOT the same as repointing what launches it: name the launcher separately, every time.
+
 # Definition of done
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
