@@ -77,9 +77,23 @@ _POSIXPATH = re.compile(r"/(?:home|mnt|tmp|usr|var|opt|etc)/[^\s\"']{2,}")
 _HEX = re.compile(r"\b[0-9a-f]{8,}\b", re.I)
 _NUM = re.compile(r"\b\d{2,}\b")
 _WS = re.compile(r"\s+")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
-def signature(text: str, limit: int = 130) -> str:
+def clean_text(text) -> str:
+    if not isinstance(text, str):
+        return ""
+    return _WS.sub(" ", _CONTROL.sub(" ", text)).strip()
+
+
+def display(text: str, limit: int | None = None) -> str:
+    text = clean_text(text)
+    if limit is not None and len(text) > limit:
+        return text[:limit] + "..."
+    return text
+
+
+def signature(text: str) -> str:
     """Collapse one error message into a signature that groups its recurrences.
 
     Paths, ids and counts are what make two instances of the SAME fault look
@@ -87,13 +101,12 @@ def signature(text: str, limit: int = 130) -> str:
     UUIDs and paths must go before the generic hex/number rules, or those would eat
     them piecemeal and two instances would still fail to group.
     """
-    t = _UUID.sub("<UUID>", text)
+    t = _UUID.sub("<UUID>", clean_text(text))
     t = _WINPATH.sub("<PATH>", t)
     t = _POSIXPATH.sub("<PATH>", t)
     t = _HEX.sub("<ID>", t)
     t = _NUM.sub("<N>", t)
-    t = _WS.sub(" ", t).strip()
-    return t[:limit] + ("..." if len(t) > limit else "")
+    return t
 
 
 def _text_of(content) -> str:
@@ -101,7 +114,8 @@ def _text_of(content) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+        return " ".join(c.get("text", "") for c in content
+                        if isinstance(c, dict) and isinstance(c.get("text"), str))
     return ""
 
 
@@ -109,13 +123,13 @@ def _bash_key(inp) -> str:
     """Command + first subcommand, e.g. `git log`. Enough to group, not enough to run."""
     if not isinstance(inp, dict):
         return ""
-    cmd = (inp.get("command") or "").strip()
+    cmd = clean_text(inp.get("command"))
     toks = cmd.split()
     return " ".join(toks[:2]) if toks else ""
 
 
 class Group:
-    __slots__ = ("family", "key", "hits", "sessions", "projects", "first", "last", "sample")
+    __slots__ = ("family", "key", "hits", "sessions", "projects", "first", "last")
 
     def __init__(self, family, key):
         self.family = family
@@ -125,18 +139,14 @@ class Group:
         self.projects = set()
         self.first = None
         self.last = None
-        self.sample = ""
 
-    def add(self, session, project, ts, sample):
+    def add(self, session, project, ts):
         self.hits += 1
         self.sessions.add(session)
         self.projects.add(project)
         if ts:
             self.first = ts if self.first is None else min(self.first, ts)
             self.last = ts if self.last is None else max(self.last, ts)
-        if not self.sample and sample:
-            self.sample = sample[:400]
-
     def as_dict(self):
         return {
             "family": self.family,
@@ -146,7 +156,6 @@ class Group:
             "hits": self.hits,
             "first_seen": self.first,
             "last_seen": self.last,
-            "sample": self.sample,
         }
 
 
@@ -159,6 +168,7 @@ class Scan:
         self.projects = set()
         self.oldest = None
         self.newest = None
+        self.read_errors = []
 
     def group(self, family, key) -> Group:
         k = (family,) + key
@@ -186,7 +196,8 @@ def scan_file(path: Path, scan: Scan) -> None:
 
     try:
         fh = path.open("r", encoding="utf-8", errors="replace")
-    except OSError:
+    except OSError as exc:
+        scan.read_errors.append((path, exc))
         return
     scan.files += 1
     with fh:
@@ -203,17 +214,20 @@ def scan_file(path: Path, scan: Scan) -> None:
                 continue
 
             ts = obj.get("timestamp")
+            if not isinstance(ts, str):
+                ts = None
             scan.note_time(ts)
             kind = obj.get("type")
 
             if kind == "assistant":
                 for c in ((obj.get("message") or {}).get("content") or []):
                     if isinstance(c, dict) and c.get("type") == "tool_use":
-                        names[c.get("id")] = (c.get("name") or "?", _bash_key(c.get("input")))
+                        names[c.get("id")] = (clean_text(c.get("name")) or "?",
+                                                 _bash_key(c.get("input")))
                 continue
 
             if kind == "user":
-                denial = obj.get("toolDenialKind")
+                denial = clean_text(obj.get("toolDenialKind"))
                 content = (obj.get("message") or {}).get("content")
                 blocks = content if isinstance(content, list) else []
 
@@ -221,7 +235,7 @@ def scan_file(path: Path, scan: Scan) -> None:
                     tid = next((c.get("tool_use_id") for c in blocks
                                 if isinstance(c, dict) and c.get("type") == "tool_result"), None)
                     name, bkey = names.get(tid, ("?", ""))
-                    scan.group("denial", (denial, name, bkey)).add(session, project, ts, "")
+                    scan.group("denial", (denial, name, bkey)).add(session, project, ts)
 
                 for c in blocks:
                     if not isinstance(c, dict) or c.get("type") != "tool_result":
@@ -234,8 +248,7 @@ def scan_file(path: Path, scan: Scan) -> None:
                     name, _ = names.get(c.get("tool_use_id"), ("?", ""))
                     # CLI-stamped errors are worth separating: the tool cannot forge them.
                     stamped = "<tool_use_error>" in raw
-                    scan.group("tool-error", (name, signature(raw), stamped)).add(
-                        session, project, ts, raw)
+                    scan.group("tool-error", (name, signature(raw), stamped)).add(session, project, ts)
                 continue
 
             if kind == "attachment":
@@ -247,8 +260,9 @@ def scan_file(path: Path, scan: Scan) -> None:
                     continue  # user pressed Esc; says nothing about hook health
                 if atype == "hook_success":
                     continue
-                scan.group("hook", (att.get("hookName") or "?", att.get("hookEvent") or "?",
-                                    atype)).add(session, project, ts, "")
+                scan.group("hook", (clean_text(att.get("hookName")) or "?",
+                                    clean_text(att.get("hookEvent")) or "?",
+                                    clean_text(atype) or "?")).add(session, project, ts)
 
 
 def collect(root: Path, days: float, project_filter: str | None):
@@ -256,25 +270,35 @@ def collect(root: Path, days: float, project_filter: str | None):
         sys.stderr.write(f"fm-error-harvest: transcript root not found: {root}\n")
         raise SystemExit(2)
     cutoff = time.time() - days * 86400
+    scan = Scan()
     files = []
     for p in root.rglob("*.jsonl"):
         try:
-            if p.stat().st_mtime < cutoff:
+            mtime = p.stat().st_mtime
+            if mtime < cutoff:
                 continue
-        except OSError:
+        except OSError as exc:
+            scan.read_errors.append((p, exc))
             continue
         if project_filter and project_filter not in p.parent.name:
             continue
-        files.append(p)
+        files.append((p, mtime))
     if not files:
+        if scan.read_errors:
+            sys.stderr.write(
+                f"fm-error-harvest: {len(scan.read_errors)} transcript candidate(s) could not be read.\n")
+            raise SystemExit(2)
         sys.stderr.write(
             f"fm-error-harvest: no transcripts under {root} in the last {days:g} days"
             f"{' matching ' + project_filter if project_filter else ''}.\n"
             "This is a failed scan, not a clean result - widen --days or check --root.\n")
         raise SystemExit(2)
-    scan = Scan()
-    for p in sorted(files, key=lambda q: q.stat().st_mtime, reverse=True):
+    for p, _ in sorted(files, key=lambda q: q[1], reverse=True):
         scan_file(p, scan)
+    if not scan.files:
+        sys.stderr.write(
+            f"fm-error-harvest: {len(scan.read_errors)} transcript candidate(s) could not be read.\n")
+        raise SystemExit(2)
     return scan
 
 
@@ -286,12 +310,13 @@ def ranked(scan: Scan, family: str, min_sessions: int):
 
 
 def short(ts):
-    return (ts or "")[:10] or "-"
+    return display(ts)[:10] or "-"
 
 
 def report(scan: Scan, min_sessions: int, top: int) -> int:
     print("fm-error-harvest - recurring agent failures\n")
-    print(f"  transcripts : {scan.files} across {len(scan.projects)} projects")
+    print(f"  transcripts : {scan.files} across {len(scan.projects)} projects" +
+          (f"   unreadable: {len(scan.read_errors)}" if scan.read_errors else ""))
     print(f"  lines read  : {scan.lines}" + (f"   unparseable: {scan.unparseable}"
                                              if scan.unparseable else ""))
     print(f"  window      : {short(scan.oldest)} -> {short(scan.newest)}")
@@ -313,7 +338,7 @@ def report(scan: Scan, min_sessions: int, top: int) -> int:
         for g in groups[:top]:
             if family == "tool-error":
                 name, sig, stamped = g.key
-                left, right = name, ("[cli] " if stamped else "") + sig
+                left, right = name, ("[cli] " if stamped else "") + display(sig, 130)
             elif family == "denial":
                 kind, name, bkey = g.key
                 left, right = kind, (f"{name} {bkey}".strip())
@@ -322,7 +347,7 @@ def report(scan: Scan, min_sessions: int, top: int) -> int:
                 left, right = hook, f"{event} / {atype}"
             star = "*" if len(g.projects) > 1 else " "
             print(f"  {len(g.sessions):>4} {len(g.projects):>4}{star}{g.hits:>5}  "
-                  f"{short(g.last):<10}  {left:<16.16} {right}")
+                  f"{short(g.last):<10}  {display(left, 16):<16} {display(right)}")
         if len(groups) > top:
             print(f"  ... {len(groups) - top} more not shown (--top)")
         print()
@@ -358,7 +383,8 @@ def main(argv=None) -> int:
         json.dump({
             "scanned": {"files": scan.files, "projects": len(scan.projects),
                         "lines": scan.lines, "unparseable": scan.unparseable,
-                        "oldest": scan.oldest, "newest": scan.newest},
+                        "read_errors": len(scan.read_errors), "oldest": scan.oldest,
+                        "newest": scan.newest},
             "min_sessions": args.min_sessions,
             "groups": groups,
         }, sys.stdout, indent=2)

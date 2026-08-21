@@ -48,6 +48,11 @@ run "$TMP_ROOT/empty" >/dev/null 2>&1
 [ $? -eq 2 ] || fail "empty root should exit 2"
 pass "no transcripts in window exits 2 rather than reporting clean"
 
+mkdir -p "$TMP_ROOT/unreadable/proj/bad.jsonl"
+run "$TMP_ROOT/unreadable" >/dev/null 2>&1
+[ $? -eq 2 ] || fail "unreadable transcript candidates should exit 2"
+pass "an unreadable transcript candidate fails the scan"
+
 # --- recurrence threshold ------------------------------------------------------
 mkdir -p "$TMP_ROOT/live/projA" "$TMP_ROOT/live/projB"
 skill_miss t1 > "$TMP_ROOT/live/projA/sess1.jsonl"
@@ -113,6 +118,37 @@ out=$(run "$TMP_ROOT/sig" --min-sessions 2 2>&1); rc=$?
 printf '%s' "$out" | grep -q '<PATH>' || fail "path not normalised in signature"
 pass "the same fault with different paths and counts groups into one signature"
 
+mkdir -p "$TMP_ROOT/long/projF"
+long_prefix=$(printf 'x%.0s' {1..140})
+for n in 1 2; do
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"l%s","name":"Bash","input":{"command":"false"}}]},"timestamp":"2026-08-20T12:00:00Z"}\n' "$n" \
+    > "$TMP_ROOT/long/projF/s${n}.jsonl"
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"l%s","is_error":true,"content":"failure %s tail-%s"}]},"timestamp":"2026-08-20T12:00:01Z"}\n' \
+    "$n" "$long_prefix" "$n" >> "$TMP_ROOT/long/projF/s${n}.jsonl"
+done
+run "$TMP_ROOT/long" --min-sessions 1 --json > "$TMP_ROOT/long.json" 2>/dev/null
+[ $? -eq 1 ] || fail "long distinct errors should be reported"
+"$PY" -c "
+import json,sys
+groups=json.load(open(sys.argv[1]))['groups']
+assert len(groups)==2, groups
+assert {g['key'][1].rsplit('-', 1)[-1] for g in groups} == {'1', '2'}, groups
+" "$TMP_ROOT/long.json" || fail "long errors sharing a prefix were collapsed"
+pass "long signatures group by their complete normalized value"
+
+mkdir -p "$TMP_ROOT/control/projG"
+for n in 1 2; do
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"c%s","name":"Bash","input":{"command":"false"}}]},"timestamp":"2026-08-20T12:00:00Z"}\n' "$n" \
+    > "$TMP_ROOT/control/projG/s${n}.jsonl"
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c%s","is_error":true,"content":"bad \\u001b[31mcontrol\\u001b[0m text"}]},"timestamp":"2026-08-20T12:00:01Z"}\n' "$n" \
+    >> "$TMP_ROOT/control/projG/s${n}.jsonl"
+done
+out=$(run "$TMP_ROOT/control" --min-sessions 2 2>&1); rc=$?
+[ $rc -eq 1 ] || fail "recurring control-byte error should be reported (rc=$rc)"
+case "$out" in *$'\033'*) fail "report emitted a terminal control byte";; esac
+printf '%s' "$out" | grep -q 'control' || fail "sanitized error text not reported"
+pass "report strips terminal control bytes from transcript content"
+
 # --- JSON mode -----------------------------------------------------------------
 run "$TMP_ROOT/live" --min-sessions 2 --json > "$TMP_ROOT/out.json" 2>/dev/null
 "$PY" -c "
@@ -120,7 +156,8 @@ import json,sys
 d=json.load(open(sys.argv[1]))
 assert d['scanned']['files']==2, d['scanned']
 assert d['groups'] and d['groups'][0]['sessions']==2, d['groups'][:1]
+assert 'sample' not in d['groups'][0], d['groups'][0]
 " "$TMP_ROOT/out.json" || fail "--json output malformed"
-pass "--json emits parseable output with scan coverage"
+pass "--json emits parseable output without raw transcript samples"
 
 printf '\nall fm-error-harvest tests passed\n'
