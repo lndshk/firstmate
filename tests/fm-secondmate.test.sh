@@ -105,7 +105,11 @@ make_fake_tmux() {
   log="$dir/tmux.log"
   capture="$dir/pane.txt"
   mkdir -p "$fakebin"
-  printf 'idle prompt\n' > "$capture"
+  # A bare word here reads as TEXT SITTING IN THE COMPOSER: fm_tmux_composer_state
+  # classifies 'idle prompt' as pending, so fm-send correctly refuses to confirm the
+  # submission and retries Enter. An empty composer is a prompt row with nothing after
+  # it. Literal ›, not printf \u203a - bash 3.2 does not expand \u.
+  printf '› \n' > "$capture"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
