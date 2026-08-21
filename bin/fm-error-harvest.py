@@ -58,6 +58,7 @@ import re
 import sys
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_ROOT = Path.home() / ".claude" / "projects"
@@ -96,6 +97,9 @@ _JWT = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Z
 _PEM = re.compile(r"-----BEGIN [^-\r\n]{1,64}-----.*?(?:-----END [^-\r\n]{1,64}-----|\Z)", re.I | re.S)
 _KNOWN_SECRET = re.compile(r"\b(?:ghp|gho|ghs|github_pat|sk|xox[baprs])[-_][A-Za-z0-9_=-]{8,}\b", re.I)
 _OPAQUE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z0-9_+/=-]{24,})(?![A-Za-z0-9_])")
+_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})$"
+)
 ERROR_DISPLAY_LIMIT = 130
 
 
@@ -113,7 +117,8 @@ def display(text: str, limit: int | None = None) -> str:
 
 
 def redact_secrets(text: str) -> str:
-    text = clean_text(text)
+    if not isinstance(text, str):
+        return ""
     text = _PEM.sub("<REDACTED>", text)
     text = _SECRET_HEADER.sub(r"\1<REDACTED>", text)
     text = _SECRET_ASSIGNMENT.sub(r"\1<REDACTED>", text)
@@ -132,7 +137,7 @@ def redact_secrets(text: str) -> str:
         )
         return "<REDACTED>" if entropy >= 3.5 else value
 
-    return _OPAQUE.sub(redact_opaque, text)
+    return clean_text(_OPAQUE.sub(redact_opaque, text))
 
 
 def signature(text: str) -> str:
@@ -143,7 +148,7 @@ def signature(text: str) -> str:
     UUIDs and paths must go before the generic hex/number rules, or those would eat
     them piecemeal and two instances would still fail to group.
     """
-    t = _UUID.sub("<UUID>", clean_text(redact_secrets(text)))
+    t = _UUID.sub("<UUID>", redact_secrets(text))
     t = _WINPATH.sub("<PATH>", t)
     t = _POSIXPATH.sub("<PATH>", t)
     t = _HEX.sub("<ID>", t)
@@ -158,7 +163,7 @@ def tool_error_key(text: str) -> tuple[str, str]:
 
 
 def safe_label(value, limit: int = ERROR_DISPLAY_LIMIT) -> str:
-    return display(redact_secrets(clean_text(value)), limit)
+    return display(redact_secrets(value), limit)
 
 
 def _text_of(content) -> str:
@@ -190,13 +195,28 @@ def denial_key(kind, name, command_identity: str, command_display: str):
 
 
 def hook_key(name, event, atype) -> tuple[str, tuple[str, str, str]]:
-    name_identity, name_display = tool_error_key(name)
-    event_identity, event_display = tool_error_key(event)
-    type_identity, type_display = tool_error_key(atype)
+    name_identity = redact_secrets(name)
+    event_identity = redact_secrets(event)
+    type_identity = redact_secrets(atype)
     identity = hashlib.sha256(
         (name_identity + "\0" + event_identity + "\0" + type_identity).encode("utf-8")
     ).hexdigest()
-    return identity, (name_display or "?", event_display or "?", type_display or "?")
+    return identity, (safe_label(name) or "?", safe_label(event) or "?",
+                      safe_label(atype) or "?")
+
+
+def parse_timestamp(value) -> str | None:
+    if not isinstance(value, str) or not _TIMESTAMP.fullmatch(value):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00").replace(",", "."))
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def timestamp_from_mtime(mtime: float) -> str:
+    return datetime.fromtimestamp(mtime, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 class Group:
@@ -265,7 +285,7 @@ class Scan:
         self.newest = ts if self.newest is None else max(self.newest, ts)
 
 
-def scan_file(path: Path, root: Path, scan: Scan) -> None:
+def scan_file(path: Path, root: Path, scan: Scan, mtime: float) -> None:
     session = path.relative_to(root).as_posix()
     project = path.parent.name
     scan.projects.add(project)
@@ -281,6 +301,7 @@ def scan_file(path: Path, root: Path, scan: Scan) -> None:
         scan.read_errors.append((path, exc))
         return
     scan.files += 1
+    saw_timestamp = False
     with fh:
         for line in fh:
             scan.lines += 1
@@ -298,10 +319,10 @@ def scan_file(path: Path, root: Path, scan: Scan) -> None:
                 scan.unparseable += 1
                 continue
 
-            ts = obj.get("timestamp")
-            if not isinstance(ts, str):
-                ts = None
-            scan.note_time(ts)
+            ts = parse_timestamp(obj.get("timestamp"))
+            if ts is not None:
+                saw_timestamp = True
+                scan.note_time(ts)
             kind = obj.get("type")
 
             if kind == "assistant":
@@ -339,7 +360,7 @@ def scan_file(path: Path, root: Path, scan: Scan) -> None:
                 for c in blocks:
                     if not isinstance(c, dict) or c.get("type") != "tool_result":
                         continue
-                    if not c.get("is_error"):
+                    if c.get("is_error") is not True:
                         continue
                     raw = _text_of(c.get("content"))
                     if not raw.strip():
@@ -358,12 +379,14 @@ def scan_file(path: Path, root: Path, scan: Scan) -> None:
                 atype = att["type"]
                 if not atype.startswith("hook_"):
                     continue
-                if atype == "hook_cancelled" and not att.get("timedOut"):
+                if atype == "hook_cancelled" and att.get("timedOut") is not True:
                     continue  # user pressed Esc; says nothing about hook health
                 if atype == "hook_success":
                     continue
                 identity, label = hook_key(att.get("hookName"), att.get("hookEvent"), atype)
                 scan.group("hook", (identity,), label).add(session, project, ts)
+    if not saw_timestamp:
+        scan.note_time(timestamp_from_mtime(mtime))
 
 
 def collect(root: Path, days: float, project_filter: str | None):
@@ -394,8 +417,8 @@ def collect(root: Path, days: float, project_filter: str | None):
             f"{' matching ' + project_filter if project_filter else ''}.\n"
             "This is a failed scan, not a clean result - widen --days or check --root.\n")
         raise SystemExit(2)
-    for p, _ in sorted(files, key=lambda q: q[1], reverse=True):
-        scan_file(p, root, scan)
+    for p, mtime in sorted(files, key=lambda q: q[1], reverse=True):
+        scan_file(p, root, scan, mtime)
     if not scan.files:
         sys.stderr.write(
             f"fm-error-harvest: {len(scan.read_errors)} transcript candidate(s) could not be read.\n")

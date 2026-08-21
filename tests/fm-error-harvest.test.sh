@@ -301,4 +301,86 @@ out=$(run "$TMP_ROOT/malformed" --min-sessions 1 2>&1); rc=$?
 printf '%s' "$out" | grep -q 'unparseable: 3' || fail "schema-invalid records were not counted as unparseable"
 pass "schema-invalid transcript records are skipped without crashing"
 
+# --- timestamps must be strict, safe ISO datetimes ----------------------------
+mkdir -p "$TMP_ROOT/invalid-timestamps/projP"
+for n in 1 2; do
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"ts%s","name":"Bash","input":{"command":"false"}}]},"timestamp":"2026-08-20T00:00:00Z token=super-secret"}\n' "$n" \
+    > "$TMP_ROOT/invalid-timestamps/projP/s${n}.jsonl"
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"ts%s","is_error":true,"content":"invalid timestamp failure"}]},"timestamp":"2026-08-20T00:00:01Z token=super-secret"}\n' "$n" \
+    >> "$TMP_ROOT/invalid-timestamps/projP/s${n}.jsonl"
+done
+run "$TMP_ROOT/invalid-timestamps" --min-sessions 2 --json > "$TMP_ROOT/invalid-timestamps.json" 2>/dev/null
+[ $? -eq 1 ] || fail "failures with invalid timestamps should still be reported"
+"$PY" -c "
+import json,re,sys
+d=json.load(open(sys.argv[1]))
+assert 'super-secret' not in json.dumps(d), d
+assert d['scanned']['oldest'] and d['scanned']['newest'], d['scanned']
+assert re.fullmatch(r'\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z', d['scanned']['oldest']), d['scanned']
+assert d['groups'][0]['first_seen'] is None and d['groups'][0]['last_seen'] is None, d['groups']
+" "$TMP_ROOT/invalid-timestamps.json" || fail "invalid timestamps leaked or did not use mtime coverage"
+pass "invalid timestamps are dropped while coverage uses file mtime"
+
+# --- redact multiline headers before whitespace normalization ------------------
+mkdir -p "$TMP_ROOT/multiline-header/projQ"
+for n in 1 2; do
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"mh%s","name":"Bash","input":{"command":"false"}}]}}\n' "$n" \
+    > "$TMP_ROOT/multiline-header/projQ/s${n}.jsonl"
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"mh%s","is_error":true,"content":"Authorization: Bearer super-secret-%s\\nrequest failed: timeout"}]}}\n' "$n" "$n" \
+    >> "$TMP_ROOT/multiline-header/projQ/s${n}.jsonl"
+done
+run "$TMP_ROOT/multiline-header" --min-sessions 2 --json > "$TMP_ROOT/multiline-header.json" 2>/dev/null
+[ $? -eq 1 ] || fail "multiline header failures should be reported"
+"$PY" -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert len(d['groups']) == 1, d['groups']
+sig=d['groups'][0]['display']['signature']
+assert '<REDACTED>' in sig and 'request failed: timeout' in sig, sig
+assert 'super-secret' not in json.dumps(d), d
+" "$TMP_ROOT/multiline-header.json" || fail "multiline header redaction lost failure detail"
+pass "multiline header redaction preserves the failure detail"
+
+# --- hook identities retain distinct redacted labels ---------------------------
+mkdir -p "$TMP_ROOT/distinct-hooks/projR"
+for n in 1 2; do
+  printf '{"type":"attachment","attachment":{"type":"hook_error","hookName":"./hooks/check-0%s.sh","hookEvent":"PreToolUse"}}\n' "$n" \
+    > "$TMP_ROOT/distinct-hooks/projR/s${n}.jsonl"
+done
+run "$TMP_ROOT/distinct-hooks" --min-sessions 1 --json > "$TMP_ROOT/distinct-hooks.json" 2>/dev/null
+[ $? -eq 1 ] || fail "distinct hooks should be reported"
+"$PY" -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert len(d['groups']) == 2, d['groups']
+assert {g['display']['hook'] for g in d['groups']} == {'./hooks/check-01.sh', './hooks/check-02.sh'}, d['groups']
+" "$TMP_ROOT/distinct-hooks.json" || fail "distinct hook labels were merged"
+pass "distinct hook labels remain separate findings"
+
+# --- transcript booleans must be literal JSON true -----------------------------
+mkdir -p "$TMP_ROOT/strict-bools/projS"
+printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"bf","name":"Bash","input":{"command":"false"}}]}}\n' \
+  > "$TMP_ROOT/strict-bools/projS/false.jsonl"
+printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"bf","is_error":"false","content":"should not count"}]}}\n' \
+  >> "$TMP_ROOT/strict-bools/projS/false.jsonl"
+out=$(run "$TMP_ROOT/strict-bools" --min-sessions 1 2>&1); rc=$?
+[ $rc -eq 0 ] || fail "string false must not count as a tool error (rc=$rc)"
+printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"bt","name":"Bash","input":{"command":"false"}}]}}\n' \
+  > "$TMP_ROOT/strict-bools/projS/true.jsonl"
+printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"bt","is_error":true,"content":"literal true counts"}]}}\n' \
+  >> "$TMP_ROOT/strict-bools/projS/true.jsonl"
+out=$(run "$TMP_ROOT/strict-bools" --min-sessions 1 2>&1); rc=$?
+[ $rc -eq 1 ] || fail "literal true must count as a tool error (rc=$rc)"
+printf '%s' "$out" | grep -q 'literal true counts' || fail "literal true failure was not reported"
+pass "only literal JSON true counts as a failure"
+
+mkdir -p "$TMP_ROOT/strict-timeout/projT"
+for n in 1 2; do
+  printf '{"type":"attachment","attachment":{"type":"hook_cancelled","hookName":"slowhook","hookEvent":"PreToolUse","timedOut":"false"}}\n' \
+    > "$TMP_ROOT/strict-timeout/projT/s${n}.jsonl"
+done
+out=$(run "$TMP_ROOT/strict-timeout" --min-sessions 2 2>&1); rc=$?
+[ $rc -eq 0 ] || fail "string false timeout must not count (rc=$rc)"
+pass "only literal JSON true counts as a timeout"
+
 printf '\nall fm-error-harvest tests passed\n'
