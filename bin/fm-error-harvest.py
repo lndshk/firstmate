@@ -166,6 +166,12 @@ def safe_label(value, limit: int = ERROR_DISPLAY_LIMIT) -> str:
     return display(redact_secrets(value), limit)
 
 
+def tool_label(value) -> tuple[str, str]:
+    normalized = redact_secrets(value)
+    identity = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return identity, display(normalized, 64) or "?"
+
+
 def _text_of(content) -> str:
     """Flatten a tool_result's content, which is either a string or content blocks."""
     if isinstance(content, str):
@@ -185,13 +191,13 @@ def _bash_key(inp) -> tuple[str, str]:
     return tool_error_key(" ".join(toks[:2]))
 
 
-def denial_key(kind, name, command_identity: str, command_display: str):
+def denial_key(kind, name_identity: str, name_display: str,
+               command_identity: str, command_display: str):
     kind_value = redact_secrets(clean_text(kind))
-    name_value = redact_secrets(clean_text(name))
     identity = hashlib.sha256(
-        (kind_value + "\0" + name_value + "\0" + command_identity).encode("utf-8")
+        (kind_value + "\0" + name_identity + "\0" + command_identity).encode("utf-8")
     ).hexdigest()
-    return identity, (display(kind_value, 48) or "?", safe_label(name, 64) or "?", command_display)
+    return identity, (display(kind_value, 48) or "?", name_display, command_display)
 
 
 def hook_key(name, event, atype) -> tuple[str, tuple[str, str, str]]:
@@ -337,7 +343,8 @@ def scan_file(path: Path, root: Path, scan: Scan, mtime: float) -> None:
                             scan.unparseable += 1
                             continue
                         command_identity, command_display = _bash_key(c.get("input"))
-                        names[tool_id] = (safe_label(c.get("name"), 64) or "?",
+                        name_identity, name_display = tool_label(c.get("name"))
+                        names[tool_id] = (name_identity, name_display,
                                           command_identity, command_display)
                 continue
 
@@ -353,8 +360,10 @@ def scan_file(path: Path, root: Path, scan: Scan, mtime: float) -> None:
                     tid = next((c.get("tool_use_id") for c in blocks
                                 if isinstance(c, dict) and c.get("type") == "tool_result" and
                                 isinstance(c.get("tool_use_id"), str)), None)
-                    name, command_identity, command_display = names.get(tid, ("?", *_bash_key({})))
-                    identity, label = denial_key(denial, name, command_identity, command_display)
+                    name_identity, name_display, command_identity, command_display = names.get(
+                        tid, (*tool_label("?"), *_bash_key({})))
+                    identity, label = denial_key(
+                        denial, name_identity, name_display, command_identity, command_display)
                     scan.group("denial", (identity,), label).add(session, project, ts)
 
                 for c in blocks:
@@ -366,9 +375,11 @@ def scan_file(path: Path, root: Path, scan: Scan, mtime: float) -> None:
                     if not raw.strip():
                         continue
                     tool_id = c.get("tool_use_id")
-                    name = names.get(tool_id, ("?", "", ""))[0] if isinstance(tool_id, str) else "?"
+                    name_identity, name_display = names.get(
+                        tool_id, (*tool_label("?"), "", ""))[:2] if isinstance(tool_id, str) else tool_label("?")
                     identity, summary = tool_error_key(raw)
-                    scan.group("tool-error", (name, identity), (name, summary)).add(session, project, ts)
+                    scan.group("tool-error", (name_identity, identity),
+                               (name_display, summary)).add(session, project, ts)
                 continue
 
             if kind == "attachment":
@@ -498,6 +509,8 @@ def main(argv=None) -> int:
 
     if args.min_sessions < 1:
         ap.error("--min-sessions must be >= 1")
+    if args.top < 1:
+        ap.error("--top must be >= 1")
 
     scan = collect(args.root, args.days, args.project)
 

@@ -383,4 +383,33 @@ out=$(run "$TMP_ROOT/strict-timeout" --min-sessions 2 2>&1); rc=$?
 [ $rc -eq 0 ] || fail "string false timeout must not count (rc=$rc)"
 pass "only literal JSON true counts as a timeout"
 
+# --- tool identity is lossless while its display stays bounded -----------------
+mkdir -p "$TMP_ROOT/long-tool-names/projU"
+tool_prefix=$(printf 'tool-%.0s' {1..14})
+for suffix in alpha beta; do
+  tool_name="${tool_prefix}${suffix}"
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tn-%s","name":"%s","input":{"command":"false"}}]}}\n' \
+    "$suffix" "$tool_name" > "$TMP_ROOT/long-tool-names/projU/${suffix}.jsonl"
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tn-%s","is_error":true,"content":"shared long-tool failure"}]}}\n' \
+    "$suffix" >> "$TMP_ROOT/long-tool-names/projU/${suffix}.jsonl"
+done
+run "$TMP_ROOT/long-tool-names" --min-sessions 1 --json > "$TMP_ROOT/long-tool-names.json" 2>/dev/null
+[ $? -eq 1 ] || fail "distinct long tool names should be reported"
+"$PY" -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert len(d['groups']) == 2, d['groups']
+assert {g['key'][0] for g in d['groups']} and len({g['key'][0] for g in d['groups']}) == 2, d['groups']
+assert len({g['key'][1] for g in d['groups']}) == 1, d['groups']
+assert {g['sessions'] for g in d['groups']} == {1}, d['groups']
+assert all(g['display']['tool'] == '${tool_prefix}'[:64] + '...' for g in d['groups']), d['groups']
+" "$TMP_ROOT/long-tool-names.json" || fail "long tool identities were truncated before grouping"
+pass "long tool names remain distinct behind bounded displays"
+
+# --- display limits must be positive ------------------------------------------
+out=$(run "$TMP_ROOT/live" --top -1 2>&1); rc=$?
+[ $rc -eq 2 ] || fail "negative --top must be rejected (rc=$rc)"
+printf '%s' "$out" | grep -Fq -- '--top must be >= 1' || fail "negative --top error was unclear"
+pass "negative --top is rejected before reporting"
+
 printf '\nall fm-error-harvest tests passed\n'
