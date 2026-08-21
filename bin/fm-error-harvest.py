@@ -136,6 +136,10 @@ def tool_error_key(text: str) -> tuple[str, str]:
     return identity, display(normalized, ERROR_DISPLAY_LIMIT)
 
 
+def safe_label(value, limit: int = ERROR_DISPLAY_LIMIT) -> str:
+    return display(redact_secrets(clean_text(value)), limit)
+
+
 def _text_of(content) -> str:
     """Flatten a tool_result's content, which is either a string or content blocks."""
     if isinstance(content, str):
@@ -146,13 +150,22 @@ def _text_of(content) -> str:
     return ""
 
 
-def _bash_key(inp) -> str:
+def _bash_key(inp) -> tuple[str, str]:
     """Command + first subcommand, e.g. `git log`. Enough to group, not enough to run."""
     if not isinstance(inp, dict):
-        return ""
+        return tool_error_key("")
     cmd = clean_text(inp.get("command"))
     toks = cmd.split()
-    return " ".join(toks[:2]) if toks else ""
+    return tool_error_key(" ".join(toks[:2]))
+
+
+def denial_key(kind, name, command_identity: str, command_display: str):
+    kind_value = redact_secrets(clean_text(kind))
+    name_value = redact_secrets(clean_text(name))
+    identity = hashlib.sha256(
+        (kind_value + "\0" + name_value + "\0" + command_identity).encode("utf-8")
+    ).hexdigest()
+    return identity, (display(kind_value, 48) or "?", safe_label(name, 64) or "?", command_display)
 
 
 class Group:
@@ -187,6 +200,9 @@ class Group:
         }
         if self.family == "tool-error":
             result["display"] = {"tool": self.key[0], "signature": self.key[1]}
+        elif self.family == "denial":
+            result["display"] = {"kind": self.key[0], "tool": self.key[1],
+                                 "command": self.key[2]}
         return result
 
 
@@ -244,6 +260,10 @@ def scan_file(path: Path, scan: Scan) -> None:
                 scan.unparseable += 1
                 continue
 
+            if not isinstance(obj, dict):
+                scan.unparseable += 1
+                continue
+
             ts = obj.get("timestamp")
             if not isinstance(ts, str):
                 ts = None
@@ -251,22 +271,36 @@ def scan_file(path: Path, scan: Scan) -> None:
             kind = obj.get("type")
 
             if kind == "assistant":
-                for c in ((obj.get("message") or {}).get("content") or []):
+                message = obj.get("message")
+                if not isinstance(message, dict) or not isinstance(message.get("content"), list):
+                    scan.unparseable += 1
+                    continue
+                for c in message["content"]:
                     if isinstance(c, dict) and c.get("type") == "tool_use":
-                        names[c.get("id")] = (clean_text(c.get("name")) or "?",
-                                                 _bash_key(c.get("input")))
+                        tool_id = c.get("id")
+                        if not isinstance(tool_id, str):
+                            scan.unparseable += 1
+                            continue
+                        command_identity, command_display = _bash_key(c.get("input"))
+                        names[tool_id] = (safe_label(c.get("name"), 64) or "?",
+                                          command_identity, command_display)
                 continue
 
             if kind == "user":
                 denial = clean_text(obj.get("toolDenialKind"))
-                content = (obj.get("message") or {}).get("content")
-                blocks = content if isinstance(content, list) else []
+                message = obj.get("message")
+                if not isinstance(message, dict) or not isinstance(message.get("content"), list):
+                    scan.unparseable += 1
+                    continue
+                blocks = message["content"]
 
                 if denial and denial not in NON_DENIAL_KINDS:
                     tid = next((c.get("tool_use_id") for c in blocks
-                                if isinstance(c, dict) and c.get("type") == "tool_result"), None)
-                    name, bkey = names.get(tid, ("?", ""))
-                    scan.group("denial", (denial, name, bkey)).add(session, project, ts)
+                                if isinstance(c, dict) and c.get("type") == "tool_result" and
+                                isinstance(c.get("tool_use_id"), str)), None)
+                    name, command_identity, command_display = names.get(tid, ("?", *_bash_key({})))
+                    identity, label = denial_key(denial, name, command_identity, command_display)
+                    scan.group("denial", (identity,), label).add(session, project, ts)
 
                 for c in blocks:
                     if not isinstance(c, dict) or c.get("type") != "tool_result":
@@ -276,14 +310,18 @@ def scan_file(path: Path, scan: Scan) -> None:
                     raw = _text_of(c.get("content"))
                     if not raw.strip():
                         continue
-                    name, _ = names.get(c.get("tool_use_id"), ("?", ""))
+                    tool_id = c.get("tool_use_id")
+                    name = names.get(tool_id, ("?", "", ""))[0] if isinstance(tool_id, str) else "?"
                     identity, summary = tool_error_key(raw)
                     scan.group("tool-error", (name, identity), (name, summary)).add(session, project, ts)
                 continue
 
             if kind == "attachment":
-                att = obj.get("attachment") or {}
-                atype = att.get("type") or ""
+                att = obj.get("attachment")
+                if not isinstance(att, dict) or not isinstance(att.get("type"), str):
+                    scan.unparseable += 1
+                    continue
+                atype = att["type"]
                 if not atype.startswith("hook_"):
                     continue
                 if atype == "hook_cancelled" and not att.get("timedOut"):

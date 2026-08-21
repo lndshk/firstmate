@@ -183,4 +183,40 @@ assert '<REDACTED>' in g['display']['signature'], g
 " "$TMP_ROOT/secrets.json" || fail "sensitive tool output leaked into JSON"
 pass "tool-result secrets are redacted from bounded displays and grouping keys"
 
+# --- denied command labels are also transcript-derived and must be safe --------
+mkdir -p "$TMP_ROOT/denial-secrets/projI"
+for n in 1 2; do
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"d%s","name":"Bash","input":{"command":"curl https://api.example/?token=super-secret-%s"}}]},"timestamp":"2026-08-20T12:00:00Z"}\n' "$n" "$n" \
+    > "$TMP_ROOT/denial-secrets/projI/s${n}.jsonl"
+  printf '{"type":"user","toolDenialKind":"permission","message":{"content":[{"type":"tool_result","tool_use_id":"d%s"}]},"timestamp":"2026-08-20T12:00:01Z"}\n' "$n" \
+    >> "$TMP_ROOT/denial-secrets/projI/s${n}.jsonl"
+done
+out=$(run "$TMP_ROOT/denial-secrets" --min-sessions 1 2>&1); rc=$?
+[ $rc -eq 1 ] || fail "denied commands should be reported"
+case "$out" in *super-secret*) fail "sensitive denied command leaked into text report";; esac
+run "$TMP_ROOT/denial-secrets" --min-sessions 1 --json > "$TMP_ROOT/denial-secrets.json" 2>/dev/null
+[ $? -eq 1 ] || fail "sensitive denials should be reported in JSON"
+"$PY" -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert len(d['groups']) == 1, d['groups']
+g=d['groups'][0]
+assert len(g['key']) == 1 and len(g['key'][0]) == 64, g
+assert 'super-secret' not in json.dumps(d), d
+assert len(g['display']['command']) <= 133, g
+" "$TMP_ROOT/denial-secrets.json" || fail "sensitive denied command leaked into JSON"
+pass "denied command labels use redacted displays and opaque identities"
+
+# --- valid JSON still needs the transcript record shapes we access -------------
+mkdir -p "$TMP_ROOT/malformed/projJ"
+{
+  printf '"is_error"\n'
+  printf '{"type":"user","message":"is_error"}\n'
+  printf '{"type":"attachment","attachment":"hook_error"}\n'
+} > "$TMP_ROOT/malformed/projJ/s1.jsonl"
+out=$(run "$TMP_ROOT/malformed" --min-sessions 1 2>&1); rc=$?
+[ $rc -eq 0 ] || fail "schema-invalid transcript records must not crash the scan (rc=$rc)"
+printf '%s' "$out" | grep -q 'unparseable: 3' || fail "schema-invalid records were not counted as unparseable"
+pass "schema-invalid transcript records are skipped without crashing"
+
 printf '\nall fm-error-harvest tests passed\n'
