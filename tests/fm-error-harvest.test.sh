@@ -253,6 +253,45 @@ assert len(g['display']['command']) <= 133, g
 " "$TMP_ROOT/denial-secrets.json" || fail "sensitive denied command leaked into JSON"
 pass "denied command labels use redacted displays and opaque identities"
 
+mkdir -p "$TMP_ROOT/control-denial-secrets/projI"
+for n in 1 2; do
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"cd%s","name":"Bash","input":{"command":"env token=super\\u001bsecret"}}]}}\n' "$n" \
+    > "$TMP_ROOT/control-denial-secrets/projI/s${n}.jsonl"
+  printf '{"type":"user","toolDenialKind":"permission token=super\\u001bsecret","message":{"content":[{"type":"tool_result","tool_use_id":"cd%s"}]}}\n' "$n" \
+    >> "$TMP_ROOT/control-denial-secrets/projI/s${n}.jsonl"
+done
+out=$(run "$TMP_ROOT/control-denial-secrets" --min-sessions 2 2>&1); rc=$?
+[ $rc -eq 1 ] || fail "control-split denials should be reported (rc=$rc)"
+case "$out" in *super*|*secret*) fail "control-split secret leaked into text report";; esac
+run "$TMP_ROOT/control-denial-secrets" --min-sessions 2 --json > "$TMP_ROOT/control-denial-secrets.json" 2>/dev/null
+[ $? -eq 1 ] || fail "control-split denials should be reported in JSON"
+"$PY" -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert len(d['groups']) == 1, d['groups']
+encoded=json.dumps(d)
+assert 'super' not in encoded and 'secret' not in encoded, d
+g=d['groups'][0]
+assert '<REDACTED>' in g['display']['command'], g
+assert '<REDACTED>' in g['display']['kind'], g
+" "$TMP_ROOT/control-denial-secrets.json" || fail "control-split secret leaked into JSON"
+pass "denial labels redact control-split assignments before normalization"
+
+mkdir -p "$TMP_ROOT/read-coverage/projA" "$TMP_ROOT/read-coverage/projB"
+skill_miss coverage > "$TMP_ROOT/read-coverage/projA/readable.jsonl"
+printf 'unreadable candidate\n' > "$TMP_ROOT/read-coverage/projB/unreadable.jsonl"
+chmod 000 "$TMP_ROOT/read-coverage/projB/unreadable.jsonl"
+run "$TMP_ROOT/read-coverage" --min-sessions 1 --json > "$TMP_ROOT/read-coverage.json" 2>/dev/null
+[ $? -eq 1 ] || fail "readable transcript should still be reported with an unreadable candidate"
+"$PY" -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d['scanned']['files'] == 1, d['scanned']
+assert d['scanned']['projects'] == 1, d['scanned']
+assert d['scanned']['read_errors'] == 1, d['scanned']
+" "$TMP_ROOT/read-coverage.json" || fail "coverage counted an unreadable project as scanned"
+pass "coverage counts only projects with successfully opened transcripts"
+
 # --- hook labels are untrusted transcript metadata and must be safe ------------
 mkdir -p "$TMP_ROOT/hook-secrets/projN"
 for n in 1 2; do

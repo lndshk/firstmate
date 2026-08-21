@@ -137,7 +137,11 @@ def redact_secrets(text: str) -> str:
         )
         return "<REDACTED>" if entropy >= 3.5 else value
 
-    return clean_text(_OPAQUE.sub(redact_opaque, text))
+    return _OPAQUE.sub(redact_opaque, text)
+
+
+def untrusted_text(value) -> str:
+    return clean_text(redact_secrets(value))
 
 
 def signature(text: str) -> str:
@@ -148,7 +152,11 @@ def signature(text: str) -> str:
     UUIDs and paths must go before the generic hex/number rules, or those would eat
     them piecemeal and two instances would still fail to group.
     """
-    t = _UUID.sub("<UUID>", redact_secrets(text))
+    return normalized_signature(untrusted_text(text))
+
+
+def normalized_signature(text: str) -> str:
+    t = _UUID.sub("<UUID>", text)
     t = _WINPATH.sub("<PATH>", t)
     t = _POSIXPATH.sub("<PATH>", t)
     t = _HEX.sub("<ID>", t)
@@ -157,17 +165,20 @@ def signature(text: str) -> str:
 
 
 def tool_error_key(text: str) -> tuple[str, str]:
-    normalized = signature(text)
+    return signature_key(signature(text))
+
+
+def signature_key(normalized: str) -> tuple[str, str]:
     identity = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return identity, display(normalized, ERROR_DISPLAY_LIMIT)
 
 
 def safe_label(value, limit: int = ERROR_DISPLAY_LIMIT) -> str:
-    return display(redact_secrets(value), limit)
+    return display(untrusted_text(value), limit)
 
 
 def tool_label(value) -> tuple[str, str]:
-    normalized = redact_secrets(value)
+    normalized = untrusted_text(value)
     identity = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return identity, display(normalized, 64) or "?"
 
@@ -186,14 +197,14 @@ def _bash_key(inp) -> tuple[str, str]:
     """Command + first subcommand, e.g. `git log`. Enough to group, not enough to run."""
     if not isinstance(inp, dict):
         return tool_error_key("")
-    cmd = clean_text(inp.get("command"))
+    cmd = untrusted_text(inp.get("command"))
     toks = cmd.split()
-    return tool_error_key(" ".join(toks[:2]))
+    return signature_key(normalized_signature(" ".join(toks[:2])))
 
 
 def denial_key(kind, name_identity: str, name_display: str,
                command_identity: str, command_display: str):
-    kind_value = redact_secrets(clean_text(kind))
+    kind_value = untrusted_text(kind)
     identity = hashlib.sha256(
         (kind_value + "\0" + name_identity + "\0" + command_identity).encode("utf-8")
     ).hexdigest()
@@ -201,9 +212,9 @@ def denial_key(kind, name_identity: str, name_display: str,
 
 
 def hook_key(name, event, atype) -> tuple[str, tuple[str, str, str]]:
-    name_identity = redact_secrets(name)
-    event_identity = redact_secrets(event)
-    type_identity = redact_secrets(atype)
+    name_identity = untrusted_text(name)
+    event_identity = untrusted_text(event)
+    type_identity = untrusted_text(atype)
     identity = hashlib.sha256(
         (name_identity + "\0" + event_identity + "\0" + type_identity).encode("utf-8")
     ).hexdigest()
@@ -294,7 +305,6 @@ class Scan:
 def scan_file(path: Path, root: Path, scan: Scan, mtime: float) -> None:
     session = path.relative_to(root).as_posix()
     project = path.parent.name
-    scan.projects.add(project)
 
     # tool_use id -> (name, bash key), rebuilt per file. A tool_use always precedes
     # its result within the same transcript, so one pass resolves every error to the
@@ -307,6 +317,7 @@ def scan_file(path: Path, root: Path, scan: Scan, mtime: float) -> None:
         scan.read_errors.append((path, exc))
         return
     scan.files += 1
+    scan.projects.add(project)
     saw_timestamp = False
     with fh:
         for line in fh:
@@ -349,7 +360,8 @@ def scan_file(path: Path, root: Path, scan: Scan, mtime: float) -> None:
                 continue
 
             if kind == "user":
-                denial = clean_text(obj.get("toolDenialKind"))
+                raw_denial = obj.get("toolDenialKind")
+                denial = untrusted_text(raw_denial)
                 message = obj.get("message")
                 if not isinstance(message, dict) or not isinstance(message.get("content"), list):
                     scan.unparseable += 1
@@ -363,7 +375,7 @@ def scan_file(path: Path, root: Path, scan: Scan, mtime: float) -> None:
                     name_identity, name_display, command_identity, command_display = names.get(
                         tid, (*tool_label("?"), *_bash_key({})))
                     identity, label = denial_key(
-                        denial, name_identity, name_display, command_identity, command_display)
+                        raw_denial, name_identity, name_display, command_identity, command_display)
                     scan.group("denial", (identity,), label).add(session, project, ts)
 
                 for c in blocks:
