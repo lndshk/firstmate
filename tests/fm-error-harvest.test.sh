@@ -244,6 +244,51 @@ assert len(g['display']['command']) <= 133, g
 " "$TMP_ROOT/denial-secrets.json" || fail "sensitive denied command leaked into JSON"
 pass "denied command labels use redacted displays and opaque identities"
 
+# --- hook labels are untrusted transcript metadata and must be safe ------------
+mkdir -p "$TMP_ROOT/hook-secrets/projN"
+for n in 1 2; do
+  printf '{"type":"attachment","attachment":{"type":"hook_error","hookName":"deploy token=super-secret-%s","hookEvent":"PreToolUse"}}\n' "$n" \
+    > "$TMP_ROOT/hook-secrets/projN/s${n}.jsonl"
+done
+out=$(run "$TMP_ROOT/hook-secrets" --min-sessions 2 2>&1); rc=$?
+[ $rc -eq 1 ] || fail "recurring hook errors should be reported (rc=$rc)"
+case "$out" in *super-secret*) fail "sensitive hook label leaked into text report";; esac
+printf '%s' "$out" | grep -Fq 'deploy token=<REDACTED>' || fail "redacted hook label not reported"
+run "$TMP_ROOT/hook-secrets" --min-sessions 2 --json > "$TMP_ROOT/hook-secrets.json" 2>/dev/null
+[ $? -eq 1 ] || fail "recurring hook errors should be reported in JSON"
+"$PY" -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert len(d['groups']) == 1, d['groups']
+g=d['groups'][0]
+assert g['sessions'] == 2, g
+assert len(g['key']) == 1 and len(g['key'][0]) == 64, g
+assert 'super-secret' not in json.dumps(d), d
+assert g['display']['hook'] == 'deploy token=<REDACTED>', g
+" "$TMP_ROOT/hook-secrets.json" || fail "sensitive hook label leaked or did not group"
+pass "hook labels are redacted and group across sessions"
+
+# --- hook labels are optional config fields and must stay safe ----------------
+mkdir -p "$TMP_ROOT/hook-untyped/projO"
+for n in 1 2; do
+  printf '{"type":"attachment","attachment":{"type":"hook_error","hookName":null,"hookEvent":%s}}\n' "$n" \
+    > "$TMP_ROOT/hook-untyped/projO/s${n}.jsonl"
+done
+out=$(run "$TMP_ROOT/hook-untyped" --min-sessions 2 2>&1); rc=$?
+[ $rc -eq 1 ] || fail "untyped hook labels must not crash the scan (rc=$rc)"
+printf '%s\n' "$out" | grep -Eq '[[:space:]]\?[[:space:]]+\?[[:space:]]*/ hook_error' || fail "untyped hook labels were not normalized"
+run "$TMP_ROOT/hook-untyped" --min-sessions 2 --json > "$TMP_ROOT/hook-untyped.json" 2>/dev/null
+[ $? -eq 1 ] || fail "untyped hook labels should be reported in JSON"
+"$PY" -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert len(d['groups']) == 1, d['groups']
+g=d['groups'][0]
+assert g['sessions'] == 2, g
+assert g['display'] == {'hook': '?', 'event': '?', 'type': 'hook_error'}, g
+" "$TMP_ROOT/hook-untyped.json" || fail "untyped hook labels were not reported safely"
+pass "untyped hook labels are normalized without crashing"
+
 # --- valid JSON still needs the transcript record shapes we access -------------
 mkdir -p "$TMP_ROOT/malformed/projJ"
 {

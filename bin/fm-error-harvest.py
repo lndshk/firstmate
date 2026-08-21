@@ -113,6 +113,7 @@ def display(text: str, limit: int | None = None) -> str:
 
 
 def redact_secrets(text: str) -> str:
+    text = clean_text(text)
     text = _PEM.sub("<REDACTED>", text)
     text = _SECRET_HEADER.sub(r"\1<REDACTED>", text)
     text = _SECRET_ASSIGNMENT.sub(r"\1<REDACTED>", text)
@@ -188,6 +189,16 @@ def denial_key(kind, name, command_identity: str, command_display: str):
     return identity, (display(kind_value, 48) or "?", safe_label(name, 64) or "?", command_display)
 
 
+def hook_key(name, event, atype) -> tuple[str, tuple[str, str, str]]:
+    name_identity, name_display = tool_error_key(name)
+    event_identity, event_display = tool_error_key(event)
+    type_identity, type_display = tool_error_key(atype)
+    identity = hashlib.sha256(
+        (name_identity + "\0" + event_identity + "\0" + type_identity).encode("utf-8")
+    ).hexdigest()
+    return identity, (name_display or "?", event_display or "?", type_display or "?")
+
+
 class Group:
     __slots__ = ("family", "identity", "key", "hits", "sessions", "projects", "first", "last")
 
@@ -223,6 +234,9 @@ class Group:
         elif self.family == "denial":
             result["display"] = {"kind": self.key[0], "tool": self.key[1],
                                  "command": self.key[2]}
+        elif self.family == "hook":
+            result["display"] = {"hook": self.key[0], "event": self.key[1],
+                                 "type": self.key[2]}
         return result
 
 
@@ -348,9 +362,8 @@ def scan_file(path: Path, root: Path, scan: Scan) -> None:
                     continue  # user pressed Esc; says nothing about hook health
                 if atype == "hook_success":
                     continue
-                scan.group("hook", (clean_text(att.get("hookName")) or "?",
-                                    clean_text(att.get("hookEvent")) or "?",
-                                    clean_text(atype) or "?")).add(session, project, ts)
+                identity, label = hook_key(att.get("hookName"), att.get("hookEvent"), atype)
+                scan.group("hook", (identity,), label).add(session, project, ts)
 
 
 def collect(root: Path, days: float, project_filter: str | None):
@@ -434,8 +447,9 @@ def report(scan: Scan, min_sessions: int, top: int) -> int:
                 hook, event, atype = g.key
                 left, right = hook, f"{event} / {atype}"
             star = "*" if len(g.projects) > 1 else " "
+            left_limit = ERROR_DISPLAY_LIMIT if family == "hook" else 16
             print(f"  {len(g.sessions):>4} {len(g.projects):>4}{star}{g.hits:>5}  "
-                  f"{short(g.last):<10}  {display(left, 16):<16} {display(right)}")
+                  f"{short(g.last):<10}  {display(left, left_limit):<16} {display(right)}")
         if len(groups) > top:
             print(f"  ... {len(groups) - top} more not shown (--top)")
         print()
