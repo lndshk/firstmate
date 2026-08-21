@@ -183,6 +183,43 @@ assert '<REDACTED>' in g['display']['signature'], g
 " "$TMP_ROOT/secrets.json" || fail "sensitive tool output leaked into JSON"
 pass "tool-result secrets are redacted from bounded displays and grouping keys"
 
+mkdir -p "$TMP_ROOT/cookie-secrets/projK"
+for n in 1 2; do
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"k%s","name":"Bash","input":{"command":"false"}}]},"timestamp":"2026-08-20T12:00:00Z"}\n' "$n" \
+    > "$TMP_ROOT/cookie-secrets/projK/s${n}.jsonl"
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"k%s","is_error":true,"content":"request failed: Cookie: session=super-secret-%s"}]},"timestamp":"2026-08-20T12:00:01Z"}\n' \
+    "$n" "$n" >> "$TMP_ROOT/cookie-secrets/projK/s${n}.jsonl"
+done
+run "$TMP_ROOT/cookie-secrets" --min-sessions 2 --json > "$TMP_ROOT/cookie-secrets.json" 2>/dev/null
+[ $? -eq 1 ] || fail "cookie failures should be reported"
+"$PY" -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert len(d['groups']) == 1, d['groups']
+g=d['groups'][0]
+assert g['sessions'] == 2, g
+assert 'super-secret' not in json.dumps(d), d
+assert '<REDACTED>' in g['display']['signature'], g
+" "$TMP_ROOT/cookie-secrets.json" || fail "cookie secrets leaked or did not group"
+pass "cookie session secrets are redacted and group across sessions"
+
+mkdir -p "$TMP_ROOT/shared-name/projL" "$TMP_ROOT/shared-name/projM"
+for project in projL projM; do
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"same-%s","name":"Bash","input":{"command":"false"}}]},"timestamp":"2026-08-20T12:00:00Z"}\n' "$project" \
+    > "$TMP_ROOT/shared-name/$project/shared.jsonl"
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"same-%s","is_error":true,"content":"shared transcript failure"}]},"timestamp":"2026-08-20T12:00:01Z"}\n' "$project" \
+    >> "$TMP_ROOT/shared-name/$project/shared.jsonl"
+done
+run "$TMP_ROOT/shared-name" --min-sessions 2 --json > "$TMP_ROOT/shared-name.json" 2>/dev/null
+[ $? -eq 1 ] || fail "same-basename sessions should meet threshold"
+"$PY" -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert len(d['groups']) == 1, d['groups']
+assert d['groups'][0]['sessions'] == 2, d['groups']
+" "$TMP_ROOT/shared-name.json" || fail "same-basename transcripts were not distinct sessions"
+pass "same-basename transcripts in different projects count as two sessions"
+
 # --- denied command labels are also transcript-derived and must be safe --------
 mkdir -p "$TMP_ROOT/denial-secrets/projI"
 for n in 1 2; do

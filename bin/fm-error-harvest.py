@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -78,19 +79,23 @@ _HEX = re.compile(r"\b[0-9a-f]{8,}\b", re.I)
 _NUM = re.compile(r"\b\d{2,}\b")
 _WS = re.compile(r"\s+")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-_AUTHORIZATION = re.compile(
-    r"(?i)(\bauthorization\s*:\s*(?:bearer|basic|token)\s+)([^\s,;]+)"
+_SECRET_KEY = (
+    r"(?:[A-Za-z0-9_.-]*?(?:token|secret|password|passwd|pwd|api[_-]?key|auth|"
+    r"cookie|session|credential|private[_-]?key)[A-Za-z0-9_.-]*)"
 )
 _SECRET_ASSIGNMENT = re.compile(
-    r'''(?ix)(
-        ["']?(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|
-        password|passwd|secret|token)["']?\s*[:=]\s*
-    )(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;]+)'''
+    rf'''(?ix)(
+        (?<![A-Za-z0-9_.-])["']?{_SECRET_KEY}["']?\s*[:=]\s*
+    )(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;)&\]}}]+)'''
 )
-_SECRET_QUERY = re.compile(
-    r"(?i)([?&](?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|password|secret|token)=)([^&#\s]+)"
+_SECRET_HEADER = re.compile(
+    r"(?im)(\b(?:authorization|cookie|set-cookie|x-api-key)\s*:\s*)([^\r\n]*)"
 )
+_BEARER_OR_BASIC = re.compile(r"(?i)(\b(?:bearer|basic)\s+)([A-Za-z0-9+/=_-]+)")
+_JWT = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])")
+_PEM = re.compile(r"-----BEGIN [^-\r\n]{1,64}-----.*?(?:-----END [^-\r\n]{1,64}-----|\Z)", re.I | re.S)
 _KNOWN_SECRET = re.compile(r"\b(?:ghp|gho|ghs|github_pat|sk|xox[baprs])[-_][A-Za-z0-9_=-]{8,}\b", re.I)
+_OPAQUE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z0-9_+/=-]{24,})(?![A-Za-z0-9_])")
 ERROR_DISPLAY_LIMIT = 130
 
 
@@ -108,10 +113,25 @@ def display(text: str, limit: int | None = None) -> str:
 
 
 def redact_secrets(text: str) -> str:
-    text = _AUTHORIZATION.sub(r"\1<REDACTED>", text)
+    text = _PEM.sub("<REDACTED>", text)
+    text = _SECRET_HEADER.sub(r"\1<REDACTED>", text)
     text = _SECRET_ASSIGNMENT.sub(r"\1<REDACTED>", text)
-    text = _SECRET_QUERY.sub(r"\1<REDACTED>", text)
-    return _KNOWN_SECRET.sub("<REDACTED>", text)
+    text = _BEARER_OR_BASIC.sub(r"\1<REDACTED>", text)
+    text = _JWT.sub("<REDACTED>", text)
+    text = _KNOWN_SECRET.sub("<REDACTED>", text)
+
+    def redact_opaque(match):
+        value = match.group(1)
+        counts = defaultdict(int)
+        for char in value:
+            counts[char] += 1
+        entropy = -sum(
+            (count / len(value)) * math.log2(count / len(value))
+            for count in counts.values()
+        )
+        return "<REDACTED>" if entropy >= 3.5 else value
+
+    return _OPAQUE.sub(redact_opaque, text)
 
 
 def signature(text: str) -> str:
@@ -122,7 +142,7 @@ def signature(text: str) -> str:
     UUIDs and paths must go before the generic hex/number rules, or those would eat
     them piecemeal and two instances would still fail to group.
     """
-    t = _UUID.sub("<UUID>", redact_secrets(clean_text(text)))
+    t = _UUID.sub("<UUID>", clean_text(redact_secrets(text)))
     t = _WINPATH.sub("<PATH>", t)
     t = _POSIXPATH.sub("<PATH>", t)
     t = _HEX.sub("<ID>", t)
@@ -231,8 +251,8 @@ class Scan:
         self.newest = ts if self.newest is None else max(self.newest, ts)
 
 
-def scan_file(path: Path, scan: Scan) -> None:
-    session = path.stem
+def scan_file(path: Path, root: Path, scan: Scan) -> None:
+    session = path.relative_to(root).as_posix()
     project = path.parent.name
     scan.projects.add(project)
 
@@ -362,7 +382,7 @@ def collect(root: Path, days: float, project_filter: str | None):
             "This is a failed scan, not a clean result - widen --days or check --root.\n")
         raise SystemExit(2)
     for p, _ in sorted(files, key=lambda q: q[1], reverse=True):
-        scan_file(p, scan)
+        scan_file(p, root, scan)
     if not scan.files:
         sys.stderr.write(
             f"fm-error-harvest: {len(scan.read_errors)} transcript candidate(s) could not be read.\n")
