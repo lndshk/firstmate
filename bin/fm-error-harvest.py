@@ -20,9 +20,8 @@ one task going wrong, that is something structurally broken.
 Three families are harvested:
 
   tool-error  a ``tool_result`` carrying ``is_error``, keyed to the tool that
-              produced it. ``<tool_use_error>`` payloads are stamped by the CLI
-              itself rather than authored by the tool, and are the highest-value
-              signal here.
+              produced it. Its message is reduced to a redacted bounded summary
+              and a digest; transcript tags do not establish provenance.
   denial      a call stopped by a deny rule, the permission prompt, or the auto-mode
               classifier (``toolDenialKind``). Aborts - ``interrupted``/``cancelled``
               - are excluded: a user pressing Esc is not a denial, and counting it as
@@ -51,6 +50,7 @@ reported as a clean bill of health when the scan simply found nothing to read.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -78,6 +78,20 @@ _HEX = re.compile(r"\b[0-9a-f]{8,}\b", re.I)
 _NUM = re.compile(r"\b\d{2,}\b")
 _WS = re.compile(r"\s+")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_AUTHORIZATION = re.compile(
+    r"(?i)(\bauthorization\s*:\s*(?:bearer|basic|token)\s+)([^\s,;]+)"
+)
+_SECRET_ASSIGNMENT = re.compile(
+    r'''(?ix)(
+        ["']?(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|
+        password|passwd|secret|token)["']?\s*[:=]\s*
+    )(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;]+)'''
+)
+_SECRET_QUERY = re.compile(
+    r"(?i)([?&](?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|password|secret|token)=)([^&#\s]+)"
+)
+_KNOWN_SECRET = re.compile(r"\b(?:ghp|gho|ghs|github_pat|sk|xox[baprs])[-_][A-Za-z0-9_=-]{8,}\b", re.I)
+ERROR_DISPLAY_LIMIT = 130
 
 
 def clean_text(text) -> str:
@@ -93,6 +107,13 @@ def display(text: str, limit: int | None = None) -> str:
     return text
 
 
+def redact_secrets(text: str) -> str:
+    text = _AUTHORIZATION.sub(r"\1<REDACTED>", text)
+    text = _SECRET_ASSIGNMENT.sub(r"\1<REDACTED>", text)
+    text = _SECRET_QUERY.sub(r"\1<REDACTED>", text)
+    return _KNOWN_SECRET.sub("<REDACTED>", text)
+
+
 def signature(text: str) -> str:
     """Collapse one error message into a signature that groups its recurrences.
 
@@ -101,12 +122,18 @@ def signature(text: str) -> str:
     UUIDs and paths must go before the generic hex/number rules, or those would eat
     them piecemeal and two instances would still fail to group.
     """
-    t = _UUID.sub("<UUID>", clean_text(text))
+    t = _UUID.sub("<UUID>", redact_secrets(clean_text(text)))
     t = _WINPATH.sub("<PATH>", t)
     t = _POSIXPATH.sub("<PATH>", t)
     t = _HEX.sub("<ID>", t)
     t = _NUM.sub("<N>", t)
     return t
+
+
+def tool_error_key(text: str) -> tuple[str, str]:
+    normalized = signature(text)
+    identity = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return identity, display(normalized, ERROR_DISPLAY_LIMIT)
 
 
 def _text_of(content) -> str:
@@ -129,10 +156,11 @@ def _bash_key(inp) -> str:
 
 
 class Group:
-    __slots__ = ("family", "key", "hits", "sessions", "projects", "first", "last")
+    __slots__ = ("family", "identity", "key", "hits", "sessions", "projects", "first", "last")
 
-    def __init__(self, family, key):
+    def __init__(self, family, identity, key):
         self.family = family
+        self.identity = identity
         self.key = key
         self.hits = 0
         self.sessions = set()
@@ -148,15 +176,18 @@ class Group:
             self.first = ts if self.first is None else min(self.first, ts)
             self.last = ts if self.last is None else max(self.last, ts)
     def as_dict(self):
-        return {
+        result = {
             "family": self.family,
-            "key": list(self.key),
+            "key": list(self.identity),
             "sessions": len(self.sessions),
             "projects": len(self.projects),
             "hits": self.hits,
             "first_seen": self.first,
             "last_seen": self.last,
         }
+        if self.family == "tool-error":
+            result["display"] = {"tool": self.key[0], "signature": self.key[1]}
+        return result
 
 
 class Scan:
@@ -170,11 +201,11 @@ class Scan:
         self.newest = None
         self.read_errors = []
 
-    def group(self, family, key) -> Group:
-        k = (family,) + key
+    def group(self, family, identity, key=None) -> Group:
+        k = (family,) + identity
         g = self.groups.get(k)
         if g is None:
-            g = self.groups[k] = Group(family, key)
+            g = self.groups[k] = Group(family, identity, key if key is not None else identity)
         return g
 
     def note_time(self, ts):
@@ -246,9 +277,8 @@ def scan_file(path: Path, scan: Scan) -> None:
                     if not raw.strip():
                         continue
                     name, _ = names.get(c.get("tool_use_id"), ("?", ""))
-                    # CLI-stamped errors are worth separating: the tool cannot forge them.
-                    stamped = "<tool_use_error>" in raw
-                    scan.group("tool-error", (name, signature(raw), stamped)).add(session, project, ts)
+                    identity, summary = tool_error_key(raw)
+                    scan.group("tool-error", (name, identity), (name, summary)).add(session, project, ts)
                 continue
 
             if kind == "attachment":
@@ -337,8 +367,8 @@ def report(scan: Scan, min_sessions: int, top: int) -> int:
         print(f"  {'sess':>4} {'proj':>4} {'hits':>5}  {'last':<10}  {cols[0]:<16} {cols[1]}")
         for g in groups[:top]:
             if family == "tool-error":
-                name, sig, stamped = g.key
-                left, right = name, ("[cli] " if stamped else "") + display(sig, 130)
+                name, sig = g.key
+                left, right = name, sig
             elif family == "denial":
                 kind, name, bkey = g.key
                 left, right = kind, (f"{name} {bkey}".strip())

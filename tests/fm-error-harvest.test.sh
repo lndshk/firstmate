@@ -68,8 +68,8 @@ skill_miss t2 > "$TMP_ROOT/live/projB/sess2.jsonl"
 out=$(run "$TMP_ROOT/live" --min-sessions 2 2>&1); rc=$?
 [ $rc -eq 1 ] || fail "recurring failure should exit 1 (rc=$rc)"
 printf '%s' "$out" | grep -q 'Unknown skill: axi' || fail "recurring failure not reported"
-printf '%s' "$out" | grep -q '\[cli\]' || fail "CLI-stamped error not marked"
-pass "the same failure across two sessions is reported and exits 1"
+printf '%s' "$out" | grep -q '\[cli\]' && fail "untrusted transcript tag must not claim CLI provenance"
+pass "the same failure across two sessions is reported without forged provenance"
 
 printf '%s' "$out" | grep -qE '^ +2 +2\*' || fail "cross-project marker (*) not set"
 pass "a failure spanning two projects is flagged as structural"
@@ -132,9 +132,11 @@ run "$TMP_ROOT/long" --min-sessions 1 --json > "$TMP_ROOT/long.json" 2>/dev/null
 import json,sys
 groups=json.load(open(sys.argv[1]))['groups']
 assert len(groups)==2, groups
-assert {g['key'][1].rsplit('-', 1)[-1] for g in groups} == {'1', '2'}, groups
+assert len({g['key'][1] for g in groups}) == 2, groups
+assert all(len(g['key'][1]) == 64 for g in groups), groups
+assert all(len(g['display']['signature']) <= 133 for g in groups), groups
 " "$TMP_ROOT/long.json" || fail "long errors sharing a prefix were collapsed"
-pass "long signatures group by their complete normalized value"
+pass "long errors retain distinct fixed-size grouping identities"
 
 mkdir -p "$TMP_ROOT/control/projG"
 for n in 1 2; do
@@ -159,5 +161,26 @@ assert d['groups'] and d['groups'][0]['sessions']==2, d['groups'][:1]
 assert 'sample' not in d['groups'][0], d['groups'][0]
 " "$TMP_ROOT/out.json" || fail "--json output malformed"
 pass "--json emits parseable output without raw transcript samples"
+
+# --- sensitive tool output must never become a report key or display -----------
+mkdir -p "$TMP_ROOT/secrets/projH"
+for n in 1 2; do
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"p%s","name":"Bash","input":{"command":"false"}}]},"timestamp":"2026-08-20T12:00:00Z"}\n' "$n" \
+    > "$TMP_ROOT/secrets/projH/s${n}.jsonl"
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"p%s","is_error":true,"content":"request failed: Authorization: Bearer super-secret-%s"}]},"timestamp":"2026-08-20T12:00:01Z"}\n' \
+    "$n" "$n" >> "$TMP_ROOT/secrets/projH/s${n}.jsonl"
+done
+run "$TMP_ROOT/secrets" --min-sessions 1 --json > "$TMP_ROOT/secrets.json" 2>/dev/null
+[ $? -eq 1 ] || fail "sensitive failures should be reported"
+"$PY" -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert len(d['groups']) == 1, d['groups']
+g=d['groups'][0]
+assert len(g['key'][1]) == 64, g
+assert 'super-secret' not in json.dumps(d), d
+assert '<REDACTED>' in g['display']['signature'], g
+" "$TMP_ROOT/secrets.json" || fail "sensitive tool output leaked into JSON"
+pass "tool-result secrets are redacted from bounded displays and grouping keys"
 
 printf '\nall fm-error-harvest tests passed\n'
