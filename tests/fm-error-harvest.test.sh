@@ -53,6 +53,15 @@ run "$TMP_ROOT/unreadable" >/dev/null 2>&1
 [ $? -eq 2 ] || fail "unreadable transcript candidates should exit 2"
 pass "an unreadable transcript candidate fails the scan"
 
+# --- scan-window inputs must be finite and positive ---------------------------
+for days in nan inf -inf 0 -1; do
+  out=$(run "$TMP_ROOT/empty" --days="$days" 2>&1); rc=$?
+  [ $rc -eq 2 ] || fail "invalid --days $days must be rejected (rc=$rc)"
+  printf '%s' "$out" | grep -Fq -- '--days must be a finite number > 0' || \
+    fail "invalid --days $days error was unclear"
+done
+pass "non-finite and non-positive --days values are rejected before scanning"
+
 # --- recurrence threshold ------------------------------------------------------
 mkdir -p "$TMP_ROOT/live/projA" "$TMP_ROOT/live/projB"
 skill_miss t1 > "$TMP_ROOT/live/projA/sess1.jsonl"

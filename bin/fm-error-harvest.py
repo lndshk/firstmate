@@ -511,6 +511,8 @@ def main(argv=None) -> int:
         ap.error("--min-sessions must be >= 1")
     if args.top < 1:
         ap.error("--top must be >= 1")
+    if not math.isfinite(args.days) or args.days <= 0:
+        ap.error("--days must be a finite number > 0")
 
     scan = collect(args.root, args.days, args.project)
 
