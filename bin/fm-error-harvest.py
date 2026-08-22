@@ -91,14 +91,15 @@ _SECRET_KEY = (
     r"(?:[A-Za-z0-9_.-]*?(?:token|secret|password|passwd|pwd|api[_-]?key|auth|"
     r"cookie|session|credential|private[_-]?key)[A-Za-z0-9_.-]*)"
 )
-_SECRET_CONTINUATION = r"(?:(?:\r\n|\r|\n)[ \t]*[A-Za-z0-9_+/=.-]+(?=\r\n|\r|\n|\Z))*"
+_REDACTION_JOINER = "\ue000"
+_HEADER_BARRIER = "\ue001"
 _SECRET_ASSIGNMENT = re.compile(
     rf'''(?ix)(
         (?<![A-Za-z0-9_.-])["']?{_SECRET_KEY}["']?\s*[:=]\s*
-    )(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;)&\]}}]+{_SECRET_CONTINUATION})'''
+    )(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;)&\]}}]+)'''
 )
 _SECRET_HEADER = re.compile(
-    rf"(?im)(\b(?:authorization|cookie|set-cookie|x-api-key)\s*:\s*)([^\r\n]*{_SECRET_CONTINUATION})"
+    r"(?im)(\b(?:authorization|cookie|set-cookie|x-api-key)\s*:\s*)([^\r\n]*)"
 )
 _BEARER_OR_BASIC = re.compile(r"(?i)(\b(?:bearer|basic)\s+)([A-Za-z0-9+/=_-]+)")
 _JWT = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])")
@@ -127,14 +128,20 @@ def display(text: str, limit: int | None = None) -> str:
 def redact_secrets(text: str) -> str:
     if not isinstance(text, str):
         return ""
+
+    def redact_header(match):
+        return match.group(1).replace(":", _HEADER_BARRIER + ":") + "<REDACTED>"
+
     # Strip inline controls first; see _CONTROL_INLINE. REMOVED rather than spaced: a
     # control inside the key (`pass\x7fword=`) would otherwise split the keyword and defeat
     # detection just as surely as one before the separator. Controls have no display value,
     # and a redactor must fail toward over-redaction, so rejoining is the safe direction.
     text = _CONTROL_INLINE.sub("", text)
     text = _PEM.sub("<REDACTED>", text)
-    text = _SECRET_HEADER.sub(r"\1<REDACTED>", text)
+    text = _SECRET_HEADER.sub(redact_header, text)
+    text = re.sub(r"(?:\r\n|\r|\n)[ \t]*", _REDACTION_JOINER, text)
     text = _SECRET_ASSIGNMENT.sub(r"\1<REDACTED>", text)
+    text = text.replace(_REDACTION_JOINER, " ").replace(_HEADER_BARRIER, "")
     text = _BEARER_OR_BASIC.sub(r"\1<REDACTED>", text)
     text = _JWT.sub("<REDACTED>", text)
     text = _KNOWN_SECRET.sub("<REDACTED>", text)
