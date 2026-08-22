@@ -534,10 +534,6 @@ if [ "${1:-}" = "--key" ]; then
       echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
       exit 1
       ;;
-    *)
-      echo "error: submit to $T returned unexpected verification state: $verdict" >&2
-      exit 1
-      ;;
   esac
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
