@@ -157,7 +157,15 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/frontend-design/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/ops-execution/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -170,6 +178,10 @@
     },
     {
       "path": ".agents/skills/quota-array-dispatch/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/runbook-enforcement/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -237,6 +249,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/captain-hold-lifecycle.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/cd-guard.md",
       "audience": "maintainer-architecture"
     },
@@ -251,10 +267,6 @@
     {
       "path": "docs/configuration.md",
       "audience": "operator-current"
-    },
-    {
-      "path": "docs/captain-hold-lifecycle.md",
-      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/documentation-audiences.md",
