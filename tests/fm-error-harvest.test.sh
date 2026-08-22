@@ -497,6 +497,8 @@ redaction_case "control inside the value"            "'token=sup\x1ber-secret'" 
 redaction_case "tab inside the value"                "'token=sup\ter-secret'"        "er-secret"
 redaction_case "newline-folded value"                "'token=sup\n er-secret'"       "er-secret"
 redaction_case "carriage-folded value"               "'token=sup\r er-secret'"       "er-secret"
+redaction_case "newline-separated value"             "'token=sup\ner-secret'"        "er-secret"
+redaction_case "carriage-separated value"            "'token=sup\rer-secret'"        "er-secret"
 redaction_case "bearer token split by a control"     "'Authorization: Bearer abc\x1bdefghijkl'" "defghijkl"
 
 # A header must redact its value WITHOUT swallowing the line after it.
@@ -509,7 +511,7 @@ try:
     spec.loader.exec_module(m)
 except SystemExit:
     pass
-print(m.untrusted_text("Authorization: Bearer abcdefghijklmnop\n continuation-secret\nrequest failed: timeout"))
+print(m.untrusted_text("Authorization: Bearer abcdefghijklmnop\ncontinuation-secret\nrequest failed: timeout"))
 PYEOF
 )
 case "$out" in
@@ -527,7 +529,7 @@ mkdir -p "$TMP_ROOT/folded-assignment/projV"
 for n in 1 2; do
   printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"fa%s","name":"Bash","input":{"command":"false"}}]}}\n' "$n" \
     > "$TMP_ROOT/folded-assignment/projV/s${n}.jsonl"
-  printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"fa'"$n"'","is_error":true,"content":"token=sup\n er-secret\nrequest failed: timeout"}]}}' \
+  printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"fa'"$n"'","is_error":true,"content":"token=sup\ner-secret\nrequest failed: timeout"}]}}' \
     >> "$TMP_ROOT/folded-assignment/projV/s${n}.jsonl"
 done
 out=$(run "$TMP_ROOT/folded-assignment" --min-sessions 2 2>&1); rc=$?

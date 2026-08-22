@@ -91,13 +91,14 @@ _SECRET_KEY = (
     r"(?:[A-Za-z0-9_.-]*?(?:token|secret|password|passwd|pwd|api[_-]?key|auth|"
     r"cookie|session|credential|private[_-]?key)[A-Za-z0-9_.-]*)"
 )
+_SECRET_CONTINUATION = r"(?:(?:\r\n|\r|\n)[ \t]*[A-Za-z0-9_+/=.-]+(?=\r\n|\r|\n|\Z))*"
 _SECRET_ASSIGNMENT = re.compile(
     rf'''(?ix)(
         (?<![A-Za-z0-9_.-])["']?{_SECRET_KEY}["']?\s*[:=]\s*
-    )(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;)&\]}}]+(?:(?:\r\n|\r|\n)[ \t]+[^\r\n,;)&\]}}]*)*)'''
+    )(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;)&\]}}]+{_SECRET_CONTINUATION})'''
 )
 _SECRET_HEADER = re.compile(
-    r"(?im)(\b(?:authorization|cookie|set-cookie|x-api-key)\s*:\s*)([^\r\n]*(?:(?:\r\n|\r|\n)[ \t]+[^\r\n]*)*)"
+    rf"(?im)(\b(?:authorization|cookie|set-cookie|x-api-key)\s*:\s*)([^\r\n]*{_SECRET_CONTINUATION})"
 )
 _BEARER_OR_BASIC = re.compile(r"(?i)(\b(?:bearer|basic)\s+)([A-Za-z0-9+/=_-]+)")
 _JWT = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])")
