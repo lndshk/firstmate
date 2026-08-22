@@ -239,4 +239,17 @@ if "$queue_pending"; then
     echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
   fi
 fi
+
+# Stall detector: a third hazard neither the wake queue nor watcher liveness can
+# surface - work that is finished, dormant, unrelayed or unlanded, where nothing
+# changed so no wake will ever fire. Fork-only; upstream has no stall concept and
+# no bin/fm-stall-check.sh, so this is guarded on the script being present and
+# executable. A future upstream sync that drops it degrades quietly instead of
+# erroring. --fast skips the pane/process checks so ordinary tool output stays cheap.
+if [ "${FM_GUARD_STALL_CHECK:-1}" != "0" ] && [ -x "$SCRIPT_DIR/fm-stall-check.sh" ]; then
+  stall_signal=$("$SCRIPT_DIR/fm-stall-check.sh" --fast 2>/dev/null | sed -n '1p' || true)
+  if [ -n "$stall_signal" ]; then
+    echo "WARNING: stall detector has findings - run bin/fm-stall-check.sh and act on each line." >&2
+  fi
+fi
 exit 0
