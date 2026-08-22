@@ -289,3 +289,66 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
 }
+
+# required, not merely the title/option words, so agent output discussing the
+# dialog cannot trigger keypresses. Only Retry and Keep waiting are actionable;
+# a menu already highlighting Learn more is deliberately ignored.
+fm_tmux_safety_prompt_selection() {
+  LC_ALL=C awk '
+    BEGIN { stage = 0; choice = "" }
+    /^[[:space:]]*Additional safety checks[[:space:]]*$/ {
+      stage = 1; choice = ""; next
+    }
+    stage == 1 && /^[[:space:]]*>?[[:space:]]*1\.[[:space:]]+Retry with a faster model[[:space:]]*$/ {
+      if ($0 ~ /^[[:space:]]*>/) choice = "retry"
+      stage = 2; next
+    }
+    stage == 2 && /^[[:space:]]*>?[[:space:]]*2\.[[:space:]]+Keep waiting[[:space:]]*$/ {
+      if ($0 ~ /^[[:space:]]*>/) choice = "waiting"
+      stage = 3; next
+    }
+    stage == 3 && /^[[:space:]]*>?[[:space:]]*3\.[[:space:]]+Learn more[[:space:]]*$/ {
+      if ($0 ~ /^[[:space:]]*>/) choice = "other"
+      stage = 4; next
+    }
+    stage == 4 && /^[[:space:]]*Press enter to confirm or esc to go back[[:space:]]*$/ {
+      if (choice == "retry" || choice == "waiting") {
+        print choice
+        found = 1
+        exit 0
+      }
+      exit 1
+    }
+    stage == 1 { next }  # allow the explanatory copy before the options
+    /^[[:space:]]*$/ { next }
+    stage > 1 { stage = 0; choice = "" }
+    END { if (!found) exit 1 }
+  '
+}
+
+# fm_clear_safety_prompt: choose "Keep waiting" in Codex's additional-safety
+# dialog for <target>. Returns 0 only when it sent the verified confirmation
+# keys, 1 when no actionable dialog is present (or auto-clear is disabled/
+# unreadable), and 2 when the menu matched but the clear could not be
+# confirmed - keys may have been sent without effect (e.g. a pane in copy-mode
+# absorbing them). Enter is sent only after a recapture confirms Keep waiting
+# is selected: a Down dropped mid-redraw must not confirm "Retry with a faster
+# model". Safe to call every poll: after Down but before a confirmed Enter, a
+# subsequent call sees Keep waiting selected and submits it without moving to
+# Learn more.
+fm_clear_safety_prompt() {  # <target>
+  local target=$1 tail20 selection
+  [ "${FM_SAFETY_AUTOCLEAR:-1}" != "0" ] || return 1
+  tail20=$(tmux capture-pane -p -t "$target" -S -20 2>/dev/null) || return 1
+  selection=$(printf '%s\n' "$tail20" | fm_tmux_safety_prompt_selection) || return 1
+  if [ "$selection" = retry ]; then
+    tmux send-keys -t "$target" Down 2>/dev/null || return 2
+    sleep "${FM_SAFETY_AUTOCLEAR_DELAY:-0.1}"
+    tail20=$(tmux capture-pane -p -t "$target" -S -20 2>/dev/null) || return 2
+    selection=$(printf '%s\n' "$tail20" | fm_tmux_safety_prompt_selection) || return 2
+    [ "$selection" = waiting ] || return 2
+  fi
+  tmux send-keys -t "$target" Enter 2>/dev/null || return 2
+  return 0
+}
+

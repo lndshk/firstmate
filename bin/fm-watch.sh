@@ -1132,6 +1132,40 @@ EOF
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     key=$(window_key "$w")
+    # Codex can block mid-turn on its additional-safety menu. Clear it before
+    # classifying the recorded crewmate pane so the pause never reads as stale.
+    # Upstream has no handling for this dialog at all (its "safety" code is
+    # shell-glyph classification, a different thing), so this is carried forward
+    # from the fork as #11.
+    # Gated on BOTH the codex harness and the tmux backend: the clear is written
+    # against tmux capture-pane/send-keys, and upstream is now backend-abstracted,
+    # so it must not fire on herdr/zellij/cmux/orca panes. At most
+    # FM_SAFETY_AUTOCLEAR_MAX consecutive attempts - verified clears and
+    # unverified attempts (copy-mode absorbing keys, lookalike content) both
+    # count - after which the pane falls through to stale classification instead
+    # of receiving keypresses forever. The counter resets only once the menu is
+    # confirmed gone.
+    if [ "$(window_harness "$w")" = codex ] && [ "$(window_backend "$w")" = tmux ]; then
+      clearf="$STATE/.count-safety-$key"
+      cleared=$(cat "$clearf" 2>/dev/null || echo 0)
+      if [ "$cleared" -lt "${FM_SAFETY_AUTOCLEAR_MAX:-5}" ]; then
+        fm_clear_safety_prompt "$w"
+        case $? in
+          0)
+            echo $(( cleared + 1 )) > "$clearf"
+            continue
+            ;;
+          2)
+            echo $(( cleared + 1 )) > "$clearf"
+            ;;
+          *)
+            rm -f "$clearf"
+            ;;
+        esac
+      elif ! tmux capture-pane -p -t "$w" -S -20 2>/dev/null | fm_tmux_safety_prompt_selection >/dev/null; then
+        rm -f "$clearf"
+      fi
+    fi
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
