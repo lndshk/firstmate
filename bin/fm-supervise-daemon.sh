@@ -196,6 +196,12 @@ INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
+# Cadence for the away-mode stall-check catch-all, and how long an unresolved
+# finding stays deduped before it alarms again. There is deliberately no disable
+# value for the re-alarm: a permanent suppression is exactly what the sweep exists
+# to prevent. Fork-only (#25); upstream ships no stall detector.
+STALL_CHECK_SCAN_SECS_DEFAULT=300
+STALL_REALARM_SECS_DEFAULT=1800
 HOUSEKEEPING_TICK_DEFAULT=15
 # Max time a buffered escalation may sit undelivered before the daemon retries
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
@@ -965,6 +971,82 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     (repeating bounded re-surface, never a wedge).
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
+# --- away-mode stall-check catch-all (fork-only, #25) -----------------------
+# Upstream's housekeeping scans STATUS LINES, which structurally cannot see two
+# things: an idle secondmate advisor with no time-based wake to trigger on, and
+# a child parked on needs-decision/blocked/failed inside a SEPARATE secondmate
+# home's state dir. bin/fm-stall-check.sh sees both. It re-fires the same finding
+# every sweep by design (no ack mechanism), so findings are deduped by a
+# kind+id identity marker: one escalation per occurrence, not a repeat per tick.
+_stall_finding_key() {  # <fm-stall-check.sh output line>
+  printf '%s' "$1" | awk '{print $1, $2}' | tr -c 'A-Za-z0-9_.-' '_'
+}
+_read_int() {  # <file> <default>
+  local v
+  v=$(cat "$1" 2>/dev/null || true)
+  case "$v" in
+    ''|*[!0-9]*) printf '%s' "$2" ;;
+    *) printf '%s' "$v" ;;
+  esac
+}
+
+stall_check_scan() {  # <state>
+  local state=$1 home line key marker miss misses age now_s realarm current="" added=0 out err diag rc=0
+  home=$(dirname "$state")
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-stallcheck.XXXXXX") || {
+    log "ERROR: stall-check sweep skipped: mktemp failed; away-mode stall findings unavailable this tick (dedup markers preserved)"
+    return 1
+  }
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$FM_DAEMON_DIR/fm-stall-check.sh" 2>"$err") || rc=$?
+  diag=$(tr '\n\t' '  ' < "$err" 2>/dev/null | cut -c1-300)
+  rm -f "$err"
+  if [ "$rc" -ne 0 ]; then
+    log "ERROR: stall-check sweep failed (rc=$rc); away-mode stall findings unavailable this tick (dedup markers preserved): ${diag:-no stderr}"
+    return 1
+  fi
+  now_s=$(_now)
+  realarm=${FM_STALL_REALARM_SECS:-$STALL_REALARM_SECS_DEFAULT}
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key=$(_stall_finding_key "$line")
+    current="$current $key"
+    marker="$state/.subsuper-seen-stallcheck-$key"
+    rm -f "$state/.subsuper-stallcheck-miss-$key"
+    if [ -e "$marker" ]; then
+      age=$(( now_s - $(_read_int "$marker" 0) ))
+      if [ "$realarm" -gt 0 ] && [ "$age" -lt "$realarm" ]; then
+        continue
+      fi
+      log "escalate: stall-check re-alarm after ${age}s unresolved -> $line"
+    else
+      log "escalate: stall-check -> $line"
+    fi
+    escalate_add "$state" "$line"
+    printf '%s\n' "$now_s" > "$marker"
+    added=1
+  done <<< "$out"
+  for marker in "$state"/.subsuper-seen-stallcheck-*; do
+    [ -e "$marker" ] || continue
+    key="${marker##*.subsuper-seen-stallcheck-}"
+    case " $current " in
+      *" $key "*) continue ;;
+    esac
+    miss="$state/.subsuper-stallcheck-miss-$key"
+    misses=$(( $(_read_int "$miss" 0) + 1 ))
+    if [ "$misses" -ge "$STALL_CHECK_MISSES_TO_CLEAR" ]; then
+      rm -f "$marker" "$miss"
+    else
+      printf '%s\n' "$misses" > "$miss"
+    fi
+  done
+  # Mirror handle_wake's escalate path: attempt an immediate flush when
+  # batching is disabled, rather than waiting for job (1)'s own batch-flush
+  # check, which already ran earlier in this same housekeeping() tick.
+  if [ "$added" = 1 ] && [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
+    escalate_flush "$state" || true
+  fi
+}
+
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs
   now=$(_now)
@@ -1086,6 +1168,20 @@ housekeeping() {  # <state>
       escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")
+  fi
+
+  # (4) stall-check scan (see stall_check_scan for the full rationale).
+  # Presence-gated on away mode, like every other injecting path in this daemon:
+  # the sweep exists to cover what away-mode supervision cannot otherwise see, and
+  # while the captain is present firstmate runs the same detector itself at every
+  # heartbeat and wake-handling turn, so running it here too would double-escalate.
+  # Also guarded on the detector being executable, so an upstream sync that drops
+  # bin/fm-stall-check.sh degrades quietly instead of erroring.
+  if afk_active "$state" \
+    && [ -x "$FM_DAEMON_DIR/fm-stall-check.sh" ] \
+    && [ "$(_file_age "$state/.subsuper-last-stallcheck")" -ge "${FM_STALL_CHECK_SCAN_SECS:-$STALL_CHECK_SCAN_SECS_DEFAULT}" ]; then
+    _now > "$state/.subsuper-last-stallcheck"
+    stall_check_scan "$state"
   fi
 }
 
