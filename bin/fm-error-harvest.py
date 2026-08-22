@@ -94,10 +94,10 @@ _SECRET_KEY = (
 _SECRET_ASSIGNMENT = re.compile(
     rf'''(?ix)(
         (?<![A-Za-z0-9_.-])["']?{_SECRET_KEY}["']?\s*[:=]\s*
-    )(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;)&\]}}]+)'''
+    )(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;)&\]}}]+(?:(?:\r\n|\r|\n)[ \t]+[^\r\n,;)&\]}}]*)*)'''
 )
 _SECRET_HEADER = re.compile(
-    r"(?im)(\b(?:authorization|cookie|set-cookie|x-api-key)\s*:\s*)([^\r\n]*)"
+    r"(?im)(\b(?:authorization|cookie|set-cookie|x-api-key)\s*:\s*)([^\r\n]*(?:(?:\r\n|\r|\n)[ \t]+[^\r\n]*)*)"
 )
 _BEARER_OR_BASIC = re.compile(r"(?i)(\b(?:bearer|basic)\s+)([A-Za-z0-9+/=_-]+)")
 _JWT = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])")

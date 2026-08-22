@@ -495,6 +495,8 @@ redaction_case "NUL before the separator"            "'api_key\x00=super-secret'
 redaction_case "control inside the key rejoins it"   "'pass\x7fword=super-secret'"   "super-secret"
 redaction_case "control inside the value"            "'token=sup\x1ber-secret'"      "er-secret"
 redaction_case "tab inside the value"                "'token=sup\ter-secret'"        "er-secret"
+redaction_case "newline-folded value"                "'token=sup\n er-secret'"       "er-secret"
+redaction_case "carriage-folded value"               "'token=sup\r er-secret'"       "er-secret"
 redaction_case "bearer token split by a control"     "'Authorization: Bearer abc\x1bdefghijkl'" "defghijkl"
 
 # A header must redact its value WITHOUT swallowing the line after it.
@@ -507,15 +509,42 @@ try:
     spec.loader.exec_module(m)
 except SystemExit:
     pass
-print(m.untrusted_text("Authorization: Bearer abcdefghijklmnop\nrequest failed: timeout"))
+print(m.untrusted_text("Authorization: Bearer abcdefghijklmnop\n continuation-secret\nrequest failed: timeout"))
 PYEOF
 )
 case "$out" in
   *abcdefghijklmnop*) fail "header value leaked: $out" ;;
 esac
 case "$out" in
+  *continuation-secret*) fail "folded header value leaked: $out" ;;
+esac
+case "$out" in
   *timeout*) pass "a redacted header does not swallow the failure text after it" ;;
   *) fail "header redaction swallowed the following error text: $out" ;;
 esac
+
+mkdir -p "$TMP_ROOT/folded-assignment/projV"
+for n in 1 2; do
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"fa%s","name":"Bash","input":{"command":"false"}}]}}\n' "$n" \
+    > "$TMP_ROOT/folded-assignment/projV/s${n}.jsonl"
+  printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"fa'"$n"'","is_error":true,"content":"token=sup\n er-secret\nrequest failed: timeout"}]}}' \
+    >> "$TMP_ROOT/folded-assignment/projV/s${n}.jsonl"
+done
+out=$(run "$TMP_ROOT/folded-assignment" --min-sessions 2 2>&1); rc=$?
+[ $rc -eq 1 ] || fail "folded assignments should be reported (rc=$rc)"
+case "$out" in
+  *er-secret*) fail "folded assignment leaked into text report: $out" ;;
+esac
+printf '%s' "$out" | grep -Fq 'request failed: timeout' || fail "folded assignment swallowed following error text"
+run "$TMP_ROOT/folded-assignment" --min-sessions 2 --json > "$TMP_ROOT/folded-assignment.json" 2>/dev/null
+[ $? -eq 1 ] || fail "folded assignments should be reported in JSON"
+"$PY" -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+encoded=json.dumps(d)
+assert 'er-secret' not in encoded, d
+assert 'request failed: timeout' in encoded, d
+" "$TMP_ROOT/folded-assignment.json" || fail "folded assignment redaction was incomplete"
+pass "folded assignments redact through the executable report interface"
 
 printf '\nall fm-error-harvest tests passed\n'
