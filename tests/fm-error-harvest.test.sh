@@ -542,6 +542,21 @@ try:
     spec.loader.exec_module(m)
 except SystemExit:
     pass
+print(m.redact_secrets("gggggggggggg hhhhhhhhhhhh"))
+PYEOF
+)
+[ "$out" = "gggggggggggg hhhhhhhhhhhh" ] || fail "low-entropy opaque text lost its boundary"
+pass "low-entropy opaque text preserves its boundary"
+
+out=$(PYTHONDONTWRITEBYTECODE=1 "$PY" - <<'PYEOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("h", "bin/fm-error-harvest.py")
+m = importlib.util.module_from_spec(spec)
+sys.argv = ["h"]
+try:
+    spec.loader.exec_module(m)
+except SystemExit:
+    pass
 redacted = m.redact_secrets("token=sup\u00a0er-secret")
 assert m.clean_text(redacted) == redacted, redacted
 PYEOF

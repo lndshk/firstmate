@@ -90,19 +90,7 @@ _SECRET_VALUE = rf"{_SECRET_VALUE_PART}(?:\s+{_SECRET_VALUE_PART})*"
 _TOKEN_PART = r"[^\s,;:&)\]\}}]+"
 _TOKEN_VALUE = rf"{_TOKEN_PART}(?:\s+{_TOKEN_PART})*"
 _JWT_PART = r"[A-Za-z0-9_-]+(?:\s+[A-Za-z0-9_-]+)*"
-_SECRET_ASSIGNMENT = re.compile(
-    rf'''(?ix)(
-        (?<![A-Za-z0-9_.-])["']?{_SECRET_KEY}["']?\s*[:=]\s*
-    )(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;)&\]}}]+)'''
-)
-_SECRET_HEADER = re.compile(
-    r"(?im)(\b(?:authorization|cookie|set-cookie|x-api-key)\s*:\s*)([^\r\n]*)"
-)
-_BEARER_OR_BASIC = re.compile(r"(?i)(\b(?:bearer|basic)\s+)([A-Za-z0-9+/=_-]+)")
-_JWT = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])")
 _PEM = re.compile(r"-----BEGIN [^-\r\n]{1,64}-----.*?(?:-----END [^-\r\n]{1,64}-----|\Z)", re.I | re.S)
-_KNOWN_SECRET = re.compile(r"\b(?:ghp|gho|ghs|github_pat|sk|xox[baprs])[-_][A-Za-z0-9_=-]{8,}\b", re.I)
-_OPAQUE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z0-9_+/=-]{24,})(?![A-Za-z0-9_])")
 _SECRET_ASSIGNMENT = re.compile(
     rf'''(?ix)(
         (?<![A-Za-z0-9_.-])["']?{_SECRET_KEY}["']?\s*[:=]\s*
@@ -163,7 +151,7 @@ def redact_secrets(text: str) -> str:
             (count / len(value)) * math.log2(count / len(value))
             for count in counts.values()
         )
-        return "<REDACTED>" if entropy >= 3.5 else value
+        return "<REDACTED>" if entropy >= 3.5 else raw_value
 
     return _OPAQUE.sub(redact_opaque, text)
 
