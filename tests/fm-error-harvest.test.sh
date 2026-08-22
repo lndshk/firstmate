@@ -477,10 +477,10 @@ pass "negative --top is rejected before reporting"
 # the fix.
 redaction_case() {  # <label> <python-repr-of-input> <needle-that-must-not-appear>
   local label=$1 src=$2 needle=$3 out
-  out=$(PYTHONDONTWRITEBYTECODE=1 "$PY" - "$src" <<'PYEOF'
-import importlib.util, sys
+  out=$(PYTHONDONTWRITEBYTECODE=1 FM_HARVEST_PATH="$HARVEST" "$PY" - "$src" <<'PYEOF'
+import importlib.util, os, sys
 src = eval(sys.argv[1])          # read BEFORE argv is replaced for the module load
-spec = importlib.util.spec_from_file_location("h", "bin/fm-error-harvest.py")
+spec = importlib.util.spec_from_file_location("h", os.environ["FM_HARVEST_PATH"])
 m = importlib.util.module_from_spec(spec)
 sys.argv = ["h"]
 try:
@@ -516,9 +516,9 @@ redaction_case "split bearer value"                  "'Bearer abcdefghijklmno\np
 redaction_case "split JWT"                           "'abcdefgh\nijkl.mnopqrst\nuvwx.yzABCDEF\nGHIJ'" "GHIJ"
 redaction_case "split opaque value"                  "'ABCDEFGHIJKLMNOP\nQRSTUVWXYZ012345'" "QRSTUVWXYZ012345"
 
-out=$(PYTHONDONTWRITEBYTECODE=1 "$PY" - <<'PYEOF'
-import importlib.util, sys
-spec = importlib.util.spec_from_file_location("h", "bin/fm-error-harvest.py")
+out=$(PYTHONDONTWRITEBYTECODE=1 FM_HARVEST_PATH="$HARVEST" "$PY" - <<'PYEOF'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("h", os.environ["FM_HARVEST_PATH"])
 m = importlib.util.module_from_spec(spec)
 sys.argv = ["h"]
 try:
@@ -533,9 +533,9 @@ case "$out" in
 esac
 pass "default excerpts exclude allowlist-external secret material"
 
-out=$(PYTHONDONTWRITEBYTECODE=1 "$PY" - <<'PYEOF'
-import importlib.util, sys
-spec = importlib.util.spec_from_file_location("h", "bin/fm-error-harvest.py")
+out=$(PYTHONDONTWRITEBYTECODE=1 FM_HARVEST_PATH="$HARVEST" "$PY" - <<'PYEOF'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("h", os.environ["FM_HARVEST_PATH"])
 m = importlib.util.module_from_spec(spec)
 sys.argv = ["h"]
 try:
@@ -548,9 +548,9 @@ PYEOF
 [ "$out" = "gggggggggggg hhhhhhhhhhhh" ] || fail "low-entropy opaque text lost its boundary"
 pass "low-entropy opaque text preserves its boundary"
 
-out=$(PYTHONDONTWRITEBYTECODE=1 "$PY" - <<'PYEOF'
-import importlib.util, sys
-spec = importlib.util.spec_from_file_location("h", "bin/fm-error-harvest.py")
+out=$(PYTHONDONTWRITEBYTECODE=1 FM_HARVEST_PATH="$HARVEST" "$PY" - <<'PYEOF'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("h", os.environ["FM_HARVEST_PATH"])
 m = importlib.util.module_from_spec(spec)
 sys.argv = ["h"]
 try:
@@ -564,9 +564,9 @@ PYEOF
 pass "redacted output is already canonical"
 
 # A header must redact its value WITHOUT swallowing the line after it.
-out=$(PYTHONDONTWRITEBYTECODE=1 "$PY" - <<'PYEOF'
-import importlib.util, sys
-spec = importlib.util.spec_from_file_location("h", "bin/fm-error-harvest.py")
+out=$(PYTHONDONTWRITEBYTECODE=1 FM_HARVEST_PATH="$HARVEST" "$PY" - <<'PYEOF'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("h", os.environ["FM_HARVEST_PATH"])
 m = importlib.util.module_from_spec(spec)
 sys.argv = ["h"]
 try:
