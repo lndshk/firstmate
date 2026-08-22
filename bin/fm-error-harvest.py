@@ -79,15 +79,17 @@ _POSIXPATH = re.compile(r"/(?:home|mnt|tmp|usr|var|opt|etc)/[^\s\"']{2,}")
 _HEX = re.compile(r"\b[0-9a-f]{8,}\b", re.I)
 _NUM = re.compile(r"\b\d{2,}\b")
 _WS = re.compile(r"\s+")
+_DISPLAY_ALLOWED = re.compile(r"[^A-Za-z0-9 ._:/()\-]+")
+_SHOW_DETAIL = False
 _SECRET_KEY = (
     r"(?:[A-Za-z0-9_.-]*?(?:token|secret|password|passwd|pwd|api[_-]?key|auth|"
     r"cookie|session|credential|private[_-]?key)[A-Za-z0-9_.-]*)"
 )
 _SECRET_VALUE_PART = r"[^\s,;:&)\]\}}]+"
-_SECRET_VALUE = rf"{_SECRET_VALUE_PART}(?:\s+{_SECRET_VALUE_PART}){{0,31}}"
-_TOKEN_PART = r"[A-Za-z0-9_+/=~.-]+"
-_TOKEN_VALUE = rf"{_TOKEN_PART}(?:\s+{_TOKEN_PART}){{0,31}}"
-_JWT_PART = r"[A-Za-z0-9_-]+(?:\s+[A-Za-z0-9_-]+){0,31}"
+_SECRET_VALUE = rf"{_SECRET_VALUE_PART}(?:\s+{_SECRET_VALUE_PART})*"
+_TOKEN_PART = r"[^\s,;:&)\]\}}]+"
+_TOKEN_VALUE = rf"{_TOKEN_PART}(?:\s+{_TOKEN_PART})*"
+_JWT_PART = r"[A-Za-z0-9_-]+(?:\s+[A-Za-z0-9_-]+)*"
 _SECRET_ASSIGNMENT = re.compile(
     rf'''(?ix)(
         (?<![A-Za-z0-9_.-])["']?{_SECRET_KEY}["']?\s*[:=]\s*
@@ -130,6 +132,9 @@ def clean_text(text) -> str:
 
 def display(text: str, limit: int | None = None) -> str:
     text = clean_text(text)
+    if not _SHOW_DETAIL:
+        text = _WS.sub(" ", _DISPLAY_ALLOWED.sub(" ", text)).strip()
+        limit = min(limit or 120, 120)
     if limit is not None and len(text) > limit:
         return text[:limit] + "..."
     return text
@@ -540,7 +545,12 @@ def main(argv=None) -> int:
     ap.add_argument("--top", type=int, default=25, help="rows per family (default: 25)")
     ap.add_argument("--project", default=None, help="only projects whose dir name contains this")
     ap.add_argument("--json", action="store_true", dest="as_json", help="emit JSON")
+    ap.add_argument("--show-detail", action="store_true",
+                    help="print transcript-derived text that may contain credentials")
     args = ap.parse_args(argv)
+
+    global _SHOW_DETAIL
+    _SHOW_DETAIL = args.show_detail
 
     if args.min_sessions < 1:
         ap.error("--min-sessions must be >= 1")

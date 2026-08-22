@@ -80,6 +80,14 @@ printf '%s' "$out" | grep -q 'Unknown skill: axi' || fail "recurring failure not
 printf '%s' "$out" | grep -q '\[cli\]' && fail "untrusted transcript tag must not claim CLI provenance"
 pass "the same failure across two sessions is reported without forged provenance"
 
+case "$out" in
+  *'<tool_use_error>'*) fail "default output retained disallowed transcript characters" ;;
+esac
+out=$(run "$TMP_ROOT/live" --min-sessions 2 --show-detail 2>&1); rc=$?
+[ $rc -eq 1 ] || fail "detail mode should retain recurring findings (rc=$rc)"
+printf '%s' "$out" | grep -Fq '<tool_use_error>' || fail "--show-detail did not expose full detail"
+pass "detail mode is required for full transcript text"
+
 printf '%s' "$out" | grep -qE '^ +2 +2\*' || fail "cross-project marker (*) not set"
 pass "a failure spanning two projects is flagged as structural"
 
@@ -124,7 +132,7 @@ mkdir -p "$TMP_ROOT/sig/projE"
 } > "$TMP_ROOT/sig/projE/s2.jsonl"
 out=$(run "$TMP_ROOT/sig" --min-sessions 2 2>&1); rc=$?
 [ $rc -eq 1 ] || fail "differing paths/numbers should still group (rc=$rc)"
-printf '%s' "$out" | grep -q '<PATH>' || fail "path not normalised in signature"
+printf '%s' "$out" | grep -q 'PATH' || fail "path not normalised in signature"
 pass "the same fault with different paths and counts groups into one signature"
 
 mkdir -p "$TMP_ROOT/long/projF"
@@ -188,7 +196,7 @@ assert len(d['groups']) == 1, d['groups']
 g=d['groups'][0]
 assert len(g['key'][1]) == 64, g
 assert 'super-secret' not in json.dumps(d), d
-assert '<REDACTED>' in g['display']['signature'], g
+assert 'REDACTED' in g['display']['signature'], g
 " "$TMP_ROOT/secrets.json" || fail "sensitive tool output leaked into JSON"
 pass "tool-result secrets are redacted from bounded displays and grouping keys"
 
@@ -208,7 +216,7 @@ assert len(d['groups']) == 1, d['groups']
 g=d['groups'][0]
 assert g['sessions'] == 2, g
 assert 'super-secret' not in json.dumps(d), d
-assert '<REDACTED>' in g['display']['signature'], g
+assert 'REDACTED' in g['display']['signature'], g
 " "$TMP_ROOT/cookie-secrets.json" || fail "cookie secrets leaked or did not group"
 pass "cookie session secrets are redacted and group across sessions"
 
@@ -272,8 +280,8 @@ assert len(d['groups']) == 1, d['groups']
 encoded=json.dumps(d)
 assert 'super' not in encoded and 'secret' not in encoded, d
 g=d['groups'][0]
-assert '<REDACTED>' in g['display']['command'], g
-assert '<REDACTED>' in g['display']['kind'], g
+assert 'REDACTED' in g['display']['command'], g
+assert 'REDACTED' in g['display']['kind'], g
 " "$TMP_ROOT/control-denial-secrets.json" || fail "control-split secret leaked into JSON"
 pass "denial labels redact control-split assignments before normalization"
 
@@ -301,7 +309,7 @@ done
 out=$(run "$TMP_ROOT/hook-secrets" --min-sessions 2 2>&1); rc=$?
 [ $rc -eq 1 ] || fail "recurring hook errors should be reported (rc=$rc)"
 case "$out" in *super-secret*) fail "sensitive hook label leaked into text report";; esac
-printf '%s' "$out" | grep -Fq 'deploy token=<REDACTED>' || fail "redacted hook label not reported"
+printf '%s' "$out" | grep -Fq 'deploy token REDACTED' || fail "redacted hook label not reported"
 run "$TMP_ROOT/hook-secrets" --min-sessions 2 --json > "$TMP_ROOT/hook-secrets.json" 2>/dev/null
 [ $? -eq 1 ] || fail "recurring hook errors should be reported in JSON"
 "$PY" -c "
@@ -312,7 +320,7 @@ g=d['groups'][0]
 assert g['sessions'] == 2, g
 assert len(g['key']) == 1 and len(g['key'][0]) == 64, g
 assert 'super-secret' not in json.dumps(d), d
-assert g['display']['hook'] == 'deploy token=<REDACTED>', g
+assert g['display']['hook'] == 'deploy token REDACTED', g
 " "$TMP_ROOT/hook-secrets.json" || fail "sensitive hook label leaked or did not group"
 pass "hook labels are redacted and group across sessions"
 
@@ -324,7 +332,7 @@ for n in 1 2; do
 done
 out=$(run "$TMP_ROOT/hook-untyped" --min-sessions 2 2>&1); rc=$?
 [ $rc -eq 1 ] || fail "untyped hook labels must not crash the scan (rc=$rc)"
-printf '%s\n' "$out" | grep -Eq '[[:space:]]\?[[:space:]]+\?[[:space:]]*/ hook_error' || fail "untyped hook labels were not normalized"
+printf '%s\n' "$out" | grep -Eq '[[:space:]]+/ hook_error' || fail "untyped hook labels were not normalized"
 run "$TMP_ROOT/hook-untyped" --min-sessions 2 --json > "$TMP_ROOT/hook-untyped.json" 2>/dev/null
 [ $? -eq 1 ] || fail "untyped hook labels should be reported in JSON"
 "$PY" -c "
@@ -384,7 +392,7 @@ import json,sys
 d=json.load(open(sys.argv[1]))
 assert len(d['groups']) == 1, d['groups']
 sig=d['groups'][0]['display']['signature']
-assert '<REDACTED>' in sig and 'timeout' in sig, sig
+assert 'REDACTED' in sig and 'timeout' in sig, sig
 assert 'super-secret' not in json.dumps(d), d
 " "$TMP_ROOT/multiline-header.json" || fail "multiline header redaction lost failure detail"
 pass "multiline header redaction preserves the failure detail"
@@ -466,8 +474,7 @@ pass "negative --top is rejected before reporting"
 # control byte between key and separator, or inside the key itself, defeated every
 # assignment pattern because \s does not match C0/C1 controls - the redactor declined and
 # clean_text() then repaired the string into a readable secret. Verified leaking before
-# the fix. Newlines are deliberately NOT collapsed here, or a header would swallow the
-# error text after it (review-14, in reverse).
+# the fix.
 redaction_case() {  # <label> <python-repr-of-input> <needle-that-must-not-appear>
   local label=$1 src=$2 needle=$3 out
   out=$(PYTHONDONTWRITEBYTECODE=1 "$PY" - "$src" <<'PYEOF'
@@ -508,6 +515,23 @@ redaction_case "folded header value"                 "'Authorization: Bearer abc
 redaction_case "split bearer value"                  "'Bearer abcdefghijklmno\npqrstuvwxyz0123'" "pqrstuvwxyz0123"
 redaction_case "split JWT"                           "'abcdefgh\nijkl.mnopqrst\nuvwx.yzABCDEF\nGHIJ'" "GHIJ"
 redaction_case "split opaque value"                  "'ABCDEFGHIJKLMNOP\nQRSTUVWXYZ012345'" "QRSTUVWXYZ012345"
+
+out=$(PYTHONDONTWRITEBYTECODE=1 "$PY" - <<'PYEOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("h", "bin/fm-error-harvest.py")
+m = importlib.util.module_from_spec(spec)
+sys.argv = ["h"]
+try:
+    spec.loader.exec_module(m)
+except SystemExit:
+    pass
+print(m.display(m.redact_secrets("Authorization: Bearer super$secret")))
+PYEOF
+)
+case "$out" in
+  *super*|*secret*) fail "default excerpt leaked an allowlist-external secret: $out" ;;
+esac
+pass "default excerpts exclude allowlist-external secret material"
 
 out=$(PYTHONDONTWRITEBYTECODE=1 "$PY" - <<'PYEOF'
 import importlib.util, sys
