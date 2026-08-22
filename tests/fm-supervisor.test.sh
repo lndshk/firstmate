@@ -951,25 +951,31 @@ FM_ROOT_OVERRIDE="$ROOT_OVERRIDE_HOME" \
 [ -s "$ROOT_OVERRIDE_HOME/state/board/board.html" ] \
   || fail "standalone board ignored root override"
 
+OWNERSHIP_HOME="$TMP_ROOT/ownership-home"
+OWNERSHIP_BOARD="$TMP_ROOT/ownership-board"
 OTHER_HOME="$TMP_ROOT/other-home"
 OTHER_BOARD="$TMP_ROOT/other-board"
-mkdir -p "$OTHER_HOME/state" "$OTHER_BOARD"
+mkdir -p "$OWNERSHIP_HOME/state" "$OWNERSHIP_BOARD" "$OTHER_HOME/state" "$OTHER_BOARD"
+FM_SUPERVISOR_INTERVAL=1 run_supervisor_home "$OWNERSHIP_HOME" "$OWNERSHIP_BOARD" start >/dev/null \
+  || fail "ownership-test supervisor start failed"
+ownership_previous_pid=$(cat "$OWNERSHIP_HOME/state/.firstmate-supervisor.pid" 2>/dev/null || true)
+case "$ownership_previous_pid" in ''|*[!0-9]*) fail "ownership-test supervisor did not publish a PID receipt" ;; esac
 FM_SUPERVISOR_INTERVAL=1 run_supervisor_home "$OTHER_HOME" "$OTHER_BOARD" start >/dev/null \
   || fail "other-home supervisor start failed"
 other_pid=$(cat "$OTHER_HOME/state/.firstmate-supervisor.pid" 2>/dev/null || true)
 case "$other_pid" in ''|*[!0-9]*) fail "other-home supervisor did not publish a PID receipt" ;; esac
-kill "$second_pid" 2>/dev/null || fail "could not stop current-home supervisor for ownership test"
+kill "$ownership_previous_pid" 2>/dev/null || fail "could not stop ownership-test supervisor"
 for _ in 1 2 3 4 5; do
-  kill -0 "$second_pid" 2>/dev/null || break
+  kill -0 "$ownership_previous_pid" 2>/dev/null || break
   sleep 1
 done
-kill -0 "$second_pid" 2>/dev/null && fail "current-home supervisor did not stop for ownership test"
-mkdir -p "$HOME_DIR/state/.firstmate-supervisor.lock"
-printf '%s\n' "$other_pid" > "$HOME_DIR/state/.firstmate-supervisor.lock/pid"
-printf '%s\n' "$other_pid" > "$HOME_DIR/state/.firstmate-supervisor.pid"
-FM_SUPERVISOR_INTERVAL=1 run_supervisor restart >/dev/null \
+kill -0 "$ownership_previous_pid" 2>/dev/null && fail "ownership-test supervisor did not stop"
+mkdir -p "$OWNERSHIP_HOME/state/.firstmate-supervisor.lock"
+printf '%s\n' "$other_pid" > "$OWNERSHIP_HOME/state/.firstmate-supervisor.lock/pid"
+printf '%s\n' "$other_pid" > "$OWNERSHIP_HOME/state/.firstmate-supervisor.pid"
+FM_SUPERVISOR_INTERVAL=1 run_supervisor_home "$OWNERSHIP_HOME" "$OWNERSHIP_BOARD" restart >/dev/null \
   || fail "restart did not recover from another home's reused PID"
-own_pid=$(cat "$HOME_DIR/state/.firstmate-supervisor.pid" 2>/dev/null || true)
+own_pid=$(cat "$OWNERSHIP_HOME/state/.firstmate-supervisor.pid" 2>/dev/null || true)
 case "$own_pid" in ''|*[!0-9]*) fail "ownership-safe restart did not publish a PID receipt" ;; esac
 [ "$own_pid" != "$other_pid" ] || fail "restart accepted another home's supervisor as owner"
 kill -0 "$other_pid" 2>/dev/null || fail "restart terminated another home's supervisor"

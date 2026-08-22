@@ -239,6 +239,7 @@ ship them, so an upstream sync will never mention them and they are easy to lose
 | `bin/fm-board.sh` | Renders the Firstmate Board from supervisor state. |
 | `bin/fm-windows-scratch-sweep.sh` / `.ps1` | WSL-only stale Windows scratch cleanup, narrowly scoped and process-checked before every delete. |
 | `bin/fm-local-compat.sh` | Compatibility shims for tmux pane helpers upstream generalised into its backend API, plus the composer Escape probe upstream removed. Kept in its own file so upstream syncs never conflict over it. |
+| `bin/fm-error-harvest.py` | Read-only Python 3 tool. Groups recurring tool errors, denials and hook failures across Claude Code transcripts, ranked by how many sessions each touches rather than raw hit count. Report text is untrusted transcript content, printed as-is. |
 
 Local-only test suites carry a `-local` suffix (`tests/*-local.test.sh`) so an upstream sync
 can replace the shared suite without silently dropping this fork's coverage.

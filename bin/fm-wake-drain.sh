@@ -290,7 +290,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
 DRAIN_LOCK_HELD=true
 
 if [ -n "$ACK_THROUGH" ]; then

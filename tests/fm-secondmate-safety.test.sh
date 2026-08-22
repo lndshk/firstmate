@@ -1507,6 +1507,11 @@ test_fm_send_refuses_bare_window_without_home_meta() {
   fakebin=$(make_fake_tmux "$TMP_ROOT/send-fake")
   log="$TMP_ROOT/send-fake/tmux.log"
   err="$TMP_ROOT/send-fake/send.err"
+  # This fake does not model composer mutation, so expose the empty prompt that
+  # a successfully submitted steer leaves behind.  Submit acknowledgement is
+  # exercised separately by fm-send-swallow.test.sh; this case covers home
+  # scoped bare-window resolution.
+  printf '› \n' > "$TMP_ROOT/send-fake/pane.txt"
 
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW="other-session:fm-missing" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/send-fake/pane.txt" \
     "$ROOT/bin/fm-send.sh" fm-missing 'wrong home' >/dev/null 2>"$err"; then
