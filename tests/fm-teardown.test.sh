@@ -105,7 +105,8 @@ SH
 # $case_dir/nm.log recording its args, cwd, and the git branch at that cwd, so
 # tests can assert whether/where/on-which-branch `axi abort` ran. Args: case_dir
 add_logging_no_mistakes() {
-  local case_dir=$1 log="$case_dir/nm.log"
+  local case_dir=$1
+  local log="$case_dir/nm.log"
   : > "$log"
   cat > "$case_dir/fakebin/no-mistakes" <<SH
 #!/usr/bin/env bash
@@ -149,7 +150,8 @@ SH
 # up: merge_commit_sha and merged_at at column 0, and base.sha in its own block.
 # Args: case_dir merged_value head_sha
 add_gh_axi_pr() {
-  local case_dir=$1 merged=$2 sha=$3 body="$case_dir/gh-axi-body.txt"
+  local case_dir=$1 merged=$2 sha=$3
+  local body="$case_dir/gh-axi-body.txt"
   {
     printf 'number: 7\n'
     printf 'state: closed\n'

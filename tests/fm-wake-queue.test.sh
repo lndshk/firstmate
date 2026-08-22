@@ -171,9 +171,8 @@ test_daemon_state_root_uses_fm_home() {
 append_wake() {
   local state=$1 kind=$2 key=$3 payload=$4
   (
-    export FM_STATE_OVERRIDE="$state"
     # shellcheck disable=SC1090
-    . "$LIB"
+    FM_STATE_OVERRIDE="$state" . "$LIB"
     fm_wake_append "$kind" "$key" "$payload"
   )
 }
@@ -237,6 +236,41 @@ test_concurrent_append_and_drain() {
   unique=$(awk -F '\t' '{ keys[$4] = 1 } END { for (k in keys) count++; print count + 0 }' "$all")
   [ "$unique" -eq 40 ] || fail "expected 40 unique keys, got $unique"
   pass "concurrent append plus drain preserves queue records"
+}
+
+test_delayed_receipt_publication_does_not_lose_lock_ownership() {
+  local dir state ready delayed_pid out count
+  if ! command -v flock >/dev/null 2>&1; then
+    pass "delayed receipt publication check skipped: no flock(1) on this host"
+    return
+  fi
+  dir=$(make_case delayed-receipt)
+  state="$dir/state"
+  ready="$dir/receipt-opened"
+  out="$dir/drain.out"
+
+  (
+    export FM_STATE_OVERRIDE="$state" FM_LOCK_STALE_AFTER=0
+    # shellcheck disable=SC1090
+    . "$LIB"
+    # The pid file is opened before this function runs.  Delaying here
+    # deterministically recreates the old mkdir-to-receipt handoff window.
+    fm_current_pid() {
+      : > "$ready"
+      sleep 0.3
+      printf '%s\n' "${BASHPID:-$$}"
+    }
+    fm_wake_append signal delayed "signal: delayed"
+  ) &
+  delayed_pid=$!
+  while [ ! -e "$ready" ]; do sleep 0.01; done
+  append_wake "$state" signal contender "signal: contender" \
+    || fail "contender append failed while receipt publication was delayed"
+  wait "$delayed_pid" || fail "delayed append lost lock ownership"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "delayed receipt drain failed"
+  count=$(awk 'NF { count++ } END { print count + 0 }' "$out")
+  [ "$count" -eq 2 ] || fail "expected both delayed-receipt wakes, got $count"
+  pass "delayed PID receipt publication retains exclusive wake ownership"
 }
 
 test_signal_catchup_without_running_watcher() {
@@ -1936,6 +1970,7 @@ SH
 
 test_daemon_state_root_uses_fm_home
 test_concurrent_append_and_drain
+test_delayed_receipt_publication_does_not_lose_lock_ownership
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
 test_check_output_is_queued
