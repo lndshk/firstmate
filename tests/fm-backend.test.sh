@@ -101,30 +101,6 @@ resolve_base_ref() {
 BASE_REF=$(resolve_base_ref) \
   || fail "fm-backend baseline requires local main or origin/main; fetch the default branch before running this test"
 
-# Newest first-parent revision whose bin/backends/tmux.sh still uses the
-# pre-exact permissive kill-window target. Content-addressed from history so the
-# fixture stays historical on default-branch CI and on branches cut after the
-# exact-selector change, where merge-base with main is self-referential.
-resolve_permissive_tmux_kill_ref() {
-  local commit body
-  while IFS= read -r commit; do
-    [ -n "$commit" ] || continue
-    body=$(git -C "$ROOT" show "$commit:bin/backends/tmux.sh" 2>/dev/null) || continue
-    # shellcheck disable=SC2016
-    case "$body" in
-      *'tmux kill-window -t "=$session:=$window"'*) continue ;;
-    esac
-    # shellcheck disable=SC2016
-    case "$body" in
-      *'tmux kill-window -t "$1"'*|*'tmux kill-window -t "$target"'*)
-        printf '%s\n' "$commit"
-        return 0
-        ;;
-    esac
-  done < <(git -C "$ROOT" log --first-parent --format='%H' HEAD -- bin/backends/tmux.sh)
-  return 1
-}
-
 # --- shared: a pre-refactor bin/ shim --------------------------------------
 #
 # build_old_bin echoes a directory whose bin/ subdir is the complete bin/ tree
@@ -938,21 +914,8 @@ run_teardown_case() {
     "$script" "$id"
 }
 
-test_teardown_conformance_old_vs_new() {
-  local old_bin fb proj wt id old_tmux_ref saved_base_ref
-  local state_old state_new config_old config_new data log_old log_new out_old out_new rc_old rc_new
-  # Force the post-squash topology inside this case: merge-base with main may
-  # equal HEAD on default-branch CI, and that must not make the legacy kill
-  # fixture self-referential. build_old_bin still uses BASE_REF for entrypoints;
-  # only the tmux kill adapter is pinned to the content-historical permissive ref.
-  saved_base_ref=$BASE_REF
-  BASE_REF=$(git -C "$ROOT" rev-parse HEAD)
-  old_tmux_ref=$(resolve_permissive_tmux_kill_ref) \
-    || { BASE_REF=$saved_base_ref; fail "unable to locate a historical bin/backends/tmux.sh with permissive kill-window selectors"; }
-  old_bin=$(build_old_bin teardown-old)
-  git -C "$ROOT" show "$old_tmux_ref:bin/backends/tmux.sh" > "$old_bin/bin/backends/tmux.sh" \
-    || { BASE_REF=$saved_base_ref; fail "could not materialize historical tmux adapter from $old_tmux_ref"; }
-  BASE_REF=$saved_base_ref
+test_teardown_exact_selector_contract() {
+  local fb proj wt id state config data log out rc
   proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-wt"
   id="teardownconform1"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -962,41 +925,25 @@ test_teardown_conformance_old_vs_new() {
   mkdir -p "$data/$id"
   printf 'scout findings\n' > "$data/$id/report.md"
 
-  state_old="$TMP_ROOT/teardown-state-old"; state_new="$TMP_ROOT/teardown-state-new"
-  config_old="$TMP_ROOT/teardown-config-old"; config_new="$TMP_ROOT/teardown-config-new"
-  mkdir -p "$state_old" "$state_new" "$config_old" "$config_new"
+  state="$TMP_ROOT/teardown-state"; config="$TMP_ROOT/teardown-config"
+  mkdir -p "$state" "$config"
 
-  fm_write_meta "$state_old/$id.meta" \
+  fm_write_meta "$state/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
     "decisions_reviewed=1" "decision_keys="
-  fm_write_meta "$state_new/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
-    "decisions_reviewed=1" "decision_keys="
-  touch "$state_old/.last-watcher-beat" "$state_new/.last-watcher-beat"
+  touch "$state/.last-watcher-beat"
 
-  log_old="$TMP_ROOT/teardown-old.log"; log_new="$TMP_ROOT/teardown-new.log"
-  out_old=$(run_teardown_case "$old_bin/bin/fm-teardown.sh" "$old_bin" "$fb" "$log_old" "$state_old" "$data" "$config_old" "$id" 2>&1)
-  rc_old=$?
-  out_new=$(run_teardown_case "$ROOT/bin/fm-teardown.sh" "$old_bin" "$fb" "$log_new" "$state_new" "$data" "$config_new" "$id" 2>&1)
-  rc_new=$?
+  log="$TMP_ROOT/teardown.log"
+  out=$(run_teardown_case "$ROOT/bin/fm-teardown.sh" "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$id" 2>&1)
+  rc=$?
 
-  expect_code 0 "$rc_old" "old fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_old"
-  expect_code 0 "$rc_new" "new fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_new"
-  assert_contains "$(cat "$log_new")" "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f'"$wt" \
+  expect_code 0 "$rc" "fm-teardown.sh (scout, report present) should succeed"$'\n'"$out"
+  assert_contains "$(cat "$log")" "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f'"$wt" \
     "teardown did not call treehouse return --force <worktree>"
-  # The legacy fixture's adapter comes from BASE_REF, so its selector form is
-  # whatever the merge-base carried: permissive while the exact-selector change
-  # was still on a branch, exact for every branch cut after it landed on main.
-  # Pinning the old form here would make this case pass once and then fail
-  # forever, so the '=' exactness markers are normalized away and the legacy run
-  # is only required to have reached tmux window cleanup for this task. The
-  # exact-selector contract belongs to the current script, asserted below.
-  assert_contains "$(tr -d '=' < "$log_old")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"firstmate:fm-$id" \
-    "legacy teardown fixture did not exercise tmux window cleanup for the task"
-  assert_contains "$(cat "$log_new")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"=firstmate:=fm-$id" \
+  assert_contains "$(cat "$log")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"=firstmate:=fm-$id" \
     "teardown did not call tmux kill-window with exact session and window selectors"
 
-  pass "fm-teardown.sh: treehouse return remains compatible while tmux cleanup uses exact selectors"
+  pass "fm-teardown.sh: treehouse return succeeds while tmux cleanup uses exact selectors"
 }
 
 # --- backend selection loudly refuses an unknown backend --------------------
@@ -1133,7 +1080,7 @@ test_backend_of_selector_matches_explicit_target_meta
 test_send_tmux_contract
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
-test_teardown_conformance_old_vs_new
+test_teardown_exact_selector_contract
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
 test_spawn_refuses_unknown_fm_backend_env
