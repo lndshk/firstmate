@@ -984,7 +984,15 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 # every sweep by design (no ack mechanism), so findings are deduped by a
 # kind+id identity marker: one escalation per occurrence, not a repeat per tick.
 _stall_finding_key() {  # <fm-stall-check.sh output line>
-  printf '%s' "$1" | awk '{print $1, $2}' | tr -c 'A-Za-z0-9_.-' '_'
+  local identity
+  identity=$(printf '%s\n' "$1" | LC_ALL=C awk 'NF { printf "%d:%s%d:%s", length($1), $1, length($2), $2; exit }')
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$identity" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$identity" | sha256sum | awk '{print $1}'
+  else
+    printf '%s' "$identity" | cksum | awk '{printf "%08x%08x", $1, $2}'
+  fi
 }
 _read_int() {  # <file> <default>
   local v

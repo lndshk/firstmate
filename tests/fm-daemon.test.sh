@@ -48,6 +48,35 @@ test_stall_check_resolved_marker_clears_after_two_valid_sweeps() {
   pass "stall findings clear after two valid absent sweeps with an invalid override"
 }
 
+test_stall_check_distinguishes_colliding_legacy_marker_names() {
+  local dir state stall_bin marker_count escalation_count
+  dir=$(make_supercase stall-check-distinct-findings)
+  state="$dir/state"
+  stall_bin="$dir/stall-bin"
+  mkdir -p "$stall_bin"
+  cat > "$stall_bin/fm-stall-check.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'unrelayed?: ops_a/task - unanswered child'
+printf '%s\n' 'unrelayed?: ops/a_task - unanswered child'
+SH
+  chmod +x "$stall_bin/fm-stall-check.sh"
+
+  (
+    FM_DAEMON_DIR="$stall_bin"
+    FM_ESCALATE_BATCH_SECS=99999
+    stall_check_scan "$state"
+  ) || fail "stall check scan failed for distinct findings"
+
+  marker_count=0
+  for marker in "$state"/.subsuper-seen-stallcheck-*; do
+    [ -f "$marker" ] && marker_count=$(( marker_count + 1 ))
+  done
+  escalation_count=$(grep -c '^unrelayed?: ' "$state/.subsuper-escalations" 2>/dev/null || true)
+  [ "$marker_count" -eq 2 ] || fail "distinct findings shared a dedup marker (got $marker_count markers)"
+  [ "$escalation_count" -eq 2 ] || fail "distinct findings were not both escalated (got $escalation_count)"
+  pass "stall findings with colliding legacy names retain independent markers and escalations"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -1948,6 +1977,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
 
 test_afk_start_refuses_when_flag_cannot_be_written
 test_stall_check_resolved_marker_clears_after_two_valid_sweeps
+test_stall_check_distinguishes_colliding_legacy_marker_names
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
