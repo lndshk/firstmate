@@ -57,6 +57,7 @@ import hashlib
 import json
 import math
 import re
+import stat
 import sys
 import time
 import unicodedata
@@ -280,8 +281,9 @@ class Scan:
 
 
 def scan_file(path: Path, root: Path, scan: Scan, mtime: float) -> None:
-    session = path.relative_to(root).as_posix()
-    project = path.parent.name
+    relative = path.relative_to(root)
+    session = relative.as_posix()
+    project = relative.parts[0] if len(relative.parts) > 1 else root.name
 
     # tool_use id -> (name, bash key), rebuilt per file. A tool_use always precedes
     # its result within the same transcript, so one pass resolves every error to the
@@ -398,13 +400,18 @@ def collect(root: Path, days: float, project_filter: str | None):
     files = []
     for p in root.rglob("*.jsonl"):
         try:
-            mtime = p.stat().st_mtime
+            entry = p.lstat()
+            if not stat.S_ISREG(entry.st_mode):
+                continue
+            mtime = entry.st_mtime
             if mtime < cutoff:
                 continue
         except OSError as exc:
             scan.read_errors.append((p, exc))
             continue
-        if project_filter and project_filter not in p.parent.name:
+        relative = p.relative_to(root)
+        project = relative.parts[0] if len(relative.parts) > 1 else root.name
+        if project_filter and project_filter not in project:
             continue
         files.append((p, mtime))
     if not files:

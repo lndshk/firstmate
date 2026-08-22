@@ -188,6 +188,29 @@ assert d['groups'][0]['sessions'] == 2, d['groups']
 " "$TMP_ROOT/shared-name.json" || fail "same-basename transcripts were not distinct sessions"
 pass "same-basename transcripts in different projects count as two sessions"
 
+# --- nested transcripts retain their top-level project ------------------------
+mkdir -p "$TMP_ROOT/nested/projN/subagents"
+skill_miss nested-1 > "$TMP_ROOT/nested/projN/subagents/s1.jsonl"
+skill_miss nested-2 > "$TMP_ROOT/nested/projN/subagents/s2.jsonl"
+run "$TMP_ROOT/nested" --project projN --min-sessions 2 --json > "$TMP_ROOT/nested.json" 2>/dev/null
+[ $? -eq 1 ] || fail "nested transcripts must match their top-level project filter"
+"$PY" -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d['scanned']['projects'] == 1, d['scanned']
+assert len(d['groups']) == 1 and d['groups'][0]['sessions'] == 2, d['groups']
+" "$TMP_ROOT/nested.json" || fail "nested transcripts were attributed to the wrong project"
+pass "nested transcripts are attributed to their top-level project"
+
+# --- only regular transcript files are scanned --------------------------------
+mkdir -p "$TMP_ROOT/nonregular/projQ"
+skill_miss regular > "$TMP_ROOT/nonregular/projQ/regular.jsonl"
+mkfifo "$TMP_ROOT/nonregular/projQ/blocked.jsonl"
+out=$(timeout 5 "$PY" "$HARVEST" --root "$TMP_ROOT/nonregular" --min-sessions 1 2>&1); rc=$?
+[ $rc -eq 1 ] || fail "non-regular transcript entries must be skipped without blocking (rc=$rc)"
+printf '%s' "$out" | grep -q 'Unknown skill: axi' || fail "regular transcript was not scanned beside a FIFO"
+pass "non-regular transcript entries are skipped without blocking"
+
 mkdir -p "$TMP_ROOT/read-coverage/projA" "$TMP_ROOT/read-coverage/projB"
 skill_miss coverage > "$TMP_ROOT/read-coverage/projA/readable.jsonl"
 printf 'unreadable candidate\n' > "$TMP_ROOT/read-coverage/projB/unreadable.jsonl"
