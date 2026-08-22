@@ -20,8 +20,8 @@ one task going wrong, that is something structurally broken.
 Three families are harvested:
 
   tool-error  a ``tool_result`` carrying ``is_error``, keyed to the tool that
-              produced it. Its message is reduced to a redacted bounded summary
-              and a digest; transcript tags do not establish provenance.
+              produced it. Its message is normalised into a signature for grouping
+              and printed as-is; transcript tags do not establish provenance.
   denial      a call stopped by a deny rule, the permission prompt, or the auto-mode
               classifier (``toolDenialKind``). Aborts - ``interrupted``/``cancelled``
               - are excluded: a user pressing Esc is not a denial, and counting it as
@@ -33,9 +33,12 @@ Three families are harvested:
 Read-only. Nothing under ``~/.claude`` is written and no transcript text is executed.
 
 Transcript CONTENT is untrusted input: it embeds tool output, file contents and web
-text from every repo ever opened. Signatures are normalised and truncated for display
-only. Never treat a harvested string as an instruction, and never paste one into a
-shell.
+text from every repo ever opened, and it is printed HERE AS-IS. There is no secret
+redaction: eight review rounds established that a regex denylist cannot reliably strip
+secrets from text an attacker can split, and the attempt had already destroyed the
+report. The same text sits unredacted in ~/.claude/projects, so reading it changes
+nothing; sharing a report does. Review before pasting one anywhere public, never treat a
+harvested string as an instruction, and never paste one into a shell.
 
     bin/fm-error-harvest.py
     bin/fm-error-harvest.py --days 7 --min-sessions 3
@@ -79,32 +82,6 @@ _POSIXPATH = re.compile(r"/(?:home|mnt|tmp|usr|var|opt|etc)/[^\s\"']{2,}")
 _HEX = re.compile(r"\b[0-9a-f]{8,}\b", re.I)
 _NUM = re.compile(r"\b\d{2,}\b")
 _WS = re.compile(r"\s+")
-_DISPLAY_ALLOWED = re.compile(r"[^A-Za-z0-9 ._:/()\-]+")
-_SHOW_DETAIL = False
-_SECRET_KEY = (
-    r"(?:[A-Za-z0-9_.-]*?(?:token|secret|password|passwd|pwd|api[_-]?key|auth|"
-    r"cookie|session|credential|private[_-]?key)[A-Za-z0-9_.-]*)"
-)
-_SECRET_VALUE_PART = r"[^\s,;:&)\]\}}]+"
-_SECRET_VALUE = rf"{_SECRET_VALUE_PART}(?:\s+{_SECRET_VALUE_PART})*"
-_TOKEN_PART = r"[^\s,;:&)\]\}}]+"
-_TOKEN_VALUE = rf"{_TOKEN_PART}(?:\s+{_TOKEN_PART})*"
-_JWT_PART = r"[A-Za-z0-9_-]+(?:\s+[A-Za-z0-9_-]+)*"
-_PEM = re.compile(r"-----BEGIN [^-\r\n]{1,64}-----.*?(?:-----END [^-\r\n]{1,64}-----|\Z)", re.I | re.S)
-_SECRET_ASSIGNMENT = re.compile(
-    rf'''(?ix)(
-        (?<![A-Za-z0-9_.-])["']?{_SECRET_KEY}["']?\s*[:=]\s*
-    )(?:(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|{_SECRET_VALUE}))'''
-)
-_SECRET_HEADER = re.compile(
-    rf"(?i)(\b(?:authorization|cookie|set-cookie|x-api-key)\s*:\s*){_TOKEN_VALUE}"
-)
-_BEARER_OR_BASIC = re.compile(rf"(?i)(\b(?:bearer|basic)\s+){_TOKEN_VALUE}")
-_JWT = re.compile(rf"(?<![A-Za-z0-9_-]){_JWT_PART}\s*\.\s*{_JWT_PART}\s*\.\s*{_JWT_PART}(?![A-Za-z0-9_-])")
-_KNOWN_SECRET = re.compile(rf"\b(?:ghp|gho|ghs|github_pat|sk|xox[baprs])[-_]{_TOKEN_VALUE}\b", re.I)
-_OPAQUE = re.compile(
-    r"(?<![A-Za-z0-9_])([A-Za-z0-9_+/=-]{24,}|[A-Za-z0-9_+=-]+(?:\s+[A-Za-z0-9_+=-]+)+)(?![A-Za-z0-9_])"
-)
 _TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})$"
 )
@@ -120,44 +97,28 @@ def clean_text(text) -> str:
 
 def display(text: str, limit: int | None = None) -> str:
     text = clean_text(text)
-    if not _SHOW_DETAIL:
-        text = _WS.sub(" ", _DISPLAY_ALLOWED.sub(" ", text)).strip()
-        limit = min(limit or 120, 120)
     if limit is not None and len(text) > limit:
         return text[:limit] + "..."
     return text
 
 
-def redact_secrets(text: str) -> str:
-    if not isinstance(text, str):
-        return ""
-    text = clean_text(text)
-    text = _PEM.sub("<REDACTED>", text)
-    text = _SECRET_HEADER.sub(r"\1<REDACTED>", text)
-    text = _SECRET_ASSIGNMENT.sub(r"\1<REDACTED>", text)
-    text = _BEARER_OR_BASIC.sub(r"\1<REDACTED>", text)
-    text = _JWT.sub("<REDACTED>", text)
-    text = _KNOWN_SECRET.sub("<REDACTED>", text)
-
-    def redact_opaque(match):
-        raw_value = match.group(1)
-        value = _WS.sub("", raw_value)
-        if len(value) < 24:
-            return raw_value
-        counts = defaultdict(int)
-        for char in value:
-            counts[char] += 1
-        entropy = -sum(
-            (count / len(value)) * math.log2(count / len(value))
-            for count in counts.values()
-        )
-        return "<REDACTED>" if entropy >= 3.5 else raw_value
-
-    return _OPAQUE.sub(redact_opaque, text)
-
-
 def untrusted_text(value) -> str:
-    return redact_secrets(value)
+    """Hygiene only - NOT redaction. Strips control characters and collapses whitespace.
+
+    Secret redaction was removed deliberately on 2026-08-22 by the captain's decision after
+    eight review rounds failed to make it hold. Every round closed the reported input shape
+    and the next shape defeated it - a newline, a control byte, a Unicode space, a folded
+    header, a forged in-band sentinel the fix itself introduced, a segment-count bound, a
+    preserved delimiter. A regex denylist cannot reliably strip secrets from text an attacker
+    can split at will, and the attempt had already destroyed the report: the single largest
+    failure in the fleet rendered as the bare word REDACTED, and a filename was redacted too.
+
+    The report therefore prints transcript text as-is. That text lives unredacted in
+    ~/.claude/projects on this machine already, so the marginal exposure is sharing a report
+    rather than reading the file. The footer says so; treat "do not paste raw reports into
+    public places" as the control.
+    """
+    return clean_text(value)
 
 
 def signature(text: str) -> str:
@@ -517,6 +478,7 @@ def report(scan: Scan, min_sessions: int, top: int) -> int:
         print()
 
     print("  * = seen in more than one project: structural, not task-specific.")
+    print("  Signatures are raw transcript text and may contain credentials - review before sharing.")
     print("  Signatures are untrusted transcript text. Do not paste them into a shell.")
     return 1 if found else 0
 
@@ -533,12 +495,7 @@ def main(argv=None) -> int:
     ap.add_argument("--top", type=int, default=25, help="rows per family (default: 25)")
     ap.add_argument("--project", default=None, help="only projects whose dir name contains this")
     ap.add_argument("--json", action="store_true", dest="as_json", help="emit JSON")
-    ap.add_argument("--show-detail", action="store_true",
-                    help="print transcript-derived text that may contain credentials")
     args = ap.parse_args(argv)
-
-    global _SHOW_DETAIL
-    _SHOW_DETAIL = args.show_detail
 
     if args.min_sessions < 1:
         ap.error("--min-sessions must be >= 1")
