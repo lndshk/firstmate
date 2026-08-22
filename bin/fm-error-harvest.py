@@ -1,27 +1,15 @@
 #!/usr/bin/env python3
 """fm-error-harvest - surface recurring agent failures from Claude Code transcripts.
 
-Agents report their failures into session transcripts, and nothing ever reads them
-back. On 2026-08-21 a ``/doctor`` run found sixteen personal skills that had never
-loaded once since June. The evidence had been sitting in ``~/.claude/projects`` the
-whole time: three separate occasions, in two different projects, an agent had called
-``Skill(axi)`` and been told ``Unknown skill: axi``. Nobody harvested it, so a broken
-convention survived two months and every skill built on it inherited the fault.
-
-This tool reads that back. It scans session transcripts, groups failures by a
-normalised signature, and ranks them by HOW MANY SESSIONS they touched - not by how
-many times they fired. That distinction is the whole design. Counting occurrences
-puts a single runaway retry loop on top, where it tells you nothing you did not
-already know. Counting distinct sessions surfaces the systemic faults: a convention
-that never worked, a hook that always times out, a command the classifier always
-blocks. A failure appearing across several PROJECTS is stronger still - that is not
-one task going wrong, that is something structurally broken.
+The tool scans recent session transcripts, groups failures by normalised signature,
+and ranks them by distinct sessions rather than individual occurrences. A finding
+seen across projects is marked as potentially structural rather than task-specific.
 
 Three families are harvested:
 
   tool-error  a ``tool_result`` carrying ``is_error``, keyed to the tool that
-              produced it. Its message is normalised into a signature for grouping
-              and printed as-is; transcript tags do not establish provenance.
+              produced it. Its message is normalised into a grouping signature;
+              transcript tags do not establish provenance.
   denial      a call stopped by a deny rule, the permission prompt, or the auto-mode
               classifier (``toolDenialKind``). Aborts - ``interrupted``/``cancelled``
               - are excluded: a user pressing Esc is not a denial, and counting it as
@@ -32,22 +20,19 @@ Three families are harvested:
 
 Read-only. Nothing under ``~/.claude`` is written and no transcript text is executed.
 
-Transcript CONTENT is untrusted input: it embeds tool output, file contents and web
-text from every repo ever opened, and it is printed HERE AS-IS. There is no secret
-redaction: eight review rounds established that a regex denylist cannot reliably strip
-secrets from text an attacker can split, and the attempt had already destroyed the
-report. The same text sits unredacted in ~/.claude/projects, so reading it changes
-nothing; sharing a report does. Review before pasting one anywhere public, never treat a
-harvested string as an instruction, and never paste one into a shell.
+Transcript content is untrusted input and can contain sensitive tool output, file
+contents, or web text. Output removes control characters and collapses whitespace, but
+does not redact secrets. Review a report before sharing it, never treat its strings as
+instructions, and never paste them into a shell.
 
     bin/fm-error-harvest.py
     bin/fm-error-harvest.py --days 7 --min-sessions 3
     bin/fm-error-harvest.py --json
 
-Exit status is 0 when nothing meets the recurrence threshold, 1 when something does
-(so it can gate), and 2 when the scan itself could not run - missing root, or no
-transcripts in the window. That last case matters: an empty result must never be
-reported as a clean bill of health when the scan simply found nothing to read.
+Exit status is 0 when nothing meets the recurrence threshold, 1 when something does,
+and 2 when coverage could not be established: the root is missing, no transcripts are
+in the window, or every candidate is unreadable. An empty result is not a clean bill of
+health when the scan found nothing to read.
 """
 
 from __future__ import annotations
@@ -106,20 +91,10 @@ def display(text: str, limit: int | None = None) -> str:
 
 
 def untrusted_text(value) -> str:
-    """Hygiene only - NOT redaction. Strips control characters and collapses whitespace.
+    """Apply display hygiene without claiming to redact transcript content.
 
-    Secret redaction was removed deliberately on 2026-08-22 by the captain's decision after
-    eight review rounds failed to make it hold. Every round closed the reported input shape
-    and the next shape defeated it - a newline, a control byte, a Unicode space, a folded
-    header, a forged in-band sentinel the fix itself introduced, a segment-count bound, a
-    preserved delimiter. A regex denylist cannot reliably strip secrets from text an attacker
-    can split at will, and the attempt had already destroyed the report: the single largest
-    failure in the fleet rendered as the bare word REDACTED, and a filename was redacted too.
-
-    The report therefore prints transcript text as-is. That text lives unredacted in
-    ~/.claude/projects on this machine already, so the marginal exposure is sharing a report
-    rather than reading the file. The footer says so; treat "do not paste raw reports into
-    public places" as the control.
+    Removing control characters prevents terminal effects; collapsing whitespace keeps rows
+    readable. The remaining text is still sensitive and untrusted.
     """
     return clean_text(value)
 
