@@ -120,24 +120,27 @@ for R in "${REPOS[@]}"; do
   CURRENT_REMOTES=''
   FAILED_REMOTES=''
   while IFS= read -r rem; do
-    if [ "$FETCH" -eq 0 ] || git -C "$R" fetch --prune --quiet "$rem" 2>/dev/null; then
+    if [ "$FETCH" -eq 0 ] || git -C "$R" fetch --prune --quiet "$rem" \
+      "+refs/heads/*:refs/remotes/$rem/*" 2>/dev/null; then
       CURRENT_REMOTES="${CURRENT_REMOTES}${rem}"$'\n'
     else
       FAILED_REMOTES="${FAILED_REMOTES}${rem}"$'\n'
     fi
   done < <(git -C "$R" remote)
   if [ "$FETCH" -eq 0 ]; then
-    printf '%s\n' '--- remote status: cached refs only; classification may be stale ---'
+    printf '%s\n' '--- remote status: cached refs only; classification may be stale or incomplete ---'
   elif [ -n "$FAILED_REMOTES" ]; then
     while IFS= read -r rem; do
       [ -z "$rem" ] && continue
       printf '%s\n' "--- remote status: could not refresh $rem; its refs are ignored ---"
     done <<<"$FAILED_REMOTES"
   fi
-  if git -C "$R" rev-parse --verify -q origin/main >/dev/null 2>&1; then
+  if remote_is_current origin && git -C "$R" rev-parse --verify -q origin/main >/dev/null 2>&1; then
     base=origin/main
-  else
+  elif git -C "$R" rev-parse --verify -q main >/dev/null 2>&1; then
     base=main
+  else
+    base=''
   fi
 
   printf -- '--- worktrees (each is one rendering; HEAD is per-worktree) ---\n'
@@ -148,7 +151,11 @@ for R in "${REPOS[@]}"; do
     fi
     ref=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || echo '(detached)')
     dirty=$(git -C "$wt" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-    ahead=$(git -C "$wt" rev-list --count "$base"..HEAD 2>/dev/null || echo '?')
+    if [ -n "$base" ]; then
+      ahead=$(git -C "$wt" rev-list --count "$base"..HEAD 2>/dev/null || echo '?')
+    else
+      ahead='?'
+    fi
     size=''
     if [ "$DISK" -eq 1 ]; then
       size=$(du -sh "$wt" 2>/dev/null | cut -f1)
@@ -157,38 +164,43 @@ for R in "${REPOS[@]}"; do
       "$(short_path "$wt")" "$ref" "$dirty" "$ahead" "$size"
   done < <(worktree_paths "$R")
 
-  printf -- '--- branches and detached HEADs with commits not on %s ---\n' "$base"
-  found=0
-  while IFS= read -r b; do
-    n=$(git -C "$R" rev-list --count "$base".."$b" 2>/dev/null || echo 0)
-    [ "$n" -eq 0 ] && continue
-    found=1
-    where=$(classify_ref "$R" "refs/heads/$b")
-    printf '  %-46s %4s commits  %s\n' "$b" "$n" "$where"
-  done < <(git -C "$R" for-each-ref --format='%(refname:short)' refs/heads/)
-  seen_detached=''
-  while IFS= read -r wt; do
-    [ -d "$wt" ] || continue
-    if git -C "$wt" symbolic-ref --quiet HEAD >/dev/null 2>&1; then
-      continue
-    fi
-    head=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null || true)
-    [ -n "$head" ] || continue
-    case "$seen_detached" in
-      *"$head"$'\n'*) continue ;;
-    esac
-    n=$(git -C "$R" rev-list --count "$base".."$head" 2>/dev/null || echo 0)
-    [ "$n" -eq 0 ] && continue
-    if git -C "$R" for-each-ref --contains="$head" --format='%(refname)' refs/heads/ | grep -q .; then
-      continue
-    fi
-    seen_detached="${seen_detached}${head}"$'\n'
-    found=1
-    where=$(classify_ref "$R" "$head")
-    printf '  %-46s %4s commits  %s\n' \
-      "(detached: $(short_path "$wt") @ ${head:0:12})" "$n" "$where"
-  done < <(worktree_paths "$R")
-  [ "$found" -eq 0 ] && printf '  (none - every branch is landed)\n' || true
+  if [ -z "$base" ]; then
+    printf '%s\n' '--- branches and detached HEADs: skipped; main is unavailable ---'
+    printf '%s\n' '  (skipped - neither origin/main nor main exists)'
+  else
+    printf -- '--- branches and detached HEADs with commits not on %s ---\n' "$base"
+    found=0
+    while IFS= read -r b; do
+      n=$(git -C "$R" rev-list --count "$base".."$b" 2>/dev/null || echo 0)
+      [ "$n" -eq 0 ] && continue
+      found=1
+      where=$(classify_ref "$R" "refs/heads/$b")
+      printf '  %-46s %4s commits  %s\n' "$b" "$n" "$where"
+    done < <(git -C "$R" for-each-ref --format='%(refname:short)' refs/heads/)
+    seen_detached=''
+    while IFS= read -r wt; do
+      [ -d "$wt" ] || continue
+      if git -C "$wt" symbolic-ref --quiet HEAD >/dev/null 2>&1; then
+        continue
+      fi
+      head=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null || true)
+      [ -n "$head" ] || continue
+      case "$seen_detached" in
+        *"$head"$'\n'*) continue ;;
+      esac
+      n=$(git -C "$R" rev-list --count "$base".."$head" 2>/dev/null || echo 0)
+      [ "$n" -eq 0 ] && continue
+      if git -C "$R" for-each-ref --contains="$head" --format='%(refname)' refs/heads/ | grep -q .; then
+        continue
+      fi
+      seen_detached="${seen_detached}${head}"$'\n'
+      found=1
+      where=$(classify_ref "$R" "$head")
+      printf '  %-46s %4s commits  %s\n' \
+        "(detached: $(short_path "$wt") @ ${head:0:12})" "$n" "$where"
+    done < <(worktree_paths "$R")
+    [ "$found" -eq 0 ] && printf '  (none - every branch is landed)\n' || true
+  fi
 
   stashes=$(git -C "$R" stash list 2>/dev/null | wc -l | tr -d ' ')
   printf -- '--- stashes: %s (invisible to every command above) ---\n' "$stashes"

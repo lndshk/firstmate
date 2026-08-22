@@ -80,7 +80,7 @@ test_stale_origin_ref_is_not_a_remote_copy() {
   git -C "$w/repo" commit -qm unpublished
 
   out=$("$AUDIT" --no-fetch "$w/repo") || fail "audit failed: $out"
-  assert_contains "$out" 'cached refs only; classification may be stale' \
+  assert_contains "$out" 'cached refs only; classification may be stale or incomplete' \
     'no-fetch did not mark remote classifications as cached'
   line=$(branch_line "$out")
   assert_contains "$line" '** LOCAL ONLY - no remote copy **' \
@@ -193,9 +193,51 @@ test_origin_failure_preserves_confirmed_non_origin_copy() {
   pass 'origin failure retains confirmed non-origin backup status'
 }
 
+test_default_fetches_remote_heads_despite_restricted_refspec() {
+  local w out line
+  w=$(new_repo restricted-refspec)
+  git init -q --bare "$w/backup.git"
+  git -C "$w/repo" remote add backup "$w/backup.git"
+  git -C "$w/repo" config remote.backup.fetch '+refs/heads/main:refs/remotes/backup/main'
+  git -C "$w/repo" switch -q -c topic
+  printf 'unlanded\n' >> "$w/repo/tracked.txt"
+  git -C "$w/repo" add tracked.txt
+  git -C "$w/repo" commit -qm unlanded
+  git -C "$w/repo" push -q "$w/backup.git" topic:topic
+
+  out=$("$AUDIT" "$w/repo") || fail "audit failed: $out"
+  line=$(branch_line "$out")
+  assert_contains "$line" 'backup only - NOT on origin' \
+    'restricted fetch refspec hid a confirmed backup copy'
+  pass 'default audit fetches all remote heads'
+}
+
+test_missing_main_skips_unlanded_classification() {
+  local w out
+  w="$TMP_ROOT/missing-main"
+  git init -q "$w/repo"
+  git -C "$w/repo" switch -q -c master
+  printf 'base\n' > "$w/repo/tracked.txt"
+  git -C "$w/repo" add tracked.txt
+  git -C "$w/repo" commit -qm baseline
+  git -C "$w/repo" switch -q -c topic
+  printf 'unlanded\n' >> "$w/repo/tracked.txt"
+  git -C "$w/repo" add tracked.txt
+  git -C "$w/repo" commit -qm unlanded
+
+  out=$("$AUDIT" "$w/repo") || fail "audit failed: $out"
+  assert_contains "$out" 'skipped; main is unavailable' \
+    'missing main did not report unavailable classification base'
+  assert_not_contains "$out" '(none - every branch is landed)' \
+    'missing main incorrectly reported all branches as landed'
+  pass 'missing main skips unlanded classification'
+}
+
 test_stale_origin_ref_is_not_a_remote_copy
 test_stale_non_origin_ref_is_not_a_remote_copy
 test_default_refreshes_all_remotes_and_prunes_stale_refs
 test_detached_unlanded_head_is_classified_without_duplicate_branch_row
 test_origin_failure_preserves_confirmed_non_origin_copy
+test_default_fetches_remote_heads_despite_restricted_refspec
+test_missing_main_skips_unlanded_classification
 printf '%s\n' 'all git audit tests passed'
