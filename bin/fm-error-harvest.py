@@ -56,6 +56,7 @@ import math
 import re
 import sys
 import time
+import unicodedata
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -78,21 +79,15 @@ _POSIXPATH = re.compile(r"/(?:home|mnt|tmp|usr|var|opt|etc)/[^\s\"']{2,}")
 _HEX = re.compile(r"\b[0-9a-f]{8,}\b", re.I)
 _NUM = re.compile(r"\b\d{2,}\b")
 _WS = re.compile(r"\s+")
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-# Controls EXCEPT newline/carriage-return. A control byte between a key and its
-# separator (`token\x1b=secret`) defeats every assignment pattern, because `\s` does not
-# match C1/C0 controls - so the redactor declines, and clean_text() then repairs the
-# string into a readable secret. Neutralising these BEFORE the patterns run closes that
-# gap at the one choke point. Newlines are deliberately preserved: _SECRET_HEADER is
-# bounded by [^\r\n]*, so collapsing them here would make a header swallow the error
-# text that follows it and merge distinct failures.
-_CONTROL_INLINE = re.compile(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _SECRET_KEY = (
     r"(?:[A-Za-z0-9_.-]*?(?:token|secret|password|passwd|pwd|api[_-]?key|auth|"
     r"cookie|session|credential|private[_-]?key)[A-Za-z0-9_.-]*)"
 )
-_REDACTION_JOINER = "\ue000"
-_HEADER_BARRIER = "\ue001"
+_SECRET_VALUE_PART = r"[^\s,;:&)\]\}}]+"
+_SECRET_VALUE = rf"{_SECRET_VALUE_PART}(?:\s+{_SECRET_VALUE_PART}){{0,31}}"
+_TOKEN_PART = r"[A-Za-z0-9_+/=~.-]+"
+_TOKEN_VALUE = rf"{_TOKEN_PART}(?:\s+{_TOKEN_PART}){{0,31}}"
+_JWT_PART = r"[A-Za-z0-9_-]+(?:\s+[A-Za-z0-9_-]+){0,31}"
 _SECRET_ASSIGNMENT = re.compile(
     rf'''(?ix)(
         (?<![A-Za-z0-9_.-])["']?{_SECRET_KEY}["']?\s*[:=]\s*
@@ -106,6 +101,20 @@ _JWT = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Z
 _PEM = re.compile(r"-----BEGIN [^-\r\n]{1,64}-----.*?(?:-----END [^-\r\n]{1,64}-----|\Z)", re.I | re.S)
 _KNOWN_SECRET = re.compile(r"\b(?:ghp|gho|ghs|github_pat|sk|xox[baprs])[-_][A-Za-z0-9_=-]{8,}\b", re.I)
 _OPAQUE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z0-9_+/=-]{24,})(?![A-Za-z0-9_])")
+_SECRET_ASSIGNMENT = re.compile(
+    rf'''(?ix)(
+        (?<![A-Za-z0-9_.-])["']?{_SECRET_KEY}["']?\s*[:=]\s*
+    )(?:(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|{_SECRET_VALUE}))'''
+)
+_SECRET_HEADER = re.compile(
+    rf"(?i)(\b(?:authorization|cookie|set-cookie|x-api-key)\s*:\s*){_TOKEN_VALUE}"
+)
+_BEARER_OR_BASIC = re.compile(rf"(?i)(\b(?:bearer|basic)\s+){_TOKEN_VALUE}")
+_JWT = re.compile(rf"(?<![A-Za-z0-9_-]){_JWT_PART}\s*\.\s*{_JWT_PART}\s*\.\s*{_JWT_PART}(?![A-Za-z0-9_-])")
+_KNOWN_SECRET = re.compile(rf"\b(?:ghp|gho|ghs|github_pat|sk|xox[baprs])[-_]{_TOKEN_VALUE}\b", re.I)
+_OPAQUE = re.compile(
+    r"(?<![A-Za-z0-9_])([A-Za-z0-9_+/=-]{24,}|[A-Za-z0-9_+=-]+(?:\s+[A-Za-z0-9_+=-]+)+)(?![A-Za-z0-9_])"
+)
 _TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})$"
 )
@@ -115,7 +124,8 @@ ERROR_DISPLAY_LIMIT = 130
 def clean_text(text) -> str:
     if not isinstance(text, str):
         return ""
-    return _WS.sub(" ", _CONTROL.sub(" ", text)).strip()
+    text = "".join(char for char in text if not unicodedata.category(char).startswith("C"))
+    return _WS.sub(" ", text).strip()
 
 
 def display(text: str, limit: int | None = None) -> str:
@@ -128,26 +138,19 @@ def display(text: str, limit: int | None = None) -> str:
 def redact_secrets(text: str) -> str:
     if not isinstance(text, str):
         return ""
-
-    def redact_header(match):
-        return match.group(1).replace(":", _HEADER_BARRIER + ":") + "<REDACTED>"
-
-    # Strip inline controls first; see _CONTROL_INLINE. REMOVED rather than spaced: a
-    # control inside the key (`pass\x7fword=`) would otherwise split the keyword and defeat
-    # detection just as surely as one before the separator. Controls have no display value,
-    # and a redactor must fail toward over-redaction, so rejoining is the safe direction.
-    text = _CONTROL_INLINE.sub("", text)
+    text = clean_text(text)
     text = _PEM.sub("<REDACTED>", text)
-    text = _SECRET_HEADER.sub(redact_header, text)
-    text = re.sub(r"(?:\r\n|\r|\n)[ \t]*", _REDACTION_JOINER, text)
+    text = _SECRET_HEADER.sub(r"\1<REDACTED>", text)
     text = _SECRET_ASSIGNMENT.sub(r"\1<REDACTED>", text)
-    text = text.replace(_REDACTION_JOINER, " ").replace(_HEADER_BARRIER, "")
     text = _BEARER_OR_BASIC.sub(r"\1<REDACTED>", text)
     text = _JWT.sub("<REDACTED>", text)
     text = _KNOWN_SECRET.sub("<REDACTED>", text)
 
     def redact_opaque(match):
-        value = match.group(1)
+        raw_value = match.group(1)
+        value = _WS.sub("", raw_value)
+        if len(value) < 24:
+            return raw_value
         counts = defaultdict(int)
         for char in value:
             counts[char] += 1
@@ -161,7 +164,7 @@ def redact_secrets(text: str) -> str:
 
 
 def untrusted_text(value) -> str:
-    return clean_text(redact_secrets(value))
+    return redact_secrets(value)
 
 
 def signature(text: str) -> str:

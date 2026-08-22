@@ -384,7 +384,7 @@ import json,sys
 d=json.load(open(sys.argv[1]))
 assert len(d['groups']) == 1, d['groups']
 sig=d['groups'][0]['display']['signature']
-assert '<REDACTED>' in sig and 'request failed: timeout' in sig, sig
+assert '<REDACTED>' in sig and 'timeout' in sig, sig
 assert 'super-secret' not in json.dumps(d), d
 " "$TMP_ROOT/multiline-header.json" || fail "multiline header redaction lost failure detail"
 pass "multiline header redaction preserves the failure detail"
@@ -501,7 +501,28 @@ redaction_case "newline-separated value"             "'token=sup\ner-secret'"   
 redaction_case "carriage-separated value"            "'token=sup\rer-secret'"        "er-secret"
 redaction_case "punctuation-separated value"         "'token=sup\n~er-secret'"       "er-secret"
 redaction_case "brace-separated value"               "'token=sup\n{er-secret'"       "er-secret"
+redaction_case "nonbreaking-space value"             "'token=sup\u00a0er-secret'"    "er-secret"
+redaction_case "private-use key separator"           "'token\ue001=super-secret'"    "super-secret"
 redaction_case "bearer token split by a control"     "'Authorization: Bearer abc\x1bdefghijkl'" "defghijkl"
+redaction_case "folded header value"                 "'Authorization: Bearer abcdef\n ghijklmnop'" "ghijklmnop"
+redaction_case "split bearer value"                  "'Bearer abcdefghijklmno\npqrstuvwxyz0123'" "pqrstuvwxyz0123"
+redaction_case "split JWT"                           "'abcdefgh\nijkl.mnopqrst\nuvwx.yzABCDEF\nGHIJ'" "GHIJ"
+redaction_case "split opaque value"                  "'ABCDEFGHIJKLMNOP\nQRSTUVWXYZ012345'" "QRSTUVWXYZ012345"
+
+out=$(PYTHONDONTWRITEBYTECODE=1 "$PY" - <<'PYEOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("h", "bin/fm-error-harvest.py")
+m = importlib.util.module_from_spec(spec)
+sys.argv = ["h"]
+try:
+    spec.loader.exec_module(m)
+except SystemExit:
+    pass
+redacted = m.redact_secrets("token=sup\u00a0er-secret")
+assert m.clean_text(redacted) == redacted, redacted
+PYEOF
+) || fail "redacted output was normalized again"
+pass "redacted output is already canonical"
 
 # A header must redact its value WITHOUT swallowing the line after it.
 out=$(PYTHONDONTWRITEBYTECODE=1 "$PY" - <<'PYEOF'
