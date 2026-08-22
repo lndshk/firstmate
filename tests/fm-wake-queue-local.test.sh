@@ -746,7 +746,7 @@ test_dead_agent_stale_wake_parses_window_and_escalates() {
   grep -F 'done: PR https://x/y/pull/4' "$state/.subsuper-escalations" >/dev/null \
     || fail "annotated stale did not read the recorded task's status file"
   [ -e "$state/.subsuper-seen-status-fin-d4" ] \
-    || fail "seen marker was not keyed to the bare task id: $(ls "$state" | tr '\n' ' ')"
+    || fail "seen marker was not keyed to the bare task id: $(cd "$state" && echo *)"
 
   dir=$(make_supercase stale-plain-transient)
   state="$dir/state"

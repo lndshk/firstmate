@@ -170,6 +170,9 @@ status_contract_suffix() {
   [ -n "$id" ] || return 0
   status="$STATE/$id.status"
   [ -f "$status" ] && return 0
+  # The format string is handed to the crewmate verbatim as the literal command it
+  # must run; expanding %s or $(date) here would bake in THIS shell's values.
+  # shellcheck disable=SC2016
   printf ' -- Report status by appending one line for each supervisor-actionable phase change and for needs-decision/blocked/done/failed: printf %s\\t%s\\n "{state}: {one short line}" "$(date +%%s)" >> %s' \
     '%s' '%s' "$status"
 }

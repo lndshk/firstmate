@@ -81,10 +81,10 @@ maybe_sweep_windows_scratch() {
     return 1
   fi
   tmp="$WINDOWS_SCRATCH_SWEEP_STAMP.tmp.$$"
-  printf '%s\n' "$now" > "$tmp" && mv -f "$tmp" "$WINDOWS_SCRATCH_SWEEP_STAMP" || {
+  if ! { printf '%s\n' "$now" > "$tmp" && mv -f "$tmp" "$WINDOWS_SCRATCH_SWEEP_STAMP"; }; then
     rm -f "$tmp"
     return 1
-  }
+  fi
 }
 clean_field() { LC_ALL=C tr '\t\r\n' '   '; }
 snapshot_field() {

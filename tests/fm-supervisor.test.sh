@@ -941,11 +941,11 @@ ROOT_OVERRIDE_HOME="$TMP_ROOT/root-override-home"
 mkdir -p "$ROOT_OVERRIDE_HOME/state"
 cp "$NO_OWNER_HOME/state/firstmate-supervisor.tsv" "$ROOT_OVERRIDE_HOME/state/firstmate-supervisor.tsv"
 FM_ROOT_OVERRIDE="$ROOT_OVERRIDE_HOME" \
-  FM_HOME= \
-  FM_STATE_OVERRIDE= \
-  FM_SUPERVISOR_SNAPSHOT= \
-  FM_BOARD_DIR= \
-  FM_BOARD_OUT= \
+  FM_HOME='' \
+  FM_STATE_OVERRIDE='' \
+  FM_SUPERVISOR_SNAPSHOT='' \
+  FM_BOARD_DIR='' \
+  FM_BOARD_OUT='' \
   "$ROOT/bin/fm-board.sh" --once \
   || fail "root-override board render failed"
 [ -s "$ROOT_OVERRIDE_HOME/state/board/board.html" ] \

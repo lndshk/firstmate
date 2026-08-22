@@ -232,7 +232,7 @@ path_provides() {
 # Echo \$PATH with every entry that provides a real `gh-axi` removed, so the
 # "tool absent" case is deterministic on a machine that has gh-axi installed.
 path_without_gh_axi() {
-  local entry out= IFS=:
+  local entry out='' IFS=:
   for entry in $PATH; do
     [ -n "$entry" ] || continue
     [ -x "$entry/gh-axi" ] && continue
