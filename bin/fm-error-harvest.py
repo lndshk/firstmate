@@ -53,9 +53,11 @@ reported as a clean bill of health when the scan simply found nothing to read.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import math
+import os
 import re
 import stat
 import sys
@@ -290,9 +292,17 @@ def scan_file(path: Path, root: Path, scan: Scan, mtime: float) -> None:
     # tool that caused it.
     names: dict[str, tuple] = {}
 
+    fd = None
     try:
-        fh = path.open("r", encoding="utf-8", errors="replace")
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK |
+                     getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", path)
+        fh = os.fdopen(fd, "r", encoding="utf-8", errors="replace")
+        fd = None
     except OSError as exc:
+        if fd is not None:
+            os.close(fd)
         scan.read_errors.append((path, exc))
         return
     scan.files += 1

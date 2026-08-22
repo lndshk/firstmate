@@ -211,6 +211,29 @@ out=$(timeout 5 "$PY" "$HARVEST" --root "$TMP_ROOT/nonregular" --min-sessions 1 
 printf '%s' "$out" | grep -q 'Unknown skill: axi' || fail "regular transcript was not scanned beside a FIFO"
 pass "non-regular transcript entries are skipped without blocking"
 
+mkdir -p "$TMP_ROOT/race/proj"
+skill_miss stable > "$TMP_ROOT/race/proj/stable.jsonl"
+skill_miss target > "$TMP_ROOT/race/proj/target.jsonl"
+skill_miss arbitrary-local-secret > "$TMP_ROOT/race-secret.txt"
+sleep 1
+"$PY" -c "
+from pathlib import Path
+Path(__import__('sys').argv[1]).write_bytes(b'ordinary\\n' * 4_000_000)
+" "$TMP_ROOT/race/proj/slow.jsonl"
+(
+  sleep 0.1
+  rm "$TMP_ROOT/race/proj/target.jsonl"
+  ln -s "$TMP_ROOT/race-secret.txt" "$TMP_ROOT/race/proj/target.jsonl"
+) &
+race_swapper=$!
+out=$(timeout 15 "$PY" "$HARVEST" --root "$TMP_ROOT/race" --min-sessions 1 2>&1); rc=$?
+wait "$race_swapper"
+[ $rc -eq 1 ] || fail "raced transcript replacement must not block the scan (rc=$rc)"
+if printf '%s' "$out" | grep -q 'arbitrary-local-secret'; then
+  fail "raced symlink target was read as a transcript"
+fi
+pass "raced transcript replacement cannot follow a symlink"
+
 mkdir -p "$TMP_ROOT/read-coverage/projA" "$TMP_ROOT/read-coverage/projB"
 skill_miss coverage > "$TMP_ROOT/read-coverage/projA/readable.jsonl"
 printf 'unreadable candidate\n' > "$TMP_ROOT/read-coverage/projB/unreadable.jsonl"
