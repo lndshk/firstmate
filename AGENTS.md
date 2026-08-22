@@ -571,3 +571,32 @@ Keep this file for knowledge useful to almost every future agent session in this
 Do not repeat what the codebase already shows; point to the authoritative file, skill, command, or doc.
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve every safety boundary and keep the always-loaded contract concise.
+
+## Local additions (this fork only)
+
+Upstream does not ship these and its documentation never mentions them. Everything
+else in this file is upstream's and should stay that way, so an upstream sync
+replaces it cleanly.
+
+- `bin/fm-stall-check.sh` - read-only sweep for work that is finished, dormant,
+  unrelayed, or unlanded, where nothing changed so no wake will ever fire.
+  `bin/fm-guard.sh` runs it `--fast`, so findings appear in ordinary tool output;
+  run it without `--fast` to see everything. The away-mode daemon runs the full
+  sweep on its own cadence while `state/.afk` is set.
+- `bin/fm-error-harvest.py` - groups recurring tool errors, denials, and hook
+  failures across Claude Code transcripts, ranked by how many SESSIONS each
+  touches. Report text is untrusted transcript content printed as-is; do not paste
+  raw reports anywhere public.
+- `bin/fm-git-audit.sh` - audits unlanded work and stray worktrees.
+- `bin/fm-windows-scratch-sweep.sh` / `.ps1` - WSL-only reclamation of stale
+  Windows scratch dirs, process-checked before every delete. NOT currently invoked
+  by anything: its only caller was the retired always-on supervisor. Use `-DryRun`
+  to inspect; never run a live cleanup without the captain's explicit direction.
+- Codex safety-prompt auto-clear - firstmate answers Codex's additional-safety
+  menu with `Keep waiting` for recorded crewmate panes on the tmux backend.
+  `FM_SAFETY_AUTOCLEAR=0` disables it.
+
+**One local hazard:** `projects/quant-src` is a symlink to the live production
+checkout at `/mnt/e/Quant/src`. Fleet-sync follows it correctly and
+`tests/fm-fleet-sync-symlink.test.sh` guards that, but treat anything that writes
+there as touching production.
