@@ -60,6 +60,11 @@ worktree_paths() {
   git -C "$1" worktree list --porcelain | awk '/^worktree /{print substr($0, 10)}'
 }
 
+remote_has_tip() {
+  git -C "$1" for-each-ref --contains="refs/heads/$2" --format='%(refname)' \
+    "refs/remotes/$3/" | grep -q .
+}
+
 status=0
 for R in "${REPOS[@]}"; do
   if ! git -C "$R" rev-parse --git-dir >/dev/null 2>&1; then
@@ -100,13 +105,13 @@ for R in "${REPOS[@]}"; do
     n=$(git -C "$R" rev-list --count "$base".."$b" 2>/dev/null || echo 0)
     [ "$n" -eq 0 ] && continue
     found=1
-    if git -C "$R" rev-parse --verify -q "origin/$b" >/dev/null 2>&1; then
+    if remote_has_tip "$R" "$b" origin; then
       where='on origin'
     else
       where='** LOCAL ONLY - no remote copy **'
       while IFS= read -r rem; do
         [ "$rem" = origin ] && continue
-        if git -C "$R" rev-parse --verify -q "$rem/$b" >/dev/null 2>&1; then
+        if remote_has_tip "$R" "$b" "$rem"; then
           where="$rem only - NOT on origin"
           break
         fi
