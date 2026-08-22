@@ -174,9 +174,13 @@ window_for_meta() {
 }
 
 task_is_provably_busy() { # <state> <meta>
-  local state=$1 meta=$2 id verdict
+  local state=$1 meta=$2 id backend target harness verdict
   id=$(basename "$meta" .meta)
-  verdict=$(fm_busy_classify_meta "$meta" "$id" "$state")
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  harness=$(fm_meta_get "$meta" harness)
+  [ -n "$target" ] || return 1
+  verdict=$(fm_busy_classify_live "$backend" "$target" "$harness" "$id" "$state" "fm-$id")
   [ "${verdict%% *}" = busy ]
 }
 

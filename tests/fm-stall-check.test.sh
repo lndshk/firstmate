@@ -39,6 +39,9 @@ case "${1:-}" in
   list-windows)
     [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
     exit 0 ;;
+  display-message)
+    printf '%s\n' '%1'
+    exit 0 ;;
   capture-pane)
     target=""
     prev=""
@@ -63,7 +66,9 @@ SH
 #!/usr/bin/env bash
 set -u
 case "${1:-}:${2:-}" in
-  terminal:read) printf '%s\n' '{"result":{"terminal":{"tail":["active terminal"]}}}' ;;
+  terminal:read)
+    [ "${FM_FAKE_ORCA_UNREADABLE:-0}" = 1 ] && exit 1
+    printf '%s\n' '{"result":{"terminal":{"tail":["active terminal"]}}}' ;;
   *) exit 1 ;;
 esac
 SH
@@ -76,6 +81,7 @@ run_check() {
   PATH="$dir/fakebin:$PATH" \
   FM_FAKE_TMUX_CAPTURE="${FM_FAKE_TMUX_CAPTURE:-}" \
   FM_FAKE_TMUX_CAPTURE_DIR="${FM_FAKE_TMUX_CAPTURE_DIR:-}" \
+  FM_FAKE_ORCA_UNREADABLE="${FM_FAKE_ORCA_UNREADABLE:-}" \
   FM_HOME="$dir" \
   FM_STALL_IDLE_SECS="${FM_STALL_IDLE_SECS:-600}" \
   FM_ADVISOR_IDLE_STALL_SECS="${FM_ADVISOR_IDLE_STALL_SECS:-1800}" \
@@ -91,7 +97,7 @@ mark_busy() { # <state-dir> <id>
 # call, so each test starts from a cleared fake-pane environment rather than
 # whatever the previous test last configured.
 run_test() { # <test-fn>
-  unset FM_FAKE_TMUX_CAPTURE FM_FAKE_TMUX_CAPTURE_DIR
+  unset FM_FAKE_TMUX_CAPTURE FM_FAKE_TMUX_CAPTURE_DIR FM_FAKE_ORCA_UNREADABLE
   "$@"
 }
 
@@ -775,6 +781,35 @@ EOF
   pass "does not re-escalate a busy Orca child as unrelayed"
 }
 
+test_secondmate_dead_orca_child_is_unrelayed() {
+  local dir out capture home
+  dir=$(make_case dead_orca_child)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  cat > "$home/state/orca-child.meta" <<'EOF'
+window=fm-orca-child
+terminal=term-orca-child
+backend=orca
+kind=ship
+harness=claude
+EOF
+  mark_busy "$home/state" orca-child
+  printf '%s\n' 'needs-decision: choose a rollout option' > "$home/state/orca-child.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/orca-child.status" 2>/dev/null || touch -t 200001010000 "$home/state/orca-child.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_ORCA_UNREADABLE=1 FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "dead Orca child check exited non-zero"
+  printf '%s\n' "$out" | grep -E 'unrelayed\?: rt-advisor/orca-child - needs-decision: unanswered for [0-9]+s inside the secondmate home; confirm it reached you' >/dev/null \
+    || fail "dead Orca child must remain unrelayed, got: $out"
+  pass "reports an unrelayed child when its previously busy Orca endpoint is gone"
+}
+
 # Independence check: the new detector must not depend on the secondmate's
 # own outer status/pane state. Here the secondmate itself is ALSO parked on
 # needs-decision (which exempts it from check_advisor_idle_stalls entirely),
@@ -992,6 +1027,7 @@ run_test test_secondmate_child_needs_decision_recent_not_flagged
 run_test test_secondmate_child_needs_decision_busy_pane_not_flagged
 run_test test_orca_busy_task_not_reported_idle
 run_test test_secondmate_orca_busy_child_not_unrelayed
+run_test test_secondmate_dead_orca_child_is_unrelayed
 run_test test_secondmate_child_escalation_independent_of_advisor_own_state
 run_test test_unlanded_work_matrix
 run_test test_unlanded_work_fork_remote_is_landed
