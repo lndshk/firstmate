@@ -279,13 +279,22 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state send_err
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
   baseline_state=$(fm_pane_busy_state "$target")
   [ "$baseline_state" = idle ] && baseline_idle=1
-  tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
+  # Capture send-keys' stderr instead of discarding it. A send that fails here
+  # is reported to the caller as the opaque verdict "send-failed", and tmux's
+  # own reason (unknown pane, server error, bad target) was the only evidence of
+  # WHY. Throwing it away made a real steering failure undiagnosable after the
+  # fact, so surface it on stderr while stdout stays the verdict the caller reads.
+  if ! send_err=$(tmux send-keys -t "$target" -l "$text" 2>&1); then
+    printf '%s\n' "fm-send: send-keys to $target failed: ${send_err:-tmux gave no reason}" >&2
+    printf 'send-failed'
+    return 0
+  fi
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
 }
