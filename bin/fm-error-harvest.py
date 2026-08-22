@@ -79,14 +79,14 @@ _HEX = re.compile(r"\b[0-9a-f]{8,}\b", re.I)
 _NUM = re.compile(r"\b\d{2,}\b")
 _WS = re.compile(r"\s+")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-# Controls EXCEPT tab/newline/carriage-return. A control byte between a key and its
+# Controls EXCEPT newline/carriage-return. A control byte between a key and its
 # separator (`token\x1b=secret`) defeats every assignment pattern, because `\s` does not
 # match C1/C0 controls - so the redactor declines, and clean_text() then repairs the
 # string into a readable secret. Neutralising these BEFORE the patterns run closes that
 # gap at the one choke point. Newlines are deliberately preserved: _SECRET_HEADER is
 # bounded by [^\r\n]*, so collapsing them here would make a header swallow the error
 # text that follows it and merge distinct failures.
-_CONTROL_INLINE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+_CONTROL_INLINE = re.compile(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _SECRET_KEY = (
     r"(?:[A-Za-z0-9_.-]*?(?:token|secret|password|passwd|pwd|api[_-]?key|auth|"
     r"cookie|session|credential|private[_-]?key)[A-Za-z0-9_.-]*)"

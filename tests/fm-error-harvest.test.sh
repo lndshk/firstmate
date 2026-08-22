@@ -494,6 +494,7 @@ redaction_case "ESC before the separator"            "'token\x1b=super-secret'" 
 redaction_case "NUL before the separator"            "'api_key\x00=super-secret'"    "super-secret"
 redaction_case "control inside the key rejoins it"   "'pass\x7fword=super-secret'"   "super-secret"
 redaction_case "control inside the value"            "'token=sup\x1ber-secret'"      "er-secret"
+redaction_case "tab inside the value"                "'token=sup\ter-secret'"        "er-secret"
 redaction_case "bearer token split by a control"     "'Authorization: Bearer abc\x1bdefghijkl'" "defghijkl"
 
 # A header must redact its value WITHOUT swallowing the line after it.
