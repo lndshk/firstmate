@@ -80,6 +80,15 @@ case "${1:-}" in
 esac
 [ $# -le 1 ] || { usage; exit 1; }
 
+update_status=0
+if [ "$update_mode" = activate ]; then
+  supervisor_status=
+  activation_status=0
+  activate_supervisor || activation_status=$?
+  echo "supervisor: $supervisor_status"
+  exit "$activation_status"
+fi
+
 "$SCRIPT_DIR/fm-guard.sh" || true
 
 # --- main firstmate repo ---------------------------------------------------
@@ -148,3 +157,5 @@ fi
 echo "supervisor: $supervisor_status"
 echo "reread-firstmate: $reread_firstmate"
 echo "nudge-secondmates:${FF_NUDGE_WINDOWS:- none}"
+
+exit "$update_status"
