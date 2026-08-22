@@ -412,10 +412,9 @@ check_idle_stalls() {
 # A recorded lane with NO status file at all is a defect in its own right, not a
 # quiet lane. Every other detector here keys on status mtime or content, so a
 # lane that never writes one is skipped by all of them - check_idle_stalls
-# literally `continue`s on a missing status file. That is how a lane ran for
-# hours, hit a blocking question, and was never reported (2026-08-18).
-# Reported once past a short grace, measured from the metadata that recorded the
-# spawn, so a just-started lane is not flagged before it can speak.
+# literally `continue`s on a missing status file. Report it once past a short
+# grace, measured from the metadata that recorded the spawn, so a just-started
+# lane is not flagged before it can speak.
 check_silent_lanes() {
   local meta id kind status age m
   for meta in "$STATE"/*.meta; do

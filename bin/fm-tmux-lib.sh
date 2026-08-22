@@ -71,7 +71,6 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 fm_tmux_composer_capture() {  # <target>
   tmux capture-pane -e -p -t "$1" -S 0 -E - 2>/dev/null
 }
-
 # fm_tmux_composer_cursor_row: the pane's cursor row, zero-based, relative to
 # the visible pane - tmux's genuine primitive that no other backend has.
 fm_tmux_composer_cursor_row() {  # <target>
@@ -351,4 +350,3 @@ fm_clear_safety_prompt() {  # <target>
   tmux send-keys -t "$target" Enter 2>/dev/null || return 2
   return 0
 }
-

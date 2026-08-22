@@ -67,7 +67,6 @@ fm_cursor_canonical_path() {  # <path>
   done
   printf '%s\n' "$dir/$base"
 }
-
 # True when path $1 carries Cursor's own structural evidence: its canonical
 # name is cursor-agent, or it is inside Cursor's
 # cursor-agent/versions/<version>/ install tree. A directory component merely
@@ -240,4 +239,3 @@ fm_cursor_process_matches() {  # <comm> <args> [argv0]
   case "$comm" in */*) fm_cursor_path_is_cursor "$comm" && return 0 ;; esac
   return 1
 }
-

@@ -574,23 +574,8 @@ When updating this file, preserve every safety boundary and keep the always-load
 
 ## Local additions (this fork only)
 
-Upstream does not ship these and its documentation never mentions them. Everything
-else in this file is upstream's and should stay that way, so an upstream sync
-replaces it cleanly.
-
-- `bin/fm-stall-check.sh` - read-only sweep for work that is finished, dormant,
-  unrelayed, or unlanded, where nothing changed so no wake will ever fire.
-  `bin/fm-guard.sh` runs it `--fast`, so findings appear in ordinary tool output;
-  run it without `--fast` to see everything. The away-mode daemon runs the full
-  sweep on its own cadence while `state/.afk` is set.
-- `bin/fm-error-harvest.py` - groups recurring tool errors, denials, and hook
-  failures across Claude Code transcripts, ranked by how many SESSIONS each
-  touches. Report text is untrusted transcript content printed as-is; do not paste
-  raw reports anywhere public.
-- `bin/fm-git-audit.sh` - audits unlanded work and stray worktrees.
-- Codex safety-prompt auto-clear - firstmate answers Codex's additional-safety
-  menu with `Keep waiting` for recorded crewmate panes on the tmux backend.
-  `FM_SAFETY_AUTOCLEAR=0` disables it.
+Upstream does not ship the fork-only tools listed in [`docs/scripts.md`](docs/scripts.md).
+Their headers own exact behavior, and [`docs/configuration.md`](docs/configuration.md) owns their configuration.
 
 **One local hazard:** `projects/quant-src` is a symlink to the live production
 checkout at `/mnt/e/Quant/src`. Fleet-sync follows it correctly and

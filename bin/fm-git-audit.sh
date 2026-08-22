@@ -11,9 +11,8 @@
 #      to be RUN: a crashed agent or a closed window leaves the worktree behind,
 #      so unlanded branches accumulate silently in abandoned pool slots.
 #
-#   2. What the scaffolding costs. Audited 2026-08-22: ~/.treehouse held 223 GB,
-#      201 GB of it Rust target/ dirs wrapping 2.9 MB of source, and 9 firstmate
-#      branches carrying unlanded commits existed nowhere but this disk.
+#   2. What the scaffolding costs. Large build directories and locally unlanded
+#      branches can obscure the source work that needs preservation or cleanup.
 #
 # Read-only. It refreshes configured remotes (unless --no-fetch) and otherwise
 # only reads. It never deletes, pushes, commits, or checks anything out.
