@@ -211,6 +211,7 @@ FM_STATE_OVERRIDE="$HOME_DIR/state" bash -c '
     [ "$pid" = "$current" ] || return 0
     rm -f "$lockdir/pid" 2>/dev/null || true
     rmdir "$lockdir" 2>/dev/null || true
+    [ "$FM_LOCK_USE_FLOCK" != 1 ] && rm -f "$lockdir.guard" 2>/dev/null || true
     : > "$STATE/.wake-queue.seq"
   }
   fm_wake_peek "$2" >/dev/null

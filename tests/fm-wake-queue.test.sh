@@ -171,9 +171,8 @@ test_daemon_state_root_uses_fm_home() {
 append_wake() {
   local state=$1 kind=$2 key=$3 payload=$4
   (
-    export FM_STATE_OVERRIDE="$state"
     # shellcheck disable=SC1090
-    . "$LIB"
+    FM_STATE_OVERRIDE="$state" . "$LIB"
     fm_wake_append "$kind" "$key" "$payload"
   )
 }
