@@ -1,221 +1,28 @@
 #!/usr/bin/env bash
+# tests/fm-wake-queue.test.sh - wake-queue losslessness (the queue safety matrix):
+# concurrent append/drain, bounded structural enrichment, interruption safety,
+# signal catch-up while no watcher runs, stale/check enqueue-before-suppressor
+# ordering, atomic double-drain, duplicate collapse, and liveness assertion.
+# Nothing is lost and nothing is double-consumed. General watcher/lock liveness
+# lives in fm-watcher-lock.test.sh; daemon classification/injection in
+# fm-daemon.test.sh.
 set -u
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/wake-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
-LIB="$ROOT/bin/fm-wake-lib.sh"
-DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
-# Source the daemon's pure classifiers once. The daemon's main loop is skipped
-# under sourcing via its BASH_SOURCE guard, so only the testable functions
-# (classify_*, housekeeping, escalate_*, stale_marker_*) become defined.
-if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
-  export FM_TEST_DAEMON_SOURCED=1
-  # shellcheck source=bin/fm-supervise-daemon.sh
-  . "$DAEMON"
-fi
-TMP_ROOT=
 
-fail() {
-  printf 'not ok - %s\n' "$1" >&2
-  exit 1
-}
+TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
-pass() {
-  printf 'ok - %s\n' "$1"
-}
-
-cleanup() {
-  if [ -n "${TMP_ROOT:-}" ]; then
-    rm -rf "$TMP_ROOT"
-  fi
-}
-
-trap cleanup EXIT
-
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-wake-tests.XXXXXX")
-export FM_WATCH_KEEPALIVE=0
-
-make_case() {
-  local name=$1 dir fakebin
-  dir="$TMP_ROOT/$name"
-  fakebin="$dir/fakebin"
-  mkdir -p "$dir/state" "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-if [ "${1:-}" = "list-windows" ]; then
-  if [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
-    printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
-  fi
-  exit 0
-fi
-if [ "${1:-}" = "capture-pane" ]; then
-  if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
-    cat "$FM_FAKE_TMUX_CAPTURE"
-  fi
-  exit 0
-fi
-exit 1
-SH
-  chmod +x "$fakebin/tmux"
-  printf '%s\n' "$dir"
-}
-
-# Like make_case, but the fake tmux also covers the sub-supervisor daemon's
-# surface (display-message pane probe, send-keys capture) so the daemon's
-# injection + housekeeping paths can be exercised. Behavior is controlled via
-# FM_FAKE_TMUX_* env vars set per test.
-make_supercase() {
-  local name=$1 dir fakebin
-  dir="$TMP_ROOT/$name"
-  fakebin="$dir/fakebin"
-  mkdir -p "$dir/state" "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  list-panes)
-    # Pane presence is probed with list-panes, which fails for a gone target.
-    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || { printf "can't find window\n" >&2; exit 1; }
-    printf 'fakepane\n'
-    exit 0 ;;
-  display-message)
-    # Real tmux answers display-message from the client's current pane even when
-    # the target is gone, so this fake never fails - only list-panes above can.
-    _print=0
-    # Return cursor_y when the format asks for it (pane_input_pending).
-    for _a in "$@"; do
-      case "$_a" in *cursor_y*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR_Y:-0}"; exit 0 ;; esac
-      [ "$_a" = "-p" ] && _print=1
-    done
-    [ "$_print" = 1 ] && printf 'fakepane\n'
-    exit 0 ;;
-  list-windows)
-    [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
-    exit 0 ;;
-  capture-pane)
-    # Honor a single-line band capture (-S N -E M, both non-negative) the way the
-    # composer reader now bounds its capture to the cursor row; otherwise (e.g.
-    # fm_pane_is_busy's "-S -40" tail) return the whole capture. -e is accepted and
-    # ignored: this fake emits plain text, which the dim-stripper passes through.
-    _S=""; _E=""; shift
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        -S) _S="${2:-}"; shift 2; continue ;;
-        -E) _E="${2:-}"; shift 2; continue ;;
-        *) shift ;;
-      esac
-    done
-    [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] || exit 0
-    if [ -n "$_S" ] && [ -n "$_E" ]; then
-      case "$_S$_E" in
-        *[!0-9]*) cat "$FM_FAKE_TMUX_CAPTURE" 2>/dev/null ;;
-        *) sed -n "$((_S + 1)),$((_E + 1))p" "$FM_FAKE_TMUX_CAPTURE" 2>/dev/null ;;
-      esac
-    else
-      cat "$FM_FAKE_TMUX_CAPTURE" 2>/dev/null
-    fi
-    exit 0 ;;
-  send-keys)
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        -l) shift; [ "$#" -gt 0 ] && {
-          printf '%s\n' "$1" >> "${FM_FAKE_TMUX_SENT:-/dev/null}"
-          # Reflect sent text into capture so pane_input_pending sees it as
-          # pending input (text in the composer).
-          [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && printf '%s\n' "$1" >> "$FM_FAKE_TMUX_CAPTURE"
-        } ;;
-        Enter)
-          # Optionally swallow Enter (file-based flag) to test the retry path.
-          if [ -n "${FM_FAKE_TMUX_SWALLOW_FILE:-}" ] && [ -f "$FM_FAKE_TMUX_SWALLOW_FILE" ]; then
-            rm -f "$FM_FAKE_TMUX_SWALLOW_FILE"
-          else
-            printf '[ENTER]\n' >> "${FM_FAKE_TMUX_SENT:-/dev/null}"
-            # Enter submits: clear the last line (the typed text) from the
-            # capture, simulating the composer being cleared on submit.
-            if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && [ -s "$FM_FAKE_TMUX_CAPTURE" ]; then
-              _tmp=$(mktemp 2>/dev/null) || _tmp="${FM_FAKE_TMUX_CAPTURE}.tmp"
-              sed '$d' "$FM_FAKE_TMUX_CAPTURE" > "$_tmp" 2>/dev/null && mv -f "$_tmp" "$FM_FAKE_TMUX_CAPTURE"
-              rm -f "$_tmp" 2>/dev/null
-            fi
-          fi
-          ;;
-      esac
-      shift
-    done
-    exit 0 ;;
-esac
-exit 1
-SH
-  chmod +x "$fakebin/tmux"
-  printf '%s\n' "$dir"
-}
-
-test_daemon_state_root_uses_fm_home() {
-  local dir home override out
-  dir=$(make_supercase daemon-fm-home)
-  home="$dir/firstmate-home"
-  override="$dir/override-state"
-  mkdir -p "$home" "$override"
-
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE='' _state_root)
-  [ "$out" = "$home/state" ] || fail "daemon state root ignored FM_HOME: $out"
-
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$override" _state_root)
-  [ "$out" = "$override" ] || fail "daemon state root ignored FM_STATE_OVERRIDE: $out"
-
-  pass "supervise daemon state root is scoped by FM_HOME"
-}
-
-append_wake() {
-  local state=$1 kind=$2 key=$3 payload=$4
-  (
-    export FM_STATE_OVERRIDE="$state"
-    # shellcheck disable=SC1090
-    . "$LIB"
-    fm_wake_append "$kind" "$key" "$payload"
-  )
-}
-
-wait_for_exit() {
-  local pid=$1 limit=${2:-50} i=0
-  while [ "$i" -lt "$limit" ]; do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      wait "$pid"
-      return "$?"
-    fi
-    sleep 0.1
-    i=$((i + 1))
-  done
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  return 124
-}
-
-is_live_non_zombie() {
-  local pid=$1 stat
-  kill -0 "$pid" 2>/dev/null || return 1
-  stat=$(ps -p "$pid" -o stat= 2>/dev/null || true)
-  case "$stat" in *Z*) return 1 ;; esac
-  return 0
-}
-
-hash_text() {
-  if command -v md5 >/dev/null 2>&1; then
-    printf '%s' "$1" | md5 -q
-  else
-    printf '%s' "$1" | md5sum | cut -d' ' -f1
-  fi
-}
 
 test_concurrent_append_and_drain() {
-  local dir state out1 out2 all pids i pid count unique malformed
+  local dir state out1 out2 pids i pid count unique malformed sequence generation
   dir=$(make_case concurrent)
   state="$dir/state"
   out1="$dir/drain-one.out"
   out2="$dir/drain-two.out"
-  all="$dir/all.out"
   pids=
   i=1
   while [ "$i" -le 40 ]; do
@@ -228,31 +35,46 @@ test_concurrent_append_and_drain() {
   for pid in $pids; do
     wait "$pid" || fail "concurrent append/drain subprocess failed"
   done
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" || fail "final drain failed"
-  cat "$out1" "$out2" > "$all"
-  count=$(awk 'NF { count++ } END { print count + 0 }' "$all")
-  [ "$count" -eq 40 ] || fail "expected 40 drained records, got $count"
-  malformed=$(awk -F '\t' 'NF != 5 { bad++ } END { print bad + 0 }' "$all")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" 2> "$dir/drain-two.err" || fail "final drain failed"
+  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out2")
+  [ "$count" -eq 40 ] || fail "expected final replay of 40 durable records, got $count"
+  malformed=$(awk -F '\t' 'NF && NF != 5 { bad++ } END { print bad + 0 }' "$out2")
   [ "$malformed" -eq 0 ] || fail "drained records had malformed fields"
-  unique=$(awk -F '\t' '{ keys[$4] = 1 } END { for (k in keys) count++; print count + 0 }' "$all")
+  unique=$(awk -F '\t' 'NF == 5 { keys[$4] = 1 } END { for (k in keys) count++; print count + 0 }' "$out2")
   [ "$unique" -eq 40 ] || fail "expected 40 unique keys, got $unique"
-  pass "concurrent append plus drain preserves queue records"
+  [ -s "$state/.wake-queue" ] || fail "concurrent drain consumed records before handling acknowledgement"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/drain-two.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain-two.err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "final replay omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "concurrent records could not be acknowledged"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledged concurrent records remained queued"
+  pass "concurrent append plus drain preserves durable records through acknowledgement"
 }
 
 test_signal_catchup_without_running_watcher() {
-  local dir state fakebin out drain_out status_file
+  local dir state fakebin out drain_out drain_err status_file sequence generation
   dir=$(make_case signal)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   drain_out="$dir/drain.out"
+  drain_err="$dir/drain.err"
   status_file="$state/task.status"
-  printf 'working: first\n' > "$status_file"
+  # The durable-queue catch-up contract applies to ACTIONABLE wakes (the always-on
+  # watcher can absorb no-verb working: notes when the crew is provably working).
+  # Use a captain-relevant verb so the wake is surfaced and the catch-up path is
+  # tested.
+  printf 'blocked: first\n' > "$status_file"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for first signal"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print first signal"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after first signal failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" || fail "drain after first signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "first signal was not queued"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "first signal handling acknowledgement failed"
 
   printf 'done: second\n' >> "$status_file"
   : > "$out"
@@ -263,7 +85,7 @@ test_signal_catchup_without_running_watcher() {
 }
 
 test_stale_enqueue_before_suppressor() {
-  local dir state fakebin out drain_out capture_file window key pane_hash
+  local dir state fakebin out drain_out capture_file window key pane_hash sig
   dir=$(make_case stale)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -273,6 +95,13 @@ test_stale_enqueue_before_suppressor() {
   window="test:fm-stale"
   printf 'idle prompt' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/stale.meta"
+  # A stale pane sitting on a captain-relevant status is actionable when the crew
+  # is not provably working, so give the window one and prime the .seen-* marker
+  # to its current signature so the per-poll signal scan does not pre-empt the
+  # stale wake with a signal wake.
+  printf 'done: ready in branch fm/stale\n' > "$state/stale.status"
+  if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stale.status"); else sig=$(stat -c '%s:%Y' "$state/stale.status"); fi
+  printf '%s' "$sig" > "$state/.seen-stale_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle prompt")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -286,6 +115,45 @@ test_stale_enqueue_before_suppressor() {
   pass "stale wake is queued before suppressor state is advanced"
 }
 
+# Absorb-only-when-provably-working adds a new actionable wake: a non-terminal stale
+# whose crew is NOT provably working is surfaced immediately. That new path must keep
+# the queue-safety invariant - enqueue the stale wake BEFORE advancing the .stale-*
+# suppressor - so a watcher killed between the two never swallows the surfaced finish.
+test_not_working_stale_enqueue_before_suppressor() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig
+  dir=$(make_case stale-stopped)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  drain_out="$dir/drain.out"
+  capture_file="$dir/pane.txt"
+  window="test:fm-stopped"
+  printf 'idle prompt, finished' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/stopped.meta"
+  # Non-terminal status (no captain-relevant verb); prime .seen-* so the per-poll
+  # signal scan does not pre-empt the stale path.
+  printf 'working: implementing\n' > "$state/stopped.status"
+  if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stopped.status"); else sig=$(stat -c '%s:%Y' "$state/stopped.status"); fi
+  printf '%s' "$sig" > "$state/.seen-stopped_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle prompt, finished")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # NOT provably working: no running pipeline, idle pane. (make_case installed the
+  # fake fm-crew-state.sh the watcher reads via FM_CREW_STATE_BIN.)
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wait_for_exit "$!" 40 || fail "watcher did not surface a not-provably-working stale"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the immediate stale wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after the immediate stale wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not advanced after the enqueue"
+  unset FM_FAKE_CREW_STATE
+  pass "a not-provably-working stale wake is queued before its suppressor is advanced"
+}
+
 test_check_output_is_queued() {
   local dir state fakebin out drain_out check_file
   dir=$(make_case check)
@@ -294,90 +162,55 @@ test_check_output_is_queued() {
   out="$dir/watch.out"
   drain_out="$dir/drain.out"
   check_file="$state/task.check.sh"
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
   cat > "$check_file" <<'SH'
 #!/usr/bin/env bash
 printf 'merged: https://example.test/pr/1\n'
 SH
-  chmod +x "$check_file"
+  chmod 0700 "$check_file"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register queue custom check"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for check output"
   grep -F "check: $check_file: merged: https://example.test/pr/1" "$out" >/dev/null || fail "watcher did not print check wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after check wake failed"
   grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/1' >/dev/null || fail "check wake was not queued"
   [ -e "$state/.last-check" ] || fail "check cadence marker was not written after queue append"
-  pass "check output is queued before cadence suppression"
-}
-
-test_singleton_start() {
-  local dir state fakebin out1 out2 pid1 pid2 live
-  dir=$(make_case singleton)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  out1="$dir/watch-one.out"
-  out2="$dir/watch-two.out"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out1" &
-  pid1=$!
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
-  pid2=$!
-  sleep 0.5
-  live=0
-  is_live_non_zombie "$pid1" && live=$((live + 1))
-  is_live_non_zombie "$pid2" && live=$((live + 1))
-  [ "$live" -eq 1 ] || fail "expected exactly one live watcher, got $live"
-  grep -h 'watcher: already running pid ' "$out1" "$out2" >/dev/null || fail "second watcher did not report existing singleton"
-  kill "$pid1" "$pid2" 2>/dev/null || true
-  wait "$pid1" 2>/dev/null || true
-  wait "$pid2" 2>/dev/null || true
-  pass "simultaneous watcher starts leave exactly one live process"
+  pass "registered custom check output is queued before cadence suppression"
 }
 
 test_atomic_double_drain() {
-  local dir state out1 out2 all count leftover
+  local dir state out1 out2 count1 count2 sequence generation leftover
   dir=$(make_case double-drain)
   state="$dir/state"
   out1="$dir/drain-one.out"
   out2="$dir/drain-two.out"
-  all="$dir/all.out"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "heartbeat append failed"
   append_wake "$state" signal task "signal: $state/task.status" || fail "signal append failed"
   append_wake "$state" stale 's:fm-task' 'stale: s:fm-task' || fail "stale append failed"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out1" &
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out1" 2> "$dir/drain-one.err" &
   pid1=$!
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" &
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" 2> "$dir/drain-two.err" &
   pid2=$!
   wait "$pid1" || fail "first drain failed"
   wait "$pid2" || fail "second drain failed"
-  cat "$out1" "$out2" > "$all"
-  count=$(awk 'NF { count++ } END { print count + 0 }' "$all")
-  [ "$count" -eq 3 ] || fail "two drains consumed records more than once or lost records; got $count"
-  leftover=$(FM_STATE_OVERRIDE="$state" "$DRAIN" | awk 'NF { count++ } END { print count + 0 }')
-  [ "$leftover" -eq 0 ] || fail "queue was not empty after double drain"
-  pass "two atomic drains cannot consume the same records twice"
-}
-
-test_drain_reports_lock_release_failure() {
-  local dir state fakebin out status
-  dir=$(make_case drain-release-failure)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  out="$dir/drain.out"
-  cat > "$fakebin/cat" <<'SH'
-#!/usr/bin/env bash
-case "${1:-}" in
-  *".wake-queue.lock/pid") printf '2147483647\n'; exit 0 ;;
-esac
-exec /bin/cat "$@"
-SH
-  chmod +x "$fakebin/cat"
-  append_wake "$state" heartbeat heartbeat heartbeat \
-    || fail "release-failure wake append failed"
-  status=0
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
-    || status=$?
-  [ "$status" -ne 0 ] || fail "drain hid queue lock release failure"
-  grep "$(printf '\theartbeat\theartbeat\theartbeat')" "$out" >/dev/null \
-    || fail "release-failure drain lost its emitted wake"
-  pass "drain propagates queue lock release failure"
+  count1=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out1")
+  count2=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out2")
+  [ "$count1" -eq 3 ] && [ "$count2" -eq 3 ] \
+    || fail "unacknowledged concurrent drains did not replay all three records"
+  cmp -s "$out1" "$out2" || fail "concurrent pre-ack replays were not deterministic"
+  [ -s "$state/.wake-queue" ] || fail "concurrent drains consumed records before acknowledgement"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/drain-two.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain-two.err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "concurrent replay omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "concurrent replay acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledgement did not consume replayed records"
+  leftover=$(FM_STATE_OVERRIDE="$state" "$DRAIN" | awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }')
+  [ "$leftover" -eq 0 ] || fail "acknowledged records replayed again"
+  pass "concurrent drains replay until one post-handling acknowledgement consumes records"
 }
 
 test_drain_dedupes_obvious_duplicates() {
@@ -397,1619 +230,584 @@ test_drain_dedupes_obvious_duplicates() {
   pass "drain collapses obvious duplicate heartbeat and signal records"
 }
 
-test_stale_watch_lock_reclaimed() {
-  local dir state fakebin out dead_pid pid live lock_pid
-  dir=$(make_case stale-lock)
+# The drain runs at the top of every wake-handling turn, so it also asserts
+# watcher liveness via fm-guard.sh: a lapsed re-arm chain then surfaces even on a
+# plain drain-and-handle turn that runs no other supervision script. It must warn
+# when work is in flight with no live watcher, and stay silent right after a
+# normal fire from a live watcher with a fresh beacon, so it never false-alarms.
+test_drain_asserts_watcher_liveness() {
+  local dir state err identity
+  dir=$(make_case drain-liveness)
   state="$dir/state"
-  fakebin="$dir/fakebin"
-  out="$dir/watch.out"
-  dead_pid=999999
-  while kill -0 "$dead_pid" 2>/dev/null; do
-    dead_pid=$((dead_pid + 1))
-  done
-  mkdir "$state/.watch.lock"
-  printf '%s\n' "$dead_pid" > "$state/.watch.lock/pid"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  pid=$!
-  sleep 0.5
-  live=0
-  is_live_non_zombie "$pid" && live=1
-  [ "$live" -eq 1 ] || fail "watcher did not reclaim stale lock and stay alive"
-  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-  [ "$lock_pid" != "$dead_pid" ] || fail "stale watch lock pid was not replaced"
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  pass "killed watcher stale lock is reclaimed"
-}
-
-test_live_stale_watch_lock_is_actionable() {
-  local dir state fakebin out err status
-  dir=$(make_case live-stale-lock)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  out="$dir/watch.out"
-  err="$dir/watch.err"
+  err="$dir/drain.err"
+  printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || fail "drain failed while asserting liveness"
+  grep -F 'WATCHER DOWN' "$err" >/dev/null || fail "drain did not surface the watcher-down banner with work in flight and no live watcher"
+  : > "$err"
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$$") \
+    || fail "could not identify the live watcher fixture"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$$" > "$state/.watch.lock/pid"
-  touch -t 200001010000 "$state/.last-watcher-beat"
-  status=0
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
-  [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a live stale holder"
-  grep -F 'heartbeat is stale' "$err" >/dev/null || fail "watcher did not explain the stale live lock"
-  pass "live watcher lock with stale heartbeat is actionable"
-}
-
-test_keepalive_rearms_stale_missing_watcher() {
-  local dir state fakebin out pid watcher_pid beat_age
-  dir=$(make_case keepalive-rearm)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  out="$dir/keepalive.out"
-  printf 'project=x\n' > "$state/task.meta"
-  touch -t 200001010000 "$state/.last-watcher-beat"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_KEEPALIVE=1 FM_WATCH_KEEPALIVE_INTERVAL=1 \
-    FM_WATCHER_STALE_GRACE=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
-    FM_HEARTBEAT=999999 "$WATCH" --keepalive > "$out" &
-  pid=$!
-  sleep 2.5
-  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-  [ -n "$watcher_pid" ] || fail "keepalive did not start a one-shot watcher"
-  is_live_non_zombie "$watcher_pid" || fail "keepalive watcher pid is not live"
-  # shellcheck disable=SC1090
-  beat_age=$(FM_STATE_OVERRIDE="$state" . "$LIB"; fm_path_age "$state/.last-watcher-beat")
-  [ "$beat_age" -lt 3 ] || fail "keepalive watcher did not refresh heartbeat (age=$beat_age)"
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  is_live_non_zombie "$watcher_pid" && fail "keepalive did not clean up child watcher on exit"
-  pass "watch keepalive re-arms a stale missing watcher"
-}
-
-test_keepalive_stops_when_fleet_empty() {
-  local dir state fakebin out pid live
-  dir=$(make_case keepalive-empty)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  out="$dir/keepalive.out"
-  touch -t 200001010000 "$state/.last-watcher-beat"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_KEEPALIVE=1 FM_WATCH_KEEPALIVE_INTERVAL=1 \
-    FM_WATCHER_STALE_GRACE=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
-    FM_HEARTBEAT=999999 "$WATCH" --keepalive > "$out" &
-  pid=$!
-  sleep 1.5
-  live=0
-  is_live_non_zombie "$pid" && live=1
-  [ "$live" -eq 0 ] || { kill "$pid" 2>/dev/null || true; fail "keepalive kept running with no tasks in flight"; }
-  [ -e "$state/.watch.lock/pid" ] && fail "keepalive armed a watcher with no tasks in flight"
-  wait "$pid" 2>/dev/null || true
-  pass "watch keepalive stops cleanly when the fleet is empty"
-}
-
-test_guard_warns_on_pending_queue() {
-  local dir state err
-  dir=$(make_case guard)
-  state="$dir/state"
-  err="$dir/guard.err"
-  printf 'project=x\n' > "$state/task.meta"
-  append_wake "$state" heartbeat heartbeat heartbeat || fail "guard heartbeat append failed"
-  FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=999999 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  grep -F 'queued wakes pending - drain them' "$err" >/dev/null || fail "guard did not warn about pending queue"
-  pass "guard warns when queued wakes are pending"
-}
-
-test_guard_rearms_after_draining_pending_queue() {
-  local dir state err
-  dir=$(make_case guard-order)
-  state="$dir/state"
-  err="$dir/guard.err"
-  printf 'project=x\n' > "$state/task.meta"
-  append_wake "$state" heartbeat heartbeat heartbeat || fail "guard heartbeat append failed"
-  FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  grep -F 'queued wakes pending - drain them' "$err" >/dev/null || fail "guard did not warn about pending queue"
-  grep -F 'After draining queued wakes, re-arm the watcher' "$err" >/dev/null || fail "guard did not order re-arm after drain"
-  ! grep -F 'Restart it NOW, before anything else' "$err" >/dev/null || fail "guard still gave conflicting restart-first instruction"
-  pass "guard orders watcher re-arm after queued wake drain"
-}
-
-test_classify_routine_signal_self() {
-  local dir state out
-  dir=$(make_supercase classify-routine)
-  state="$dir/state"
-  printf 'working: step 1\nworking: step 2\n' > "$state/foo-x1.status"
-  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/foo-x1.status" "$state")
-  case "$out" in self\|*) pass "routine signal self-handles" ;; *) fail "routine signal did not self-handle: $out" ;; esac
-}
-
-test_classify_terminal_signal_escalates() {
-  local dir state kw out
-  dir=$(make_supercase classify-terminal)
-  state="$dir/state"
-  for kw in "done: PR https://x/y/pull/1" "needs-decision: pick A" "blocked: no perms" \
-            "failed: rc 2" "PR ready https://x/y/pull/2" "checks green" \
-            "ready in branch fm/t1" "merged"; do
-    printf 'working\n%s\n' "$kw" > "$state/t.status"
-    out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/t.status" "$state")
-    case "$out" in escalate\|*) ;; *) fail "captain verb did not escalate ($kw): $out" ;; esac
-  done
-  pass "captain-relevant status verbs escalate"
-}
-
-test_classify_check_and_unknown_escalate() {
-  local out
-  out=$(classify_check "check: /s/c.check.sh: merged: https://x")
-  case "$out" in escalate\|*) ;; *) fail "check did not escalate: $out" ;; esac
-  out=$(classify_unknown "frobnicate: weird")
-  case "$out" in escalate\|*) ;; *) fail "unknown did not fail-safe escalate: $out" ;; esac
-  out=$(classify_heartbeat)
-  case "$out" in self\|*) ;; *) fail "heartbeat did not self-handle: $out" ;; esac
-  pass "check + unknown escalate; heartbeat self-handles"
-}
-
-test_stale_transient_self_records_marker() {
-  local dir state out key
-  dir=$(make_supercase stale-transient)
-  state="$dir/state"
-  printf 'working: building\n' > "$state/qux-w4.status"
-  stale_marker_record "sess:fm-qux-w4" "$state"
-  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-qux-w4" "$state")
-  case "$out" in self\|*) ;; *) fail "transient stale did not self-handle: $out" ;; esac
-  key=$(printf '%s' "$(window_to_task "sess:fm-qux-w4")" | tr ':/.' '___')
-  [ -e "$state/.subsuper-stale-$key" ] || fail "stale marker was not recorded"
-  pass "transient stale self-handles and records a persistence marker"
-}
-
-test_stale_terminal_escalates() {
-  local dir state out
-  dir=$(make_supercase stale-terminal)
-  state="$dir/state"
-  printf 'done: ready in branch fm/t1\n' > "$state/fin-t5.status"
-  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-fin-t5" "$state")
-  case "$out" in escalate\|*) ;; *) fail "terminal stale did not escalate: $out" ;; esac
-  pass "stale + terminal status escalates immediately"
-}
-
-test_housekeeping_persistent_stale_escalates() {
-  local dir state fakebin win pane key
-  dir=$(make_supercase stale-persistent)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  win="sess:fm-pers-w5"
-  pane="$dir/pane.txt"
-  printf 'working\n' > "$state/pers-w5.status"
-  printf 'idle prompt $\n' > "$pane"
-  key=$(printf '%s' "pers-w5" | tr ':/.' '___')
-  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
-  [ -s "$state/.subsuper-escalations" ] || fail "persistent stale was not escalated"
-  [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
-  pass "persistent stale escalates after threshold and clears its marker"
-}
-
-test_housekeeping_resumed_stale_cleared() {
-  local dir state fakebin win pane key
-  dir=$(make_supercase stale-resumed)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  win="sess:fm-res-w6"
-  pane="$dir/pane.txt"
-  printf 'working\n' > "$state/res-w6.status"
-  printf 'Working...\n' > "$pane"
-  key=$(printf '%s' "res-w6" | tr ':/.' '___')
-  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
-  [ -e "$state/.subsuper-stale-$key" ] && fail "resumed stale marker was not cleared"
-  [ -s "$state/.subsuper-escalations" ] && fail "resumed stale was escalated"
-  pass "resumed (busy) stale clears its marker without escalating"
-}
-
-test_escalate_batches_into_one_digest() {
-  local dir state fakebin sent capture n
-  dir=$(make_supercase batch)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
-  escalate_add "$state" "event A: done: PR 1"
-  escalate_add "$state" "event B: done: PR 2"
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
-    || fail "escalate_flush failed"
-  grep -F "event A" "$sent" >/dev/null || fail "batch digest missing event A"
-  grep -F "event B" "$sent" >/dev/null || fail "batch digest missing event B"
-  grep -F 'event A: done: PR 1 | event B: done: PR 2' "$sent" >/dev/null \
-    || fail "batch digest did not join events with literal ' | '"
-  [ -s "$state/.subsuper-escalations" ] && fail "escalation buffer not cleared after flush"
-  [ -e "$state/.subsuper-escalations.since" ] && fail "first-append sidecar not cleared after flush"
-  n=$(grep -c '\[ENTER\]' "$sent")
-  [ "$n" -eq 1 ] || fail "expected one injected digest, got $n send-keys submits"
-  pass "multiple escalations flush as a single batched digest"
-}
-
-test_escalate_batch_age_uses_first_append() {
-  local dir state fakebin sent capture
-  dir=$(make_supercase batch-age)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
-  escalate_add "$state" "event A: done: PR 1"
-  escalate_add "$state" "event B: done: PR 2"
-  echo $(( $(date +%s) - 100 )) > "$state/.subsuper-escalations.since"
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=90 FM_HOUSEKEEPING_TICK=0 \
-    housekeeping "$state"
-  grep -F 'event A: done: PR 1 | event B: done: PR 2' "$sent" >/dev/null \
-    || fail "backdated batch did not flush as a joined digest (max-delay measured from last append)"
-  [ -s "$state/.subsuper-escalations" ] && fail "escalation buffer not cleared after backdated flush"
-  [ -e "$state/.subsuper-escalations.since" ] && fail "first-append sidecar not cleared after flush"
-  pass "batch flush measures max-delay from the first append, not the last"
-}
-
-test_heartbeat_scan_dedup() {
-  local dir state
-  dir=$(make_supercase scan-dedup)
-  state="$dir/state"
-  printf 'done: ready\n' > "$state/dup-t6.status"
-  rm -f "$state/.subsuper-last-scan"
-  FM_STATE_OVERRIDE="$state" housekeeping "$state"
-  [ -s "$state/.subsuper-escalations" ] || fail "catch-all scan did not escalate a terminal"
-  : > "$state/.subsuper-escalations"
-  echo $(( $(date +%s) - 99999 )) > "$state/.subsuper-last-scan"
-  FM_STATE_OVERRIDE="$state" housekeeping "$state"
-  [ -s "$state/.subsuper-escalations" ] && fail "catch-all scan re-escalated the same terminal (dedup failed)"
-  pass "catch-all scan escalates a missed terminal once, not twice"
-}
-
-test_handle_wake_routes_self_and_escalate() {
-  local dir state
-  dir=$(make_supercase handle)
-  state="$dir/state"
-  printf 'working\n' > "$state/h-routine.status"
-  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/h-routine.status" "$state"
-  [ -s "$state/.subsuper-escalations" ] && fail "routine signal was escalated by handle_wake"
-  printf 'done: PR 1\n' > "$state/h-done.status"
-  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/h-done.status" "$state"
-  [ -s "$state/.subsuper-escalations" ] || fail "captain signal was not buffered by handle_wake"
-  pass "handle_wake routes routine->self and captain->escalate"
-}
-
-test_inject_skip_forces_self() {
-  local dir state
-  dir=$(make_supercase skip)
-  state="$dir/state"
-  printf 'done: PR 1\n' > "$state/s1.status"
-  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP="signal" handle_wake "signal: $state/s1.status" "$state"
-  [ -s "$state/.subsuper-escalations" ] && fail "INJECT_SKIP=signal did not force self-handle"
-  pass "INJECT_SKIP forces self-handle, bypassing captain-relevant classification"
-}
-
-test_is_wake_reason_distinguishes_status_stdout() {
-  # Real wake reasons are recognized; watcher status lines (singleton collision)
-  # are not, so the main loop can idle them without flooding escalations.
-  is_wake_reason "signal: /x/y.status" || fail "signal: not recognized as wake"
-  is_wake_reason "stale: s:fm-x" || fail "stale: not recognized as wake"
-  is_wake_reason "check: /s/c.sh: merged" || fail "check: not recognized as wake"
-  is_wake_reason "heartbeat" || fail "heartbeat not recognized as wake"
-  is_wake_reason "watcher: already running" && fail "singleton status line misclassified as wake"
-  is_wake_reason "watcher: already running pid 123" && fail "singleton status (pid) misclassified as wake"
-  pass "is_wake_reason distinguishes watcher wake reasons from singleton-status stdout"
-}
-
-test_terminal_stale_escalate_leaves_no_marker() {
-  local dir state win key
-  dir=$(make_supercase stale-terminal-nomarker)
-  state="$dir/state"
-  win="sess:fm-fin-n7"
-  printf 'done: PR https://x/y/pull/7\n' > "$state/fin-n7.status"
-  key=$(printf '%s' "fin-n7" | tr ':/.' '___')
-  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
-  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
-  [ -s "$state/.subsuper-escalations" ] || fail "terminal stale was not escalated"
-  [ ! -e "$state/.subsuper-stale-$key" ] || fail "terminal stale left a persistence marker (housekeeping would re-escalate)"
-  : > "$state/.subsuper-escalations"
-  rm -f "$state/.subsuper-last-scan"
-  FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
-  [ ! -s "$state/.subsuper-escalations" ] || fail "housekeeping re-escalated a terminal stale as a wedge"
-  pass "terminal-stale escalate removes its marker so housekeeping does not re-escalate"
-}
-
-# The watcher reports a process-tree death as "stale: <window> (no live agent
-# process)". The trailing annotation must never be parsed as part of the window:
-# doing so looks up the wrong status file (self-handle instead of escalate) and
-# writes a marker key housekeeping can never map back to a window, so the one
-# wake fm-watch fires per generation is discarded while the captain is away.
-test_dead_agent_stale_wake_parses_window_and_escalates() {
-  local dir state win out
-  dir=$(make_supercase stale-dead-agent)
-  state="$dir/state"
-  win="sess:fm-gone-d3"
-  printf 'working: mid-task\n' > "$state/gone-d3.status"
-  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state" "(no live agent process)")
-  [ "${out%%|*}" = escalate ] \
-    || fail "dead-agent stale was not classified as escalate: $out"
-  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win (no live agent process)" "$state"
-  grep -F "$win" "$state/.subsuper-escalations" >/dev/null \
-    || fail "dead-agent stale wake was not escalated: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
-  grep -F 'no live agent process)' "$state/.subsuper-escalations" >/dev/null \
-    && fail "the trailing annotation leaked into the escalated window name"
-  ls "$state"/.subsuper-stale-* >/dev/null 2>&1 \
-    && fail "dead-agent stale left a persistence marker housekeeping cannot map back"
-
-  dir=$(make_supercase stale-dead-agent-terminal)
-  state="$dir/state"
-  win="sess:fm-fin-d4"
-  printf 'done: PR https://x/y/pull/4\n' > "$state/fin-d4.status"
-  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win (no live agent process)" "$state"
-  grep -F 'done: PR https://x/y/pull/4' "$state/.subsuper-escalations" >/dev/null \
-    || fail "annotated stale did not read the recorded task's status file"
-  [ -e "$state/.subsuper-seen-status-fin-d4" ] \
-    || fail "seen marker was not keyed to the bare task id: $(ls "$state" | tr '\n' ' ')"
-
-  dir=$(make_supercase stale-plain-transient)
-  state="$dir/state"
-  printf 'working: mid-task\n' > "$state/plain-d5.status"
-  FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-plain-d5" "$state"
-  [ ! -s "$state/.subsuper-escalations" ] \
-    || fail "plain transient stale was escalated: $(cat "$state/.subsuper-escalations")"
-  [ -e "$state/.subsuper-stale-plain-d5" ] \
-    || fail "plain transient stale did not record its persistence marker"
-  pass "dead-agent stale wake parses the bare window, escalates, and leaves no garbled marker"
-}
-
-test_signal_escalate_marks_seen_no_catchall_refire() {
-  local dir state key
-  dir=$(make_supercase signal-seen)
-  state="$dir/state"
-  printf 'done: PR https://x/y/pull/8\n' > "$state/sig-t8.status"
-  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/sig-t8.status" "$state"
-  [ -s "$state/.subsuper-escalations" ] || fail "captain signal was not escalated"
-  key=$(printf '%s' "sig-t8" | tr ':/.' '___')
-  [ "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "done: PR https://x/y/pull/8" ] \
-    || fail "captain signal escalate did not write the seen-status marker"
-  : > "$state/.subsuper-escalations"
-  rm -f "$state/.subsuper-last-scan"
-  FM_STATE_OVERRIDE="$state" housekeeping "$state"
-  [ ! -s "$state/.subsuper-escalations" ] || fail "catch-all scan re-fired an already-escalated signal"
-  pass "captain signal escalate marks seen so the catch-all scan does not re-fire"
-}
-
-test_timestamped_status_uses_raw_dedupe_and_clean_presentation() {
-  local dir state fakebin sent capture raw1 raw2 raw3 key out
-  dir=$(make_supercase timestamped-status)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"
-  capture="$dir/pane.txt"
-  : > "$sent"
-  : > "$capture"
-  raw1=$'done: PR https://x/y/pull/11\t1700000123'
-  raw2=$'done: PR https://x/y/pull/11\t1700000456'
-  raw3=$'needs-decision: choose release window\t1700000789'
-  printf '%s\n' "$raw1" > "$state/stamped-s11.status"
-
-  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/stamped-s11.status" "$state")
-  case "$out" in
-    escalate\|*"done: PR https://x/y/pull/11"*) ;;
-    *) fail "timestamped signal did not present clean receipt text: $out" ;;
-  esac
-  case "$out" in *$'\t'*|*1700000123*) fail "timestamped signal leaked receipt metadata: $out" ;; esac
-
-  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/stamped-s11.status" "$state"
-  key=$(printf '%s' "stamped-s11" | tr ':/.' '___')
-  [ "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "$raw1" ] \
-    || fail "seen marker did not preserve the raw timestamped receipt"
-  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/stamped-s11.status" "$state")
-  case "$out" in self\|*) ;; *) fail "unchanged raw receipt was not deduped: $out" ;; esac
-
-  printf '%s\n' "$raw2" >> "$state/stamped-s11.status"
-  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/stamped-s11.status" "$state")
-  case "$out" in
-    escalate\|*"done: PR https://x/y/pull/11"*) ;;
-    *) fail "new raw receipt version with identical text was incorrectly deduped: $out" ;;
-  esac
-  case "$out" in *$'\t'*|*1700000456*) fail "new receipt version leaked metadata: $out" ;; esac
-
-  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-stamped-s11" "$state")
-  case "$out" in escalate\|*"done: PR https://x/y/pull/11"*) ;; *) fail "stale presentation was not clean: $out" ;; esac
-  case "$out" in *$'\t'*|*1700000456*) fail "stale presentation leaked receipt metadata: $out" ;; esac
-
-  printf '%s\n' "$raw3" > "$state/scanned-s12.status"
-  rm -f "$state/.subsuper-last-scan"
-  FM_STATE_OVERRIDE="$state" housekeeping "$state"
-  if grep -F $'\t' "$state/.subsuper-escalations" >/dev/null \
-    || grep -E '1700000123|1700000456|1700000789' "$state/.subsuper-escalations" >/dev/null; then
-    fail "escalation buffer leaked timestamp receipt metadata"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$DRAIN" >/dev/null 2> "$err" \
+    || fail "drain failed with a live watcher and fresh beacon"
+  if grep -F 'WATCHER DOWN' "$err" >/dev/null; then
+    fail "drain false-alarmed with a live watcher and fresh beacon"
   fi
-
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" escalate_flush "$state" \
-    || fail "timestamped escalation digest did not inject"
-  if grep -F $'\t' "$sent" >/dev/null \
-    || grep -E '1700000123|1700000456|1700000789' "$sent" >/dev/null; then
-    fail "injected digest leaked timestamp receipt metadata"
-  fi
-  pass "timestamped statuses retain raw dedupe and present clean text"
+  pass "drain asserts watcher liveness: warns on a lapse, stays silent for a live watcher with a fresh beacon"
 }
 
-# ============================================================================
-# /afk presence-gating + injection hardening
-# ============================================================================
-
-# The daemon's own injection target is guarded with the same list-panes probe as
-# every other pane check: display-message answers from the client's current pane
-# for a target that is gone, so a guard built on it can never fail and the daemon
-# keeps treating a vanished firstmate pane as a live one.
-test_inject_refuses_a_gone_target() {
-  local dir state fakebin sent capture
-  dir=$(make_supercase inject-gone-target)
+test_structural_signal_enrichment_preserves_raw_rows() {
+  local dir state out expected actual annotation_count outside perl_bin
+  dir=$(make_case enrichment)
   state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
-  afk_enter "$state"
-  escalate_add "$state" "done: PR https://x/y/pull/13"
-  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=0 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state"; then
-    fail "escalate_flush reported success with a gone injection target"
-  fi
-  [ ! -s "$sent" ] \
-    || fail "the daemon typed into a pane after its own target vanished: $(cat "$sent")"
-  [ -s "$state/.subsuper-escalations" ] \
-    || fail "escalations were dropped instead of preserved for the next flush"
-  pass "a gone injection target is detected: nothing is typed and the buffer survives"
-}
-
-test_collapse_newlines_pure() {
-  local out
-  out=$(_collapse_newlines $'line one\nline two\nline three')
-  [ "$out" = "line one - line two - line three" ] || fail "collapse failed: '$out'"
-  out=$(_collapse_newlines "no newlines here")
-  [ "$out" = "no newlines here" ] || fail "collapse changed no-newline text"
-  out=$(_collapse_newlines $'a\nb')
-  [ "$out" = "a - b" ] || fail "collapse two lines failed: '$out'"
-  pass "_collapse_newlines replaces newlines with literal separator"
-}
-
-test_afk_absent_daemon_does_not_inject() {
-  local dir state fakebin sent capture
-  dir=$(make_supercase afk-off)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
-  escalate_add "$state" "done: PR 1"
-  # afk flag deliberately NOT set
-  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state"; then
-    fail "escalate_flush succeeded while afk inactive"
-  fi
-  [ -s "$sent" ] && fail "daemon injected while afk inactive"
-  [ -s "$state/.subsuper-escalations" ] || fail "buffer not preserved when afk inactive"
-  pass "afk flag absent: daemon does not inject, buffer preserved"
-}
-
-test_afk_present_injects_with_marker() {
-  local dir state fakebin sent capture sent_line
-  dir=$(make_supercase afk-on)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
-  escalate_add "$state" "done: PR 1"
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
-    || fail "escalate_flush failed with afk active"
-  [ -s "$sent" ] || fail "no injection sent with afk active"
-  sent_line=$(grep -v '\[ENTER\]' "$sent" | head -1)
-  message_is_injection "$sent_line" || fail "injection not prefixed with sentinel marker"
-  pass "afk flag present: daemon injects with sentinel marker prefix"
-}
-
-test_inject_digest_is_single_line() {
-  local dir state fakebin sent capture non_enter
-  dir=$(make_supercase single-line)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
-  escalate_add "$state" "done: PR https://x/y/pull/1"
-  escalate_add "$state" "needs-decision: pick A"
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
-    || fail "escalate_flush failed"
-  # The sent log is: <digest-line>\n[ENTER]\n. The digest must be exactly one
-  # line (no embedded newlines that would fragment submission).
-  non_enter=$(grep -cv '\[ENTER\]' "$sent")
-  [ "$non_enter" -eq 1 ] || fail "expected 1 digest line, got $non_enter (embedded newlines?)"
-  grep -v '\[ENTER\]' "$sent" | grep -qF 'done: PR https://x/y/pull/1' \
-    || fail "digest missing first event"
-  grep -v '\[ENTER\]' "$sent" | grep -qF 'needs-decision: pick A' \
-    || fail "digest missing second event"
-  pass "injected digest is single-line (no embedded newlines)"
-}
-
-test_busy_guard_defers_when_supervisor_busy() {
-  local dir state fakebin sent capture
-  dir=$(make_supercase busy-guard)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"
-  # pane shows a busy signature (firstmate mid-turn)
-  printf 'esc to interrupt\n' > "$capture"
-  escalate_add "$state" "done: PR 1"
-  afk_enter "$state"
-  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state"; then
-    fail "escalate_flush should defer when supervisor pane busy"
-  fi
-  [ -s "$sent" ] && fail "daemon injected into a busy pane"
-  [ -s "$state/.subsuper-escalations" ] || fail "buffer not preserved when deferred"
-  pass "busy-guard defers injection when supervisor pane is busy"
-}
-
-test_marker_detection() {
-  # message_is_injection: marker present -> injection; absent -> real message
-  message_is_injection "${FM_INJECT_MARK}Supervisor escalate: done" \
-    || fail "marker-prefixed message not detected as injection"
-  message_is_injection "how's it going?" \
-    && fail "plain message misdetected as injection"
-  message_is_injection "" && fail "empty message misdetected as injection"
-  # should_exit_afk: the full afk-exit contract
-  local dir state
-  dir=$(make_supercase marker-detect)
-  state="$dir/state"
-  afk_enter "$state"
-  should_exit_afk "$state" "${FM_INJECT_MARK}escalate" \
-    && fail "marker message should not exit afk (internal escalation)"
-  should_exit_afk "$state" "status update please" \
-    || fail "plain message should exit afk (captain is back)"
-  pass "marker detection: marker -> stay afk, no marker -> exit afk"
-}
-
-test_afk_turn_exemption() {
-  local dir state
-  dir=$(make_supercase afk-exempt)
-  state="$dir/state"
-  afk_enter "$state"
-  # /afk while already away must NOT self-cancel (re-entering/extending)
-  should_exit_afk "$state" "/afk" \
-    && fail "bare /afk should not exit afk"
-  should_exit_afk "$state" "/afk back in an hour" \
-    && fail "/afk with args should not exit afk"
-  # a non-/afk skill invocation DOES exit (the captain is actively working)
-  should_exit_afk "$state" "/no-mistakes" \
-    || fail "non-afk skill should exit afk"
-  pass "/afk invocation is exempt from afk exit (no self-cancel)"
-}
-
-test_should_exit_afk_when_afk_inactive() {
-  local dir state
-  dir=$(make_supercase no-afk)
-  state="$dir/state"
-  # afk flag absent: should never signal exit (nothing to exit)
-  should_exit_afk "$state" "hello" \
-    && fail "should_exit_afk true when afk inactive"
-  should_exit_afk "$state" "${FM_INJECT_MARK}test" \
-    && fail "should_exit_afk true when afk inactive (marker)"
-  pass "should_exit_afk returns false when afk is not active"
-}
-
-# ============================================================================
-# Injection hardening: composer guard, type-once submit, strip marker, dedupe
-# ============================================================================
-
-test_strip_injection_marker() {
-  local stripped
-  stripped=$(strip_injection_marker "${FM_INJECT_MARK}Supervisor escalate: done")
-  [ "$stripped" = "Supervisor escalate: done" ] \
-    || fail "marker not stripped: '$stripped'"
-  # No marker → unchanged.
-  stripped=$(strip_injection_marker "no marker here")
-  [ "$stripped" = "no marker here" ] \
-    || fail "non-marker text changed: '$stripped'"
-  # Empty → empty.
-  stripped=$(strip_injection_marker "")
-  [ "$stripped" = "" ] || fail "empty text changed: '$stripped'"
-  # Only marker → empty.
-  stripped=$(strip_injection_marker "$FM_INJECT_MARK")
-  [ "$stripped" = "" ] || fail "bare marker not stripped: '$stripped'"
-  pass "strip_injection_marker removes the sentinel marker cleanly"
-}
-
-test_pane_input_pending_detects_partial_input() {
-  local dir state fakebin capture
-  dir=$(make_supercase pending-input)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  capture="$dir/pane.txt"
-  # Line 3 (cursor_y=2) has human's partial text (no Enter) → pending.
-  printf 'line one\nline two\nhuman draft text\n' > "$capture"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=2 \
-    pane_input_pending "fakepane" \
-    || fail "pane_input_pending should detect non-empty composer (human text)"
-  pass "pane_input_pending detects partial input on the cursor line"
-}
-
-test_pane_input_pending_blank_is_not_pending() {
-  local dir state fakebin capture
-  dir=$(make_supercase pending-blank)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  capture="$dir/pane.txt"
-  # Cursor line (line 3, cursor_y=2) is blank → not pending.
-  printf 'some output\nmore output\n\n' > "$capture"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=2 \
-    pane_input_pending "fakepane" \
-    && fail "blank composer line falsely detected as pending"
-  pass "pane_input_pending: blank cursor line is not pending"
-}
-
-test_pane_input_pending_idle_prompt_not_pending() {
-  local dir state fakebin capture
-  dir=$(make_supercase pending-prompt)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  capture="$dir/pane.txt"
-  # Cursor line (line 3, cursor_y=2) is a bare prompt ($) → idle → not pending.
-  printf 'output\noutput\n$ \n' > "$capture"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=2 \
-    pane_input_pending "fakepane" \
-    && fail "bare prompt falsely detected as pending"
-  # Bare > prompt also idle.
-  printf 'output\noutput\n> \n' > "$capture"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=2 \
-    pane_input_pending "fakepane" \
-    && fail "bare > prompt falsely detected as pending"
-  pass "pane_input_pending: bare prompts are not pending (idle)"
-}
-
-test_pane_input_pending_honors_idle_override_after_border_strip() {
-  local dir state fakebin capture
-  dir=$(make_supercase pending-custom-idle)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  capture="$dir/pane.txt"
-  printf '│ custom idle> │\n' > "$capture"
-  # Assert the positive state, not merely "not pending": unknown also satisfies
-  # not-pending, so a dead override would pass that check vacuously.
-  local got
-  got=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
-    FM_COMPOSER_IDLE_RE='^custom idle>$' fm_tmux_composer_state "fakepane")
-  [ "$got" = empty ] \
-    || fail "FM_COMPOSER_IDLE_RE was not applied after border stripping (got $got)"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
-    FM_COMPOSER_IDLE_RE='^custom idle>$' pane_input_pending "fakepane" \
-    && fail "an idle composer matching FM_COMPOSER_IDLE_RE was treated as pending"
-  pass "pane_input_pending honors FM_COMPOSER_IDLE_RE after border stripping"
-}
-
-test_composer_guard_defers_on_partial_input() {
-  local dir state fakebin sent capture
-  dir=$(make_supercase composer-guard)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"
-  # Cursor line has partial text (human mid-typing, no Enter).
-  printf 'human draft text\n' > "$capture"
-  escalate_add "$state" "done: PR 1"
-  afk_enter "$state"
-  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state"; then
-    fail "escalate_flush should defer when composer has pending input"
-  fi
-  [ -s "$sent" ] && fail "daemon injected into a pane with pending input"
-  [ -s "$state/.subsuper-escalations" ] || fail "buffer not preserved when deferred"
-  pass "composer guard defers injection when pane has pending input"
-}
-
-test_inject_types_once_retries_enter_only() {
-  # Scenario: Enter is swallowed on the first attempt. The daemon must retry
-  # Enter (NOT retype the digest) and succeed on the second Enter. Assert
-  # exactly ONE digest was typed (no concatenation), and the digest was
-  # eventually submitted.
-  local dir state fakebin sent capture swallow_file
-  dir=$(make_supercase swallow-enter)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
-  swallow_file="$dir/.swallow"
-  touch "$swallow_file"
-  escalate_add "$state" "done: PR 1"
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_SWALLOW_FILE="$swallow_file" \
-    FM_INJECT_CONFIRM_SLEEP=0.1 FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
-    || fail "escalate_flush failed despite Enter retry"
-  # Exactly ONE digest line typed (send-keys -l called once). No retype.
-  local digest_lines
-  digest_lines=$(grep -cv '\[ENTER\]' "$sent")
-  [ "$digest_lines" -eq 1 ] \
-    || fail "expected 1 digest type, got $digest_lines (retype into uncleared composer?)"
-  # Two Enters: first swallowed, second submitted.
-  local enters
-  enters=$(grep -c '\[ENTER\]' "$sent")
-  [ "$enters" -eq 1 ] \
-    || fail "expected 1 recorded Enter (second after swallow), got $enters"
-  # Buffer cleared → success.
-  [ -s "$state/.subsuper-escalations" ] && fail "buffer not cleared after successful inject"
-  pass "swallowed Enter: type-once + Enter-retry, no concatenation"
-}
-
-test_inject_no_duplicate_on_success() {
-  # Scenario: normal inject (Enter works first time). Exactly ONE digest typed,
-  # ONE Enter, buffer cleared.
-  local dir state fakebin sent capture
-  dir=$(make_supercase normal-inject)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
-  escalate_add "$state" "done: PR 1"
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_INJECT_CONFIRM_SLEEP=0.1 \
-    FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
-    || fail "escalate_flush failed"
-  local digest_lines enters
-  digest_lines=$(grep -cv '\[ENTER\]' "$sent")
-  [ "$digest_lines" -eq 1 ] || fail "expected 1 digest, got $digest_lines (duplicate?)"
-  enters=$(grep -c '\[ENTER\]' "$sent")
-  [ "$enters" -eq 1 ] || fail "expected 1 Enter, got $enters"
-  [ -s "$state/.subsuper-escalations" ] && fail "buffer not cleared"
-  pass "normal inject: exactly one digest, one Enter, no duplicates"
-}
-
-test_classify_signal_dedup_against_scan() {
-  # If the catch-all scan already escalated a status (seen marker matches),
-  # classify_signal must self-handle to avoid a duplicate in the digest.
-  local dir state key out
-  dir=$(make_supercase signal-dedup)
-  state="$dir/state"
-  printf 'done: PR https://x/y/pull/9\n' > "$state/dup-s9.status"
-  # Simulate the catch-all scan having already escalated this status.
-  key=$(printf '%s' "dup-s9" | tr ':/.' '___')
-  printf 'done: PR https://x/y/pull/9' > "$state/.subsuper-seen-status-$key"
-  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
-  case "$out" in self\|*) ;; *) fail "signal not deduped against scan: $out" ;; esac
-  # Without the seen marker, it should escalate.
-  rm -f "$state/.subsuper-seen-status-$key"
-  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
-  case "$out" in escalate\|*) ;; *) fail "signal should escalate when not seen: $out" ;; esac
-  pass "classify_signal dedupes against the catch-all scan seen marker"
-}
-
-test_classify_stale_dedup_against_signal() {
-  # If the signal path already escalated a status (seen marker matches),
-  # classify_stale must self-handle to avoid a duplicate in the digest.
-  local dir state key out
-  dir=$(make_supercase stale-dedup)
-  state="$dir/state"
-  printf 'done: PR https://x/y/pull/10\n' > "$state/dup-s10.status"
-  key=$(printf '%s' "dup-s10" | tr ':/.' '___')
-  printf 'done: PR https://x/y/pull/10' > "$state/.subsuper-seen-status-$key"
-  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
-  case "$out" in self\|*) ;; *) fail "stale not deduped against signal: $out" ;; esac
-  # Without the seen marker, it should escalate.
-  rm -f "$state/.subsuper-seen-status-$key"
-  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
-  case "$out" in escalate\|*) ;; *) fail "stale should escalate when not seen: $out" ;; esac
-  pass "classify_stale dedupes against the signal path seen marker"
-}
-
-# ============================================================================
-# afk-invx-i5 regressions: bordered-composer detection (RC1), submit-ACK on a
-# bordered composer (RC2), and the max-defer escape (RC1b).
-# ============================================================================
-
-# Fake tmux simulating a claude-style BORDERED composer ("│ > … │"), the exact
-# rendering the old detector misread as permanent pending input.
-#   - display-message cursor_y -> 0 (composer is line 1)
-#   - capture-pane          -> the current composer line from $FM_FAKE_COMPOSER
-#   - send-keys -l <text>   -> composer becomes "│ > <text> │"  (typed, unsent)
-#   - send-keys Enter       -> unless $FM_FAKE_SWALLOW exists, composer clears to
-#                              "│ > │" (bordered-empty); a one-shot swallow
-#                              deletes the flag, a persistent one keeps it.
-# $FM_FAKE_SENT (optional) logs each typed line and each non-swallowed [ENTER].
-make_bordered_case() {
-  local name=$1 dir fakebin
-  dir="$TMP_ROOT/$name"; fakebin="$dir/fakebin"
-  mkdir -p "$dir/state" "$fakebin"
-  printf '│ > │\n' > "$dir/composer"
-  cat > "$fakebin/tmux" <<'SH'
+  out="$dir/drain.out"
+  expected="$dir/expected.out"
+  actual="$dir/actual.out"
+  outside="$dir/outside-secret"
+  printf 'working: first\n\ndone: latest event\n' > "$state/task.status"
+  printf 'working: old turn-end context\n' > "$state/turn-only.status"
+  printf 'must-not-be-read\n' > "$outside"
+  ln -s "$outside" "$state/escape.status"
+  perl_bin=$(command -v perl) || fail "perl is required for safe status reads"
+  cat > "$dir/fakebin/perl" <<'SH'
 #!/usr/bin/env bash
-set -u
-COMPOSER="${FM_FAKE_COMPOSER:?FM_FAKE_COMPOSER unset}"
-case "${1:-}" in
-  list-panes)
-    # Pane presence is probed with list-panes, which fails for a gone target.
-    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || { printf "can't find window\n" >&2; exit 1; }
-    printf 'fakepane\n'
-    exit 0 ;;
-  display-message)
-    print=0
-    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
-    for a in "$@"; do [ "$a" = "-p" ] && print=1; done
-    [ "$print" = 1 ] && printf 'fakepane\n'
-    exit 0 ;;
-  capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
-  list-windows) exit 0 ;;
-  send-keys)
-    shift
-    text=""; is_enter=0; is_escape=0; lit=0
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        -t) shift ;;
-        -l) lit=1 ;;
-        Enter) is_enter=1 ;;
-        Escape) is_escape=1 ;;
-        *) [ "$lit" = 1 ] && text="$1" ;;
-      esac
-      shift
-    done
-    if [ "$is_escape" = 1 ]; then
-      [ -n "${FM_FAKE_SENT:-}" ] && printf '[ESCAPE]\n' >> "$FM_FAKE_SENT"
-      if [ "${FM_FAKE_ESCAPE_CLEARS:-0}" = 1 ]; then
-        printf '│ > │\n' > "$COMPOSER"
-      fi
-    elif [ "$is_enter" = 1 ]; then
-      if [ -n "${FM_FAKE_SWALLOW:-}" ] && [ -f "$FM_FAKE_SWALLOW" ]; then
-        [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$FM_FAKE_SWALLOW"
-      else
-        [ -n "${FM_FAKE_SENT:-}" ] && printf '[ENTER]\n' >> "$FM_FAKE_SENT"
-        if [ -n "${FM_FAKE_AFTER_ENTER_TEXT:-}" ]; then
-          printf '│ > %s │\n' "$FM_FAKE_AFTER_ENTER_TEXT" > "$COMPOSER"
-        else
-          printf '│ > │\n' > "$COMPOSER"
-        fi
-      fi
-    elif [ "$lit" = 1 ]; then
-      [ "${FM_FAKE_SEND_FAIL:-0}" = 1 ] && exit 1
-      [ -n "${FM_FAKE_SENT:-}" ] && printf '%s\n' "$text" >> "$FM_FAKE_SENT"
-      printf '│ > %s │\n' "$text" > "$COMPOSER"
-    fi
-    exit 0 ;;
-esac
-exit 1
-SH
-  chmod +x "$fakebin/tmux"
-  printf '%s\n' "$dir"
-}
-
-test_pane_input_pending_bordered_idle_not_pending() {
-  # THE regression: an idle claude composer is a bordered box ("│ > … │"). The
-  # old idle regex only matched a BARE prompt, so every idle claude pane read as
-  # pending and the away-mode daemon deferred 100% of escalations for 9.5h.
-  local dir state fakebin capture line
-  dir=$(make_supercase pending-bordered-idle)
-  state="$dir/state"; fakebin="$dir/fakebin"; capture="$dir/pane.txt"
-  for line in \
-    "│ >                                            │" \
-    "│ ❯                                            │" \
-    "│ >  │" \
-    "│                                              │"; do
-    printf '%s\n' "$line" > "$capture"
-    if PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
-      pane_input_pending "fakepane"; then
-      fail "bordered idle composer falsely detected as pending: <$line>"
+if [ "${1:-}" = -MFcntl=:DEFAULT ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "${FM_WAKE_ENRICH_SWAP_PATH:-}" ]; then
+      rm -f "$arg"
+      ln -s "$FM_WAKE_ENRICH_SWAP_TARGET" "$arg"
+      break
     fi
   done
-  pass "pane_input_pending: an idle bordered composer is NOT pending (afk-invx-i5)"
-}
-
-test_pane_input_pending_bordered_with_text_is_pending() {
-  # Guard against over-broadening: real unsubmitted text inside the box must
-  # still read as pending so the daemon defers (and the captain-return race is
-  # still protected).
-  local dir state fakebin capture
-  dir=$(make_supercase pending-bordered-text)
-  state="$dir/state"; fakebin="$dir/fakebin"; capture="$dir/pane.txt"
-  printf '%s\n' "│ > fix findings 1 and 3, skip 2               │" > "$capture"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
-    pane_input_pending "fakepane" \
-    || fail "real text inside a bordered composer was not detected as pending"
-  pass "pane_input_pending: text inside a bordered composer is still pending"
-}
-
-test_submit_ack_confirms_on_bordered_empty_composer() {
-  # RC2: the submit acknowledgement must recognize a bordered-EMPTY composer as
-  # "submitted." The old ACK reused the broken check, so on claude it could never
-  # confirm and always reported a false "Enter swallowed."
-  local dir fakebin sent verdict
-  dir=$(make_bordered_case ack-bordered)
-  fakebin="$dir/fakebin"; sent="$dir/sent.log"; : > "$sent"
-  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
-    fm_tmux_submit_core "win" "the digest" 3 0.05 0.05)
-  [ "$verdict" = empty ] || fail "submit-ACK did not confirm on a bordered-empty composer: $verdict"
-  [ "$(grep -cv '\[ENTER\]' "$sent")" -eq 1 ] || fail "digest typed more than once (retype)"
-  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "expected exactly one submitted Enter"
-  pass "submit-ACK confirms a submit when the composer returns to a bordered-empty box"
-}
-
-test_submit_ack_reports_pending_on_persistent_swallow() {
-  # A genuinely swallowed Enter (text stays in the box across all retries) is
-  # reported as "pending" — the daemon keeps the buffer, fm-send exits non-zero —
-  # and the digest is typed ONCE (Enter-only retries, never a retype).
-  local dir fakebin sent verdict
-  dir=$(make_bordered_case ack-swallow)
-  fakebin="$dir/fakebin"; sent="$dir/sent.log"; : > "$sent"
-  touch "$dir/.swallow"
-  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
-    fm_tmux_submit_core "win" "the digest" 3 0.05 0.05)
-  [ "$verdict" = pending ] || fail "persistent swallow not reported as pending: $verdict"
-  [ "$(grep -cv '\[ENTER\]' "$sent")" -eq 1 ] || fail "digest retyped on swallow (expected type-once)"
-  pass "submit-ACK reports pending on a persistently swallowed Enter (type-once)"
-}
-
-test_max_defer_empty_swallow_types_once_and_alarms() {
-  local dir state fakebin sent
-  dir=$(make_bordered_case maxdefer-stuck)
-  state="$dir/state"; fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  printf '│ > │\n' > "$dir/composer"
-  touch "$dir/.swallow"
-  escalate_add "$state" "needs-decision: pick A"
-  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
-    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
-  [ "$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)" -eq 1 ] \
-    || fail "max-defer typed the digest more than once"
-  [ -s "$state/.subsuper-inject-wedged" ] \
-    || fail "stuck max-defer inject did not raise a wedge alarm marker"
-  [ -s "$state/.subsuper-escalations" ] \
-    || fail "buffer lost after a failed max-defer inject (must be preserved)"
-  pass "max-defer on an empty stuck pane types once, alarms, and preserves the buffer"
-}
-
-test_max_defer_flushes_empty_idle_pane() {
-  local dir state fakebin sent
-  dir=$(make_bordered_case maxdefer-recover)
-  state="$dir/state"; fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  printf '│ > │\n' > "$dir/composer"
-  escalate_add "$state" "done: PR https://x/y/pull/1"
-  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
-    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
-    housekeeping "$state"
-  [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after a recovered max-defer flush"
-  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge alarm left behind after a successful max-defer flush"
-  pass "max-defer flushes and clears the buffer on an empty bordered pane"
-}
-
-test_max_defer_escape_probe_recovers_false_pending() {
-  # Reproduce the incident shape: an idle pane's renderer leaves a normal-text
-  # artifact on the cursor row, so the shared guard reports pending forever.
-  # The first normal flush defers; the max-defer escape probe dismisses only the
-  # artifact, re-reads empty, and delivers in this same housekeeping cycle.
-  local dir state fakebin sent
-  dir=$(make_bordered_case maxdefer-escape-recover)
-  state="$dir/state"; fakebin="$dir/fakebin"; sent="$dir/sent.log"; : > "$sent"
-  printf '│ > stale renderer artifact │\n' > "$dir/composer"
-  escalate_add "$state" "advisor-idle?: rt-advisor"
-  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
-    FM_FAKE_ESCAPE_CLEARS=1 FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 \
-    FM_INJECT_CONFIRM_SLEEP=0.05 FM_INJECT_ESCAPE_SETTLE=0.01 housekeeping "$state"
-  [ "$(grep -c '\[ESCAPE\]' "$sent" 2>/dev/null || true)" -eq 1 ] \
-    || fail "max-defer did not make exactly one Escape recovery probe"
-  [ "$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)" -eq 1 ] \
-    || fail "max-defer did not deliver exactly one recovered digest"
-  [ ! -s "$state/.subsuper-escalations" ] \
-    || fail "recovered false pending left escalation buffered"
-  [ ! -e "$state/.subsuper-inject-wedged" ] \
-    || fail "recovered false pending raised a wedge alarm"
-  pass "max-defer Escape probe recovers a false pending composer within one cycle"
-}
-
-test_max_defer_pending_composer_alarms_without_typing() {
-  local dir state fakebin sent
-  dir=$(make_bordered_case maxdefer-pending-digest)
-  state="$dir/state"; fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  printf '│ > human draft │\n' > "$dir/composer"
-  escalate_add "$state" "needs-decision: pick B"
-  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
-    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
-    housekeeping "$state"
-  [ "$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)" -eq 0 ] \
-    || fail "max-defer typed into a pending composer"
-  [ -s "$state/.subsuper-inject-wedged" ] || fail "pending composer did not raise a wedge alarm marker"
-  [ -s "$state/.subsuper-escalations" ] || fail "buffer lost while composer was pending"
-  grep -F 'human draft' "$dir/composer" >/dev/null || fail "pending composer content changed"
-  [ "$(grep -c '\[ESCAPE\]' "$sent" 2>/dev/null || true)" -eq 1 ] \
-    || fail "max-defer did not make its bounded Escape probe"
-  [ "$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)" -eq 0 ] \
-    || fail "max-defer typed into a genuine pending composer after Escape"
-  grep -F 'human draft' "$dir/composer" >/dev/null || fail "Escape clobbered genuine pending composer content"
-  pass "max-defer preserves genuine pending composer text after Escape probe"
-}
-
-test_wedge_alarm_enqueues_durable_next_turn_wake() {
-  local dir state fakebin drained
-  dir=$(make_bordered_case wedge-next-turn-wake)
-  state="$dir/state"; fakebin="$dir/fakebin"; drained="$dir/drained"
-  printf 'needs-decision: retained escalation\n' > "$state/.subsuper-escalations"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_STATE_OVERRIDE="$state" \
-    inject_wedge_alarm "$state" 600
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drained" || fail "could not drain wedge alarm wake"
-  grep -F $'\tsignal\tsubsuper-inject-wedged\t' "$drained" >/dev/null \
-    || fail "wedge alarm did not enqueue a durable next-turn signal: $(cat "$drained")"
-  grep -F 'away-mode inject wedged 600s' "$drained" >/dev/null \
-    || fail "wedge wake omitted its actionable reason"
-  pass "wedge alarm enqueues a durable signal for Firstmate's next turn"
-}
-
-test_normal_flush_clears_stale_wedge_marker() {
-  local dir state fakebin sent
-  dir=$(make_bordered_case normal-clears-wedge)
-  state="$dir/state"; fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  printf 'old wedge\n' > "$state/.subsuper-inject-wedged"
-  escalate_add "$state" "done: PR https://x/y/pull/2"
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
-    FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" \
-    || fail "normal escalate_flush failed"
-  [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after normal flush"
-  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge marker survived successful normal flush"
-  pass "normal flush clears a stale wedge marker"
-}
-
-test_below_max_defer_does_nothing() {
-  local dir state fakebin sent capture
-  dir=$(make_supercase below-maxdefer)
-  state="$dir/state"; fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; printf 'stuck junk line\n' > "$capture"
-  escalate_add "$state" "needs-decision: pick A"
-  date +%s > "$state/.subsuper-escalations.since"   # just now
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
-    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=300 housekeeping "$state"
-  [ ! -s "$sent" ] || fail "injected before MAX_DEFER elapsed"
-  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge alarm fired before MAX_DEFER"
-  [ -s "$state/.subsuper-escalations" ] || fail "buffer dropped below MAX_DEFER"
-  pass "below MAX_DEFER: no inject, no alarm, buffer preserved"
-}
-
-test_max_defer_afk_inactive_does_not_flush_or_alarm() {
-  local dir state fakebin sent
-  dir=$(make_bordered_case maxdefer-inactive)
-  state="$dir/state"; fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  escalate_add "$state" "needs-decision: pick B"
-  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
-    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
-    housekeeping "$state"
-  [ ! -s "$sent" ] || fail "injected while afk was inactive"
-  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge alarm fired while afk was inactive"
-  [ -s "$state/.subsuper-escalations" ] || fail "buffer dropped while afk was inactive"
-  pass "max-defer does not flush or alarm while afk is inactive"
-}
-
-test_fm_send_exits_nonzero_on_confirmed_swallow() {
-  # fm-send.sh must exit NON-ZERO when a steer's Enter is positively swallowed
-  # (text left in the composer), so firstmate learns the instruction did not land
-  # — and exit ZERO on a clean submit.
-  local dir fakebin err
-  dir=$(make_bordered_case send-swallow)
-  fakebin="$dir/fakebin"; err="$dir/send.err"
-  # Clean submit -> exit 0.
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
-    FM_SEND_SLEEP=0.05 "$ROOT/bin/fm-send.sh" sess:win 'route this work' >/dev/null 2>"$err" \
-    || fail "fm-send exited non-zero on a clean submit: $(cat "$err")"
-  # Persistent swallow -> exit non-zero with a clear message.
-  printf '│ > │\n' > "$dir/composer"
-  touch "$dir/.swallow"
-  if PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_SEND_SLEEP=0.05 \
-    "$ROOT/bin/fm-send.sh" sess:win 'fix findings 1 and 3, skip 2' >/dev/null 2>"$err"; then
-    fail "fm-send exited zero despite a swallowed Enter (silent unsubmitted instruction)"
-  fi
-  grep -F 'not submitted' "$err" >/dev/null || fail "fm-send did not explain the swallowed submit: $(cat "$err")"
-  pass "fm-send exits non-zero on a confirmed swallow, zero on a clean submit"
-}
-
-test_fm_send_unconfirmed_pending_without_sent_text_fails() {
-  local dir fakebin err
-  dir=$(make_bordered_case send-ambiguous-pending)
-  fakebin="$dir/fakebin"; err="$dir/send.err"
-  if PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
-    FM_FAKE_AFTER_ENTER_TEXT='windows bridge redraw' FM_SEND_SLEEP=0.05 \
-    "$ROOT/bin/fm-send.sh" sess:win 'route this work' >/dev/null 2>"$err"; then
-    fail "fm-send treated an unconfirmed composer as delivered"
-  fi
-  grep -F 'not submitted' "$err" >/dev/null \
-    || fail "fm-send did not explain the unconfirmed submit: $(cat "$err")"
-  pass "fm-send fails when the composer remains pending, even with different text"
-}
-
-test_fm_send_exits_nonzero_on_initial_send_failure() {
-  local dir fakebin err
-  dir=$(make_bordered_case send-type-failure)
-  fakebin="$dir/fakebin"; err="$dir/send.err"
-  if PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
-    FM_FAKE_SEND_FAIL=1 FM_SEND_SLEEP=0.05 \
-    "$ROOT/bin/fm-send.sh" sess:win 'route this work' >/dev/null 2>"$err"; then
-    fail "fm-send exited zero despite initial tmux send-keys failure"
-  fi
-  grep -F 'text not sent' "$err" >/dev/null || fail "fm-send did not explain initial send failure: $(cat "$err")"
-  pass "fm-send exits non-zero when initial text send fails"
-}
-
-# ============================================================================
-# Stall-check integration (housekeeping job 4): the away-mode daemon must run
-# bin/fm-stall-check.sh's full sweep so its secondmate-child-escalation and
-# advisor-idle detectors also fire during afk, not just at present-mode
-# heartbeats (the 2026-08-02 incident: three crewmates sat on needs-decision
-# for ~2 hours across two secondmate homes with both advisors idle, and the
-# daemon escalated none of it).
-# ============================================================================
-
-test_stallcheck_scan_escalates_unrelayed_secondmate_child() {
-  # THE exact miss: a child parked on needs-decision: inside a SECONDMATE
-  # home's own state dir, which the main state/*.status catch-all (job 3)
-  # cannot see at all - it never reads inside a secondmate's home.
-  local dir state fakebin sent capture home
-  dir=$(make_supercase stallcheck-unrelayed)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"
-  home="$dir/advisor-home"
-  mkdir -p "$home/state"
-  : > "$capture"
-
-  cat > "$state/rt-advisor.meta" <<EOF
-window=fm-rt-advisor
-kind=secondmate
-home=$home
-EOF
-  cat > "$home/state/rt-issue48.meta" <<'EOF'
-window=fm-rt-issue48
-kind=ship
-EOF
-  printf 'needs-decision: pick a rollout option\n' > "$home/state/rt-issue48.status"
-  touch -d '2000-01-01 00:00:00' "$home/state/rt-issue48.status" 2>/dev/null \
-    || touch -t 200001010000 "$home/state/rt-issue48.status"
-
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 \
-    housekeeping "$state"
-
-  grep -F 'unrelayed?: rt-advisor/rt-issue48' "$sent" >/dev/null \
-    || fail "away-mode daemon did not escalate an unrelayed secondmate-child needs-decision: $(cat "$sent" 2>/dev/null)"
-  pass "housekeeping escalates a needs-decision child inside a secondmate home while afk"
-}
-
-test_stallcheck_scan_escalates_idle_working_advisor() {
-  # The other half of the incident: a secondmate advisor whose last status is
-  # working: (not terminal) has no status-change wake to trigger on, so only
-  # a time-based sweep like fm-stall-check.sh's advisor-idle check can catch it.
-  local dir state fakebin sent capture home
-  dir=$(make_supercase stallcheck-advisor-idle)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"
-  home="$dir/advisor-home"
-  mkdir -p "$home/state"
-  : > "$capture"
-
-  cat > "$state/rt-advisor.meta" <<EOF
-window=fm-rt-advisor
-kind=secondmate
-home=$home
-EOF
-  printf 'working: still on task\n' > "$state/rt-advisor.status"
-  touch -d '2000-01-01 00:00:00' "$state/rt-advisor.status" 2>/dev/null \
-    || touch -t 200001010000 "$state/rt-advisor.status"
-
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 \
-    housekeeping "$state"
-
-  grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
-    || fail "away-mode daemon did not escalate an idle advisor whose last status is working:: $(cat "$sent" 2>/dev/null)"
-  pass "housekeeping escalates an idle advisor (working: status) while afk"
-}
-
-test_stallcheck_scan_dedupes_repeated_finding() {
-  # fm-stall-check.sh has no ack mechanism and re-fires a persisting finding
-  # every sweep. One alarm, not a stream: the SAME finding must not escalate
-  # again on a second tick, even though the underlying condition (and the
-  # script's output) is unchanged and the scan is forced to re-run.
-  local dir state fakebin sent capture home
-  dir=$(make_supercase stallcheck-dedup)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"
-  home="$dir/advisor-home"
-  mkdir -p "$home/state"
-  : > "$capture"
-
-  cat > "$state/rt-advisor.meta" <<EOF
-window=fm-rt-advisor
-kind=secondmate
-home=$home
-EOF
-  printf 'working: still on task\n' > "$state/rt-advisor.status"
-  touch -d '2000-01-01 00:00:00' "$state/rt-advisor.status" 2>/dev/null \
-    || touch -t 200001010000 "$state/rt-advisor.status"
-
-  afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 \
-    housekeeping "$state"
-  grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
-    || fail "first tick did not escalate the idle advisor: $(cat "$sent" 2>/dev/null)"
-
-  : > "$sent"
-  # Force the scan to re-run (FM_STALL_CHECK_SCAN_SECS=0 bypasses the cadence
-  # gate) so the underlying condition genuinely re-fires from fm-stall-check.sh
-  # a second time; only the daemon's own dedup marker can prevent a repeat.
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 \
-    housekeeping "$state"
-  [ ! -s "$sent" ] \
-    || fail "the same stall-check finding was re-escalated on a second tick: $(cat "$sent")"
-  pass "stall-check scan escalates a persisting finding once, not on every tick"
-}
-
-test_stallcheck_scan_afk_inactive_does_not_inject() {
-  # afk changes how aggressively the daemon surfaces things, not what it can
-  # see. With afk inactive, detection must still run (so nothing is lost) but
-  # nothing may be typed into the pane - the same contract every other
-  # escalation source in this daemon already holds.
-  local dir state fakebin sent capture home
-  dir=$(make_supercase stallcheck-afk-off)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"
-  home="$dir/advisor-home"
-  mkdir -p "$home/state"
-  : > "$capture"
-
-  cat > "$state/rt-advisor.meta" <<EOF
-window=fm-rt-advisor
-kind=secondmate
-home=$home
-EOF
-  printf 'working: still on task\n' > "$state/rt-advisor.status"
-  touch -d '2000-01-01 00:00:00' "$state/rt-advisor.status" 2>/dev/null \
-    || touch -t 200001010000 "$state/rt-advisor.status"
-
-  # afk deliberately NOT entered.
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 \
-    housekeeping "$state"
-
-  [ ! -s "$sent" ] || fail "daemon injected a stall-check finding while afk was inactive: $(cat "$sent")"
-  grep -F 'advisor-idle?: rt-advisor' "$state/.subsuper-escalations" >/dev/null 2>&1 \
-    || fail "finding was not buffered while afk was inactive (would be lost instead of caught up later)"
-  pass "stall-check scan buffers without injecting while afk is inactive"
-}
-
-test_stallcheck_scan_respects_cadence_gate() {
-  # Cost control: the full sweep shells out to tmux per pane, so it must not
-  # run on every 15s housekeeping tick. Confirm the cadence gate actually
-  # blocks a due-but-not-yet-elapsed scan, and fires once it has elapsed.
-  local dir state fakebin sent capture home
-  dir=$(make_supercase stallcheck-cadence)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"
-  home="$dir/advisor-home"
-  mkdir -p "$home/state"
-  : > "$capture"
-
-  cat > "$state/rt-advisor.meta" <<EOF
-window=fm-rt-advisor
-kind=secondmate
-home=$home
-EOF
-  printf 'working: still on task\n' > "$state/rt-advisor.status"
-  touch -d '2000-01-01 00:00:00' "$state/rt-advisor.status" 2>/dev/null \
-    || touch -t 200001010000 "$state/rt-advisor.status"
-  afk_enter "$state"
-
-  date +%s > "$state/.subsuper-last-stallcheck"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=300 \
-    housekeeping "$state"
-  [ ! -s "$sent" ] || fail "stall-check scan ran before its cadence elapsed: $(cat "$sent")"
-
-  # The cadence gate is mtime-based (_file_age), like the existing
-  # .subsuper-last-scan marker - writing a backdated epoch as CONTENT does not
-  # backdate the file, since the write itself sets mtime to now. Backdate the
-  # mtime directly instead.
-  touch -d '2000-01-01 00:00:00' "$state/.subsuper-last-stallcheck" 2>/dev/null \
-    || touch -t 200001010000 "$state/.subsuper-last-stallcheck"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=300 \
-    housekeeping "$state"
-  grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
-    || fail "stall-check scan did not run once its cadence elapsed: $(cat "$sent" 2>/dev/null)"
-  pass "stall-check scan is gated by FM_STALL_CHECK_SCAN_SECS, not every housekeeping tick"
-}
-
-test_stallcheck_scan_failed_sweep_is_logged_not_silent() {
-  # A sweep that cannot run at all prints nothing, which is byte-identical to
-  # "all clear". Reading it as all-clear would restore the very blindness this
-  # job exists to close AND wipe every dedup marker, so the whole set
-  # re-escalates the moment the sweep recovers.
-  local dir state fakebin sent capture logf marker miss key
-  dir=$(make_supercase stallcheck-sweep-fails)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
-  logf="$dir/daemon.log"; : > "$logf"
-
-  # FM_DAEMON_DIR resolves only the sweep binary once the daemon is sourced, so
-  # pointing it at the fake bin substitutes a broken fm-stall-check.sh.
-  cat > "$fakebin/fm-stall-check.sh" <<'SH'
-#!/usr/bin/env bash
-printf 'fm-stall-check.sh: no server running on /tmp/tmux-1000/default\n' >&2
-exit 3
+fi
+exec "$FM_WAKE_ENRICH_REAL_PERL" "$@"
 SH
-  chmod +x "$fakebin/fm-stall-check.sh"
+  chmod +x "$dir/fakebin/perl"
 
-  # Derive the marker names from the identity function rather than hardcoding
-  # them, so these tests stay pinned to real key formatting.
-  key=$(_stall_finding_key 'advisor-idle?: rt-advisor - idle 1900s')
-  marker="$state/.subsuper-seen-stallcheck-$key"
-  miss="$state/.subsuper-stallcheck-miss-$key"
-  date +%s > "$marker"
+  append_wake "$state" signal task.status "signal: $outside" || fail "direct status wake append failed"
+  append_wake "$state" signal task.turn-ended "signal: $outside" || fail "coalesced turn-end wake append failed"
+  append_wake "$state" signal turn-only.turn-ended "signal: $outside" || fail "bare turn-end wake append failed"
+  append_wake "$state" signal escape.status "signal: $outside" || fail "symlink status wake append failed"
+  append_wake "$state" signal arbitrary-key "signal: $outside" || fail "non-status signal wake append failed"
+  append_wake "$state" check task.check.sh "check: complete payload" || fail "check wake append failed"
+  append_wake "$state" stale test:fm-task "stale: test:fm-task" || fail "stale wake append failed"
+  append_wake "$state" heartbeat heartbeat heartbeat || fail "heartbeat wake append failed"
 
-  afk_enter "$state"
-  LOG="$logf" FM_DAEMON_DIR="$fakebin" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 \
-    FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
-    FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 housekeeping "$state"
-  unset LOG
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_print_deduped "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue" > "$expected"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_SWAP_PATH="$state/task.status" \
+    FM_WAKE_ENRICH_SWAP_TARGET="$outside" FM_WAKE_ENRICH_REAL_PERL="$perl_bin" "$DRAIN" > "$out" \
+    || fail "structural enrichment drain failed"
+  awk -F '\t' 'NF == 5 { print }' "$out" > "$actual"
+  cmp -s "$expected" "$actual" || fail "enrichment changed or reordered an authoritative raw row"
 
-  [ -e "$marker" ] \
-    || fail "a failed stall-check sweep cleared its dedup markers, so every finding re-escalates once the sweep recovers"
-  [ ! -s "$sent" ] \
-    || fail "a failed stall-check sweep escalated something: $(cat "$sent")"
-  grep -F 'ERROR: stall-check sweep failed (rc=3)' "$logf" >/dev/null \
-    || fail "a failed stall-check sweep left no diagnostic in the daemon log: $(cat "$logf")"
-  grep -F 'no server running' "$logf" >/dev/null \
-    || fail "the failed sweep's stderr was discarded instead of logged: $(cat "$logf")"
-  [ ! -e "$miss" ] \
-    || fail "a failed stall-check sweep counted as an absence; a sweep that could not run is not evidence of resolution"
-  pass "a failing stall-check sweep logs an ERROR and preserves its dedup markers"
+  annotation_count=$(grep -c '^wake annotation:' "$out" || true)
+  [ "$annotation_count" -eq 1 ] || fail "expected only the unreadable-race-safe status annotation, got $annotation_count"
+  if grep -E '^wake annotation:.*: task\.status:' "$out" >/dev/null; then
+    fail "replaced status file produced an annotation"
+  fi
+  grep -F 'latest wake-EVENT observed at drain, not current state; historical / not necessarily the triggering event: turn-only.status:' "$out" >/dev/null \
+    || fail "bare turn-end mapping did not carry the historical warning"
+  if grep -F 'must-not-be-read' "$out" >/dev/null; then
+    fail "drain trusted a payload path or followed an out-of-state status symlink"
+  fi
+  pass "structural signal enrichment is separate, deduped, home-local, and tier-zero for other wakes"
 }
 
-test_stallcheck_scan_realarms_unresolved_finding() {
-  # An escalation may be deduplicated, but never permanently suppressed by
-  # anything other than the condition going away. Firstmate's answer to the
-  # first alarm can fail to land (fm-send.sh refuses a dead pane), so a finding
-  # the sweep keeps emitting must alarm again once FM_STALL_REALARM_SECS has
-  # passed - not on the very next tick, and not never. The window is driven
-  # from a low env value here and probed on BOTH sides of it, so the assertion
-  # cannot pass merely because the ticks share a wall-clock second.
-  local dir state fakebin sent capture marker window
-  dir=$(make_supercase stallcheck-realarm)
+test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
+  local dir state out i raw_count expected
+  dir=$(make_case complete-enrichment)
+  state="$dir/state"
+  out="$dir/drain.out"
+  awk 'BEGIN { printf "done: "; for (i = 0; i < 20000; i++) printf "x"; printf "\n" }' > "$state/huge.status"
+  append_wake "$state" signal huge.status "signal: huge" || fail "huge status wake append failed"
+  i=1
+  while [ "$i" -le 8 ]; do
+    awk -v n="$i" 'BEGIN { printf "working-%d: ", n; for (j = 0; j < 3000; j++) printf "y"; printf "\n" }' > "$state/many-$i.status"
+    append_wake "$state" signal "many-$i.status" "signal: many-$i" || fail "many-status wake append failed"
+    i=$((i + 1))
+  done
+  : > "$state/empty.status"
+  append_wake "$state" signal empty.status "signal: empty" || fail "empty status wake append failed"
+  append_wake "$state" signal missing.status "signal: missing" || fail "missing status wake append failed"
+  mkdir "$state/malformed.status"
+  append_wake "$state" signal malformed.status "signal: malformed" || fail "malformed status wake append failed"
+  printf 'done: unreadable\n' > "$state/unreadable.status"
+  chmod 000 "$state/unreadable.status"
+  append_wake "$state" signal unreadable.status "signal: unreadable" || fail "unreadable status wake append failed"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "complete enrichment drain failed"
+  raw_count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
+  [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
+
+  expected="wake annotation: latest wake-EVENT observed at drain, not current state: huge.status: $(cat "$state/huge.status")"
+  grep -Fx "$expected" "$out" >/dev/null \
+    || fail "the oversized unread status line was truncated or omitted"
+  i=1
+  while [ "$i" -le 8 ]; do
+    expected="wake annotation: latest wake-EVENT observed at drain, not current state: many-$i.status: $(cat "$state/many-$i.status")"
+    grep -Fx "$expected" "$out" >/dev/null \
+      || fail "readable status many-$i was truncated or omitted"
+    i=$((i + 1))
+  done
+  if grep -E '^wake annotation:.*(truncated|omitted)' "$out" >/dev/null; then
+    fail "complete unread annotation output still reported dropped content"
+  fi
+  if grep -E ': (empty|missing|malformed|unreadable)\.status:' "$out" >/dev/null; then
+    fail "missing, unreadable, malformed, or empty status file produced an annotation"
+  fi
+  pass "every readable unread status line is annotated in full while invalid status files preserve their raw wakes"
+}
+
+wait_for_file_text() {  # <file> <fixed-text>
+  local file=$1 expected=$2 i=0
+  while [ "$i" -lt 100 ]; do
+    grep -F "$expected" "$file" >/dev/null 2>&1 && return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
+test_slow_annotation_does_not_block_append_and_deleted_file_fails_open() {
+  local dir state out1 out2 pid
+  dir=$(make_case slow-annotation)
+  state="$dir/state"
+  out1="$dir/drain-one.out"
+  out2="$dir/drain-two.out"
+  printf 'done: disappears before bounded read\n' > "$state/slow.status"
+  append_wake "$state" signal slow.status "signal: slow" || fail "slow status wake append failed"
+
+  FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_TEST_DELAY=3 "$DRAIN" > "$out1" &
+  pid=$!
+  wait_for_file_text "$out1" "$(printf '\tsignal\tslow.status\t')" \
+    || { kill "$pid" 2>/dev/null || true; fail "slow drain did not commit its raw row"; }
+  printf 'done: appended while first drain annotates\n' > "$state/next.status"
+  append_wake "$state" signal next.status "signal: next" || fail "append blocked or failed during annotation"
+  kill -0 "$pid" 2>/dev/null || fail "slow annotation finished before the concurrent append proved lock independence"
+  rm -f "$state/slow.status"
+  wait "$pid" || fail "deleted status file made the committed drain fail"
+  grep -F "$(printf '\tsignal\tslow.status\t')" "$out1" >/dev/null || fail "deleted status file hid the committed raw row"
+  if grep -F ': slow.status:' "$out1" >/dev/null; then
+    fail "status deleted during annotation still produced an annotation"
+  fi
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" || fail "follow-up drain after concurrent append failed"
+  grep -F "$(printf '\tsignal\tnext.status\t')" "$out2" >/dev/null || fail "concurrent append was not left for the next drain"
+  pass "slow annotation releases the append lock and a deleted status file fails open"
+}
+
+test_wake_publish_requires_atomic_recovery_evidence() {
+  local dir state fakebin real_mv rc out
+  dir=$(make_case wake-publish-recovery-evidence)
   state="$dir/state"
   fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
-  window=60
-
-  cat > "$fakebin/fm-stall-check.sh" <<'SH'
+  real_mv=$(command -v mv) || fail "could not locate mv for recovery publication fixture"
+  printf 'pending:handling:existing\n' > "$state/.watcher-down"
+  cat > "$fakebin/mv" <<'SH'
 #!/usr/bin/env bash
-printf 'advisor-idle?: rt-advisor - idle 1900s with no active child work; route its next program step\n'
-exit 0
+last=${!#}
+if [ "$last" = "${FM_TEST_PUBLISH_MARKER:-}" ]; then
+  exit 1
+fi
+exec "$FM_TEST_REAL_MV" "$@"
 SH
-  chmod +x "$fakebin/fm-stall-check.sh"
-  marker="$state/.subsuper-seen-stallcheck-$(_stall_finding_key 'advisor-idle?: rt-advisor - idle 1900s')"
+  chmod +x "$fakebin/mv"
 
-  tick() {
-    FM_DAEMON_DIR="$fakebin" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 \
-      FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
-      FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 \
-      FM_STALL_REALARM_SECS="${1:-$window}" housekeeping "$state"
+  set +e
+  PATH="$fakebin:$PATH" FM_TEST_REAL_MV="$real_mv" FM_TEST_PUBLISH_MARKER="$state/.watcher-down" \
+    append_wake "$state" signal task.status "signal: publish failure"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "recovery publication failure allowed wake append to succeed"
+  [ "$(cat "$state/.watcher-down")" = 'pending:handling:existing' ] \
+    || fail "failed atomic publication erased existing recovery evidence"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "wake became durable before its recovery evidence"
+
+  PATH="$fakebin:$PATH" FM_TEST_REAL_MV="$real_mv" \
+    append_wake "$state" signal task.status "signal: recovered retry" \
+    || fail "wake retry did not publish durable recovery evidence"
+  out="$dir/drain.out"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "wake retry did not drain"
+  grep -F "signal: recovered retry" "$out" >/dev/null \
+    || fail "retried wake was not recovered by the durable drain"
+  pass "wake append publishes atomic recovery evidence before durable rows"
+}
+
+test_legacy_generationless_wake_is_adopted() {
+  local dir state row sequence generation
+  dir=$(make_case legacy-generationless-wake)
+  state="$dir/state"
+  row=$(printf '1700000000\t7\tcheck\tlegacy-process-event\tcheck: legacy process-event')
+  printf '%s\n' "$row" > "$state/.wake-queue"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/first.out" 2> "$dir/first.err" \
+    || fail "generation-less legacy wake could not be adopted"
+  grep -F "$row" "$dir/first.out" >/dev/null \
+    || fail "adopted legacy wake was not presented"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/first.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/first.err")
+  [ "$sequence" = 7 ] && [ -n "$generation" ] \
+    || fail "legacy wake adoption omitted its generation-bound acknowledgement"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "pending:handling:$generation" ] \
+    || fail "legacy wake was not adopted into durable handling recovery"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay.out" 2> "$dir/replay.err" \
+    || fail "unacknowledged adopted wake could not be re-drained"
+  grep -F "$row" "$dir/replay.out" >/dev/null \
+    || fail "unacknowledged adopted wake was lost"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
+    --recovery-generation "$generation" \
+    || fail "adopted legacy wake could not be acknowledged"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledged legacy wake remained queued"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/after-ack.out" 2> "$dir/after-ack.err" \
+    || fail "post-acknowledgement legacy drain failed"
+  ! grep -F "$row" "$dir/after-ack.out" >/dev/null \
+    || fail "acknowledged legacy wake was consumed more than once"
+  pass "wake drain: generation-less legacy wakes are adopted and acknowledged"
+}
+
+# Pin the recovery acknowledgement contract from docs/watcher-continuity.md at
+# the queue-library boundary.
+test_stale_recovery_generation_cannot_touch_a_newer_episode() {
+  local dir state first_err replay_err sequence generation handling_marker
+  local newer_marker newer_sequence newer_generation rc
+  dir=$(make_case stale-recovery-generation)
+  state="$dir/state"
+
+  append_wake "$state" check first 'check: first generation' \
+    || fail "first generation wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/first.out" 2> "$dir/first.err" \
+    || fail "first generation drain failed"
+  first_err="$dir/first.err"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$first_err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$first_err")
+  [ -n "$sequence" ] && [ -n "$generation" ] \
+    || fail "first drain did not emit a generation-bound acknowledgement"
+
+  append_wake "$state" check second 'check: same episode' \
+    || fail "first same-episode wake append failed"
+  append_wake "$state" check third 'check: same episode again' \
+    || fail "second same-episode wake append failed"
+  handling_marker=$(cat "$state/.watcher-down")
+  [ "${handling_marker##*:}" = "$generation" ] \
+    || fail "repeated publications replaced the outstanding recovery generation"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
+    --recovery-generation "$generation" > "$dir/handled-ack.out" 2> "$dir/handled-ack.err" \
+    || fail "a publication during handling invalidated the printed acknowledgement"
+  ! grep "$(printf '\tcheck\tfirst\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the handled row was not consumed"
+  grep "$(printf '\tcheck\tsecond\t')" "$state/.wake-queue" >/dev/null \
+    || fail "a row above the acknowledged sequence was consumed"
+  grep "$(printf '\tcheck\tthird\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the second row above the acknowledged sequence was consumed"
+  case "$(cat "$state/.watcher-down")" in
+    pending:*) ;;
+    *) fail "an episode with rows still queued was retired" ;;
+  esac
+
+  # Retire that episode, then let a genuinely newer one open.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay.out" 2> "$dir/replay.err" \
+    || fail "remaining wake could not be re-drained"
+  replay_err="$dir/replay.err"
+  grep "$(printf '\tcheck\tsecond\t')" "$dir/replay.out" >/dev/null \
+    || fail "remaining wake did not re-surface"
+  grep "$(printf '\tcheck\tthird\t')" "$dir/replay.out" >/dev/null \
+    || fail "second remaining wake did not re-surface"
+  newer_sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$replay_err")
+  newer_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$newer_sequence" \
+    --recovery-generation "$newer_generation" \
+    || fail "the handled episode could not be acknowledged"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledgement left durable wakes queued"
+
+  append_wake "$state" check fourth 'check: newer recovery generation' \
+    || fail "newer generation wake append failed"
+  newer_marker=$(cat "$state/.watcher-down")
+  [ "${newer_marker##*:}" != "$generation" ] \
+    || fail "a retired episode did not open a new recovery generation"
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
+    --recovery-generation "$generation" > "$dir/stale-ack.out" 2> "$dir/stale-ack.err" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "a stale acknowledgement failed instead of degrading safely: $(cat "$dir/stale-ack.err")"
+  if ! grep -F 'WAKE_ACK_REQUIRED' "$dir/stale-ack.err" >/dev/null \
+    || ! grep -F 're-run' "$dir/stale-ack.err" >/dev/null; then
+    fail "a stale acknowledgement did not name its own remedy: $(cat "$dir/stale-ack.err")"
+  fi
+  [ "$(cat "$state/.watcher-down")" = "$newer_marker" ] \
+    || fail "a stale acknowledgement retired the newer recovery episode"
+  grep "$(printf '\tcheck\tfourth\t')" "$state/.wake-queue" >/dev/null \
+    || fail "a stale acknowledgement consumed the newer durable wake"
+  pass "wake drain: a stale acknowledgement cannot retire or consume a newer recovery episode"
+}
+
+test_recovery_ack_failure_is_reported() {
+  local dir state fakebin real_mv rc generation
+  dir=$(make_case recovery-ack-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  real_mv=$(command -v mv) || fail "could not locate mv for recovery acknowledgement fixture"
+  printf 'pending:handling:fixture\n' > "$state/.watcher-down"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/initial.out" 2> "$dir/initial.err" \
+    || fail "initial recovery drain failed"
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through 0 --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/initial.err")
+  [ -n "$generation" ] || fail "initial recovery drain omitted its generation"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "$last" = "${FM_TEST_ACK_MARKER:-}" ]; then
+  exit 1
+fi
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$fakebin/mv"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_TEST_REAL_MV="$real_mv" FM_TEST_ACK_MARKER="$state/.watcher-down" \
+    FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through 0 --recovery-generation "$generation" \
+      > "$dir/drain.out" 2> "$dir/drain.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "recovery acknowledgement failure was reported as success"
+  grep -F 'recovery episode could not be retired safely' "$dir/drain.err" >/dev/null \
+    || fail "recovery acknowledgement failure had no explicit diagnostic"
+  grep -F 'WAKE_ACK_REQUIRED' "$dir/drain.err" >/dev/null \
+    || fail "recovery acknowledgement failure did not name its own remedy"
+  [ "$(cat "$state/.watcher-down")" = "pending:handling:$generation" ] \
+    || fail "failed acknowledgement corrupted the pending recovery marker"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through 0 --recovery-generation "$generation" \
+    > "$dir/retry.out" 2> "$dir/retry.err" \
+    || fail "recovery acknowledgement did not succeed on retry"
+  [ "$(cat "$state/.watcher-down")" = "acked:handling:$generation" ] \
+    || fail "successful retry did not acknowledge pending recovery state"
+  pass "wake drain: recovery acknowledgement failures are explicit and retryable"
+}
+
+test_interruption_before_and_after_raw_commit() {
+  local dir state before_out after_out replay_out empty_out pid rc count i sequence generation
+  dir=$(make_case interruption)
+  state="$dir/state"
+  before_out="$dir/before.out"
+  after_out="$dir/after.out"
+  replay_out="$dir/replay.out"
+  empty_out="$dir/empty.out"
+  printf 'done: interruption fixture\n' > "$state/task.status"
+  append_wake "$state" signal task.status "signal: task" || fail "pre-commit interruption wake append failed"
+
+  FM_STATE_OVERRIDE="$state" FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT=5 "$DRAIN" > "$before_out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$state/.wake-queue.lock" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$state/.wake-queue.lock" ] || { kill "$pid" 2>/dev/null || true; fail "pre-commit drain never entered its serialized read boundary"; }
+  kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain before raw commitment"
+  set +e
+  wait "$pid"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "pre-commit interruption unexpectedly succeeded"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" 2> "$dir/replay.err" || fail "restored pre-commit wake did not drain"
+  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$replay_out")
+  [ "$count" -eq 1 ] || fail "pre-commit interruption lost or duplicated the durable row"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/replay.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/replay.err")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "pre-commit replay acknowledgement failed"
+
+  append_wake "$state" signal task.status "signal: task after commit" || fail "post-commit interruption wake append failed"
+  FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_TEST_DELAY=5 "$DRAIN" > "$after_out" &
+  pid=$!
+  wait_for_file_text "$after_out" "$(printf '\tsignal\ttask.status\t')" \
+    || { kill "$pid" 2>/dev/null || true; fail "post-commit drain did not print its raw row"; }
+  [ -s "$state/.wake-queue" ] \
+    || { kill "$pid" 2>/dev/null || true; fail "post-commit drain consumed its raw row before handling acknowledgement"; }
+  kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain after raw presentation"
+  set +e
+  wait "$pid"
+  set -e
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$empty_out" 2> "$dir/after-replay.err" \
+    || fail "drain after post-presentation interruption failed"
+  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$empty_out")
+  [ "$count" -eq 1 ] || fail "interrupted handling did not replay its durable row exactly once"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/after-replay.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/after-replay.err")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "post-interruption replay acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledged interrupted wake remained durable"
+  pass "interruptions preserve durable rows until post-handling acknowledgement"
+}
+
+# The guarded self-announced status append (fm_wake_status_append_self_announced)
+# and the seen-signature gate it shares with the watcher's signal scan. Both
+# directions of the dedup contract are pinned through the real library
+# functions: a fully announced file plus the home's own bookkeeping close stays
+# announced (no wake), while ANY unannounced byte - a pending foreign line, a
+# missing marker, a later different note - reads as wake-worthy.
+test_self_announced_append_guards() {
+  local dir state status
+  dir=$(make_case self-announced-append)
+  state="$dir/state"
+  status="$state/t.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
   }
 
-  afk_enter "$state"
-  tick
-  grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
-    || fail "first tick did not escalate the idle advisor: $(cat "$sent" 2>/dev/null)"
+  # FIRST status change: a fresh file with no marker is unannounced (wakes).
+  printf 'working: first line\n' > "$status"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a never-announced status file read as already announced"
 
-  : > "$sent"
-  tick
-  [ ! -s "$sent" ] \
-    || fail "an unresolved finding re-alarmed on the very next tick instead of once per window: $(cat "$sent")"
+  # Prime the marker to current (the watcher just surfaced/absorbed everything).
+  prime_status_seen "$state" "$status" || fail "could not prime the seen marker"
 
-  # The window is measured from the marker's CONTENT epoch (like the
-  # .subsuper-stale-* markers), so backdate the content, not the mtime. Just
-  # inside the window must stay quiet; just outside it must alarm.
-  printf '%s\n' "$(( $(date +%s) - (window / 2) ))" > "$marker"
-  tick
-  [ ! -s "$sent" ] \
-    || fail "a finding re-alarmed while still inside FM_STALL_REALARM_SECS: $(cat "$sent")"
+  # A self-announced bookkeeping close on a fully announced file is suppressed.
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k1]: answered: closed by this home' \
+    || fail "self-announced append on an announced file was not suppressed (rc=$?)"
+  grep -Fq 'resolved [key=k1]: answered: closed by this home' "$status" \
+    || fail "the suppressed close was not appended"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "the self-announced close left unannounced bytes behind"
 
-  printf '%s\n' "$(( $(date +%s) - window - 10 ))" > "$marker"
-  tick
-  grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
-    || fail "a still-unresolved finding never re-alarmed after FM_STALL_REALARM_SECS; the lane is silently stalled again: $(cat "$sent" 2>/dev/null)"
+  # A later DIFFERENT note from any other writer still wakes.
+  printf 'needs-decision [key=k2]: a new decision\n' >> "$status"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a later different note on the same task read as already announced"
 
-  # <=0 follows the FM_ESCALATE_BATCH_SECS "immediate" idiom, never a disable:
-  # a disable path would be exactly the permanent suppression the principle
-  # forbids, so it must alarm even on a marker just stamped by the tick above.
-  : > "$sent"
-  tick 0
-  grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
-    || fail "FM_STALL_REALARM_SECS=0 suppressed an unresolved finding instead of alarming every sweep: $(cat "$sent" 2>/dev/null)"
-  unset -f tick
-  pass "an unresolved stall-check finding re-alarms once per FM_STALL_REALARM_SECS window"
+  # With that foreign line pending, a bookkeeping close must NOT advance the
+  # marker over it: the close appends but the file stays wake-worthy.
+  local rc=0
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k1]: answered: second close' || rc=$?
+  [ "$rc" -eq 1 ] || fail "a close over pending foreign bytes did not fail toward waking (rc=$rc)"
+  grep -Fq 'resolved [key=k1]: answered: second close' "$status" \
+    || fail "the fail-toward-waking close was not appended"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a close over pending foreign bytes swallowed the pending wake"
+
+  # UTF-8 close on an announced file: byte accounting must hold for multibyte.
+  prime_status_seen "$state" "$status" || fail "could not re-prime the seen marker"
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    "$(printf 'resolved [key=k2]: answered: caf\xc3\xa9 rentr\xc3\xa9e')" \
+    || fail "a multibyte self-announced close was not suppressed (rc=$?)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "multibyte byte accounting broke the self-announce guard"
+
+  pass "self-announced appends suppress only their own bytes and fail toward waking"
 }
 
-test_stallcheck_scan_single_absent_sweep_is_not_resolution() {
-  # fm-stall-check.sh drops a finding for one sweep on ordinary flap (a
-  # momentarily busy child pane short-circuits check_advisor_idle_stalls, a
-  # bounded fm-peek.sh probe fails). One absence must therefore neither resolve
-  # the finding nor make its return read as a fresh occurrence; only a
-  # corroborated absence (STALL_CHECK_MISSES_TO_CLEAR = 2) clears the marker.
-  local dir state fakebin sent capture marker miss out key
-  dir=$(make_supercase stallcheck-flap)
+# A trap that fires inside a lock's critical section abandons the holding
+# frame, and the exit path then re-acquires the same lock (a TERM inside a
+# recovery-marker section is the reproduced case: the watcher's reap wedged
+# forever spinning against its own pid). The same-process re-acquire must
+# reclaim the abandoned hold, while a SUBSHELL still waits on its parent's
+# live hold exactly as before.
+test_self_held_lock_reclaims_instead_of_deadlocking() {
+  local dir state rc
+  dir=$(make_case self-held-lock)
   state="$dir/state"
-  fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
-  out="$dir/sweep-out.txt"
-
-  cat > "$fakebin/fm-stall-check.sh" <<SH
-#!/usr/bin/env bash
-cat "$out" 2>/dev/null
-exit 0
-SH
-  chmod +x "$fakebin/fm-stall-check.sh"
-  key=$(_stall_finding_key 'advisor-idle?: rt-advisor - idle 1900s')
-  marker="$state/.subsuper-seen-stallcheck-$key"
-  miss="$state/.subsuper-stallcheck-miss-$key"
-
-  # A wide re-alarm window keeps this test about the miss counter alone: the
-  # flap absorption it asserts is only observable while the re-alarm window has
-  # not elapsed, and a window at or below the sweep cadence would pre-empt it.
-  tick() {
-    FM_DAEMON_DIR="$fakebin" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 \
-      FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
-      FM_ESCALATE_BATCH_SECS=0 FM_STALL_CHECK_SCAN_SECS=0 FM_STALL_REALARM_SECS=3600 \
-      housekeeping "$state"
-  }
-
-  afk_enter "$state"
-  printf 'advisor-idle?: rt-advisor - idle 1900s with no active child work\n' > "$out"
-  tick
-  grep -F 'advisor-idle?: rt-advisor' "$sent" >/dev/null \
-    || fail "first tick did not escalate the idle advisor: $(cat "$sent" 2>/dev/null)"
-
-  : > "$sent"; : > "$out"
-  tick
-  [ -e "$marker" ] \
-    || fail "one absent sweep cleared the dedup marker; a single flap is not a resolution"
-  [ "$(cat "$miss" 2>/dev/null)" = "1" ] \
-    || fail "one absent sweep did not record a single consecutive miss: $(cat "$miss" 2>/dev/null)"
-
-  printf 'advisor-idle?: rt-advisor - idle 2200s with no active child work\n' > "$out"
-  tick
-  [ ! -s "$sent" ] \
-    || fail "a finding returning after one missed sweep re-escalated as a fresh occurrence: $(cat "$sent")"
-  [ -e "$marker" ] || fail "the returning finding lost its dedup marker"
-  [ ! -e "$miss" ] || fail "the returning finding did not reset its consecutive-miss counter"
-
-  : > "$out"
-  tick
-  [ -e "$marker" ] || fail "the marker was cleared after only one absence again"
-  tick
-  [ ! -e "$marker" ] \
-    || fail "two consecutive absent sweeps did not clear the marker, so a genuine recurrence would stay suppressed"
-  [ ! -e "$miss" ] || fail "clearing the marker left its miss counter behind"
-  unset -f tick
-  pass "one absent sweep is a flap, two consecutive absences resolve the finding"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock="$2/.fixture.lock"
+    fm_lock_acquire_wait "$lock" || exit 10
+    fm_lock_try_acquire "$lock" || exit 11
+    fm_lock_release "$lock"
+    [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 12
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "self-held lock was not reclaimed cleanly (rc=$rc)"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock="$2/.fixture2.lock"
+    fm_lock_acquire_wait "$lock" || exit 10
+    ( fm_lock_try_acquire "$lock" && exit 13; exit 0 ) || exit 13
+    fm_lock_release "$lock"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a subshell reclaimed its parent's live hold (rc=$rc)"
+  pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
 }
 
-test_daemon_state_root_uses_fm_home
+# Drain-time historical annotation staleness: a turn-ended-only wake row must
+# not present an already-announced status line as a new update, while a status
+# file with unannounced bytes keeps its annotation and a direct status row is
+# always annotated. Driven through the real drain executable.
+test_historical_annotation_skips_announced_status() {
+  local dir state out err
+  dir=$(make_case historical-annotation)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+
+  printf 'working: long scout still going\n' > "$state/scout.status"
+  prime_status_seen "$state" "$state/scout.status" \
+    || fail "could not prime the scout seen marker"
+  : > "$state/scout.turn-ended"
+  append_wake "$state" signal scout.turn-ended "signal: $state/scout.turn-ended" \
+    || fail "turn-ended wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "drain failed"
+  if grep -F 'scout.status: working: long scout still going' "$out" >/dev/null; then
+    fail "a fully announced status line was replayed as a historical annotation"
+  fi
+  grep -F 'scout.turn-ended' "$out" >/dev/null \
+    || fail "suppressing the stale annotation dropped the turn-ended wake row itself"
+  ack_drain_err "$state" "$err" || fail "could not acknowledge the first drain"
+
+  # Unannounced status bytes: the historical annotation is genuinely new
+  # information and must stay.
+  printf 'working: fresh unannounced progress\n' >> "$state/scout.status"
+  : > "$state/scout.turn-ended"
+  append_wake "$state" signal scout.turn-ended "signal: $state/scout.turn-ended" \
+    || fail "second turn-ended wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "second drain failed"
+  grep -F 'historical / not necessarily the triggering event: scout.status: working: fresh unannounced progress' "$out" >/dev/null \
+    || fail "an unannounced status line lost its historical annotation"
+  ack_drain_err "$state" "$err" || fail "could not acknowledge the second drain"
+
+  # A direct status row is the announcement itself and is always annotated,
+  # even when the seen marker already covers the file.
+  printf 'done: scout finished\n' >> "$state/scout.status"
+  prime_status_seen "$state" "$state/scout.status" \
+    || fail "could not prime the marker for the direct-row leg"
+  append_wake "$state" signal scout.status "signal: $state/scout.status" \
+    || fail "direct status wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "third drain failed"
+  grep -F 'scout.status: done: scout finished' "$out" >/dev/null \
+    || fail "a direct status row lost its annotation"
+  pass "historical annotations replay nothing already announced and keep everything new"
+}
+
+test_self_held_lock_reclaims_instead_of_deadlocking
+test_self_announced_append_guards
+test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
+test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
-test_singleton_start
 test_atomic_double_drain
-test_drain_reports_lock_release_failure
 test_drain_dedupes_obvious_duplicates
-test_stale_watch_lock_reclaimed
-test_live_stale_watch_lock_is_actionable
-test_keepalive_rearms_stale_missing_watcher
-test_keepalive_stops_when_fleet_empty
-test_guard_warns_on_pending_queue
-test_guard_rearms_after_draining_pending_queue
-# Sub-supervisor (fm-supervise-daemon.sh) classifier + batching + housekeeping.
-test_classify_routine_signal_self
-test_classify_terminal_signal_escalates
-test_classify_check_and_unknown_escalate
-test_stale_transient_self_records_marker
-test_stale_terminal_escalates
-test_housekeeping_persistent_stale_escalates
-test_housekeeping_resumed_stale_cleared
-test_escalate_batches_into_one_digest
-test_escalate_batch_age_uses_first_append
-test_heartbeat_scan_dedup
-test_handle_wake_routes_self_and_escalate
-test_inject_skip_forces_self
-test_is_wake_reason_distinguishes_status_stdout
-test_terminal_stale_escalate_leaves_no_marker
-test_dead_agent_stale_wake_parses_window_and_escalates
-test_signal_escalate_marks_seen_no_catchall_refire
-test_timestamped_status_uses_raw_dedupe_and_clean_presentation
-# /afk presence-gating + injection hardening.
-test_inject_refuses_a_gone_target
-test_collapse_newlines_pure
-test_afk_absent_daemon_does_not_inject
-test_afk_present_injects_with_marker
-test_inject_digest_is_single_line
-test_busy_guard_defers_when_supervisor_busy
-test_marker_detection
-test_afk_turn_exemption
-test_should_exit_afk_when_afk_inactive
-# Injection hardening: composer guard, type-once submit, strip marker, dedupe.
-test_strip_injection_marker
-test_pane_input_pending_detects_partial_input
-test_pane_input_pending_blank_is_not_pending
-test_pane_input_pending_idle_prompt_not_pending
-test_pane_input_pending_honors_idle_override_after_border_strip
-test_composer_guard_defers_on_partial_input
-test_inject_types_once_retries_enter_only
-test_inject_no_duplicate_on_success
-test_classify_signal_dedup_against_scan
-test_classify_stale_dedup_against_signal
-# afk-invx-i5 regressions: bordered-composer detection, submit-ACK, max-defer.
-test_pane_input_pending_bordered_idle_not_pending
-test_pane_input_pending_bordered_with_text_is_pending
-test_submit_ack_confirms_on_bordered_empty_composer
-test_submit_ack_reports_pending_on_persistent_swallow
-test_max_defer_empty_swallow_types_once_and_alarms
-test_max_defer_flushes_empty_idle_pane
-test_max_defer_escape_probe_recovers_false_pending
-test_max_defer_pending_composer_alarms_without_typing
-test_wedge_alarm_enqueues_durable_next_turn_wake
-test_normal_flush_clears_stale_wedge_marker
-test_below_max_defer_does_nothing
-test_max_defer_afk_inactive_does_not_flush_or_alarm
-test_fm_send_exits_nonzero_on_confirmed_swallow
-test_fm_send_unconfirmed_pending_without_sent_text_fails
-test_fm_send_exits_nonzero_on_initial_send_failure
-# Stall-check integration (housekeeping job 4).
-test_stallcheck_scan_escalates_unrelayed_secondmate_child
-test_stallcheck_scan_escalates_idle_working_advisor
-test_stallcheck_scan_dedupes_repeated_finding
-test_stallcheck_scan_afk_inactive_does_not_inject
-test_stallcheck_scan_respects_cadence_gate
-test_stallcheck_scan_failed_sweep_is_logged_not_silent
-test_stallcheck_scan_realarms_unresolved_finding
-test_stallcheck_scan_single_absent_sweep_is_not_resolution
+test_drain_asserts_watcher_liveness
+test_structural_signal_enrichment_preserves_raw_rows
+test_enrichment_preserves_all_unread_lines_and_status_file_failures
+test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
+test_wake_publish_requires_atomic_recovery_evidence
+test_legacy_generationless_wake_is_adopted
+test_stale_recovery_generation_cannot_touch_a_newer_episode
+test_recovery_ack_failure_is_reported
+test_interruption_before_and_after_raw_commit

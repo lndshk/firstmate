@@ -51,6 +51,8 @@ CURRENT_STATUS_BOUNDARY_TRUSTED=
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-local-compat.sh
+. "$SCRIPT_DIR/fm-local-compat.sh"
 
 OWNER_STATE=$(cd "$STATE" 2>/dev/null && pwd -P) || {
   printf 'error: cannot resolve supervisor state directory: %s\n' "$STATE" >&2

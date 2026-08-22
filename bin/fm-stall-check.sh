@@ -20,6 +20,8 @@ SILENT_LANE_SECS=${FM_SILENT_LANE_SECS:-300}
 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-local-compat.sh
+. "$SCRIPT_DIR/fm-local-compat.sh"
 
 if [ "$(uname)" = Darwin ]; then
   stat_mtime() { stat -f %m "$1" 2>/dev/null; }

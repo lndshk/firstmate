@@ -21,41 +21,105 @@
 <h3 align="center">Talk to one agent. Ship with a crew.</h3>
 
 <p align="center">
-  <img alt="firstmate - talk to one agent, ship with a crew" src="assets/banner.jpg" width="100%" />
+  <img alt="firstmate - talk to one agent, ship with a crew" src="assets/banner.png" width="100%" />
 </p>
+
+## What it is
 
 You can run one coding agent easily.
 But the moment you want three project tasks done in parallel - fixes, investigations, plans, audits - you become a tab-juggler: babysitting sessions, copy-pasting context between repos, forgetting which terminal had the failing test.
 
 firstmate flips the model.
-You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in tmux windows, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
-For larger fleets, you can opt in to persistent secondmates: domain supervisors that are still ordinary direct reports, but run from their own isolated firstmate homes.
-There is no app to install; the whole orchestrator is an `AGENTS.md` file that any terminal coding agent can follow.
+You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in a visible session backend, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
+For larger fleets, you can opt in to persistent secondmates: second mates that are still ordinary direct reports, but run from their own isolated firstmate homes on this machine or another SSH-reachable host.
 
-- **One liaison** - you never talk to a worker agent.
-  The first mate dispatches, supervises, escalates only real decisions, and reports plain outcomes about work that is ready, blocked, or needs your call.
-- **A visible crew** - every crewmate lives in a tmux window.
-  Watch any of them work, or type into their window to intervene; the first mate reconciles.
-- **Persistent domain supervisors** - route natural-language scopes through `data/secondmates.md` when a domain deserves its own long-lived supervisor.
-  Each secondmate has a separate `FM_HOME`, local state, local projects, and its own session lock, while the main first mate still supervises it like any other direct report.
-- **Guarded by construction** - the first mate is read-only over your projects except for clean local default-branch refreshes, safe pruning of local branches whose remote is gone, and approved `local-only` fast-forward merges; crewmates work in disposable [treehouse](https://github.com/kunchenguid/treehouse) worktrees.
-  Ship tasks follow each project's delivery mode, and scout tasks produce local reports without pushing anything.
+firstmate is not a model, not a harness, not a skill, not an MCP server, and not a CLI.
+firstmate is an agent distro for running a crew of agents.
+An agent distro is a portable directory of instructions, skills, tooling, policies, and state conventions that turns a general-purpose agent into a specialized one.
+There is no app to install: the cloned repo is the distro - `AGENTS.md`, bundled firstmate skills, and helper scripts that any terminal coding agent can follow.
+Launching a supported harness inside it instantiates your first mate - and makes you the captain.
 
-This is not an agent harness. The orchestrator itself is not a skill. This is not a CLI.
+## Features
 
-This is.. a directory that turns any agent into your firstmate, and you the captain.
+- **One liaison** - you talk only to the first mate; it dispatches, supervises, escalates only real decisions, and reports plain outcomes.
+- **A visible crew** - every crewmate works in its own tmux window, experimental herdr/zellij tab, cmux workspace, or Orca terminal you can watch or type into; the first mate reconciles.
+- **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, or an Orca-managed worktree when `backend=orca`, so parallel work on one repo never collides.
+- **Two task shapes** - ship tasks deliver authorized changes; scout tasks leave standalone investigation reports when the intake contract warrants separate research.
+- **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
+- **Optional secondmates** - opt in to persistent second mates that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, either locally or as a whole home on an SSH-reachable host, with guarded updates and recovery that never turns an unavailable remote route into a local replacement.
+- **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is under way and supervision is not live.
+- **Optional Relay** - opt in with one local `.env` pairing token so firstmate can answer your public mentions on X and Discord alike, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-Relay behavior; a final reply promised in a thread becomes durable state that is reconciled from disk, so a restart or a compacted conversation cannot lose it; dry-run preview records would-be replies and dismissals locally before go-live.
+- **Strict project boundary** - the first mate is read-only over your projects except for the narrow guarded and captain-approved operations authorized by [hard rule 1](AGENTS.md#1-identity-and-prime-directives), including fleet sync's guarded safe branch pruning; crewmates make every other project change behind the configured merge authority.
+- **Restart-proof** - all state lives on disk and in the active session backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected); kill the session anytime and the next one reconciles, including confirmed-dead secondmate agents, and carries on.
+
+Full detail on every feature lives in [docs/architecture.md](docs/architecture.md).
 
 ## Quick Start
 
-```sh
-$ git clone https://github.com/kunchenguid/firstmate && cd firstmate
-$ claude   # launch your agent harness here; AGENTS.md takes over
+### Requirements
 
+- A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, OpenCode, or Cursor Agent CLI.
+- Git and the GitHub CLI, authenticated through `gh auth login`.
+- The CLI and dependencies for your selected runtime backend; tmux is the reference default.
+
+The first mate detects and offers to install supported missing tools after you approve.
+Backend-specific setup is linked in [Documentation](#documentation).
+
+### Recommended harnesses
+
+**Claude Code, Grok, and Pi are equal co-primary recommendations** for running the primary firstmate session, with `pi-signed` supported as Pi's distinct signed-wrapper identity.
+Claude Code uses a tracked Stop hook for tokenless watcher re-arm and rewake, Grok uses background-notify wake cycles, and Pi uses its tracked primary watcher extension.
+All three have verified turn-end guard paths when launched with their documented setup.
+Pick whichever one matches your subscription and workflow.
+
+Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+Cursor Agent CLI is verified as a primary too, using a tracked project-scope `.cursor/hooks.json` whose `stop` hook parks on the watcher between turns, closest in shape to Claude Code's.
+Launch it with `--trust`, or none of its project hooks load; it also has no turn-end hook in headless `cursor-agent -p`, so run the primary session interactively.
+
+### Install and launch
+
+```sh
+gh auth login
+git clone https://github.com/kunchenguid/firstmate
+cd firstmate
+```
+
+Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
+
+**Claude Code**
+
+```sh
+claude
+```
+
+**Grok**
+
+```sh
+grok --trust
+```
+
+**Pi**
+
+```sh
+pi
+# or, when the signed wrapper is installed
+FM_PI_HARNESS=pi-signed pi-signed
+```
+
+For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
+For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
+Pi's `/calm` toggle hides supported transcript chrome, including canonically classified Firstmate operational user rows, and uses a Calm-only animated working boat during active runs while preserving all model context and session data.
+The hidden operational inputs remain ordinary user-role messages with unchanged delivery, ordering, authority, persistence, and exports.
+The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.
+[Calm's current behavior and supported limits](docs/calm.md) are separate from its [version-scoped maintainer evidence](docs/calm-mode-feasibility.md).
+
+### Talk to it
+
+```sh
 > ahoy! look at my github project xyz, then fix the flaky login test and add dark mode
 
 # firstmate checks its toolchain (asking your consent before installing anything),
-# clones the project under projects/, and spawns two crewmates in tmux windows
-# fm-fix-login-k3 and fm-dark-mode-p7.
+# clones the project under projects/ and spawns two isolated workers in the active backend.
 # Minutes later:
 
   PR ready for review, captain: https://github.com/you/xyz/pull/42
@@ -64,30 +128,9 @@ $ claude   # launch your agent harness here; AGENTS.md takes over
 > alright merge it
 ```
 
-## Install
+### More backends
 
-**Prerequisites** (the first mate detects everything else and offers to install it):
-
-```sh
-# 1. a verified agent harness - claude, codex, opencode, or pi
-# 2. git + GitHub auth
-# 3. tmux - the crew lives in tmux windows (firstmate offers to install it if missing)
-gh auth login
-```
-
-**Get firstmate:**
-
-```sh
-git clone https://github.com/kunchenguid/firstmate
-cd firstmate && claude
-```
-
-That is the whole install.
-On first launch the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
-If compatible `tasks-axi` is already on `PATH`, bootstrap records it as an optional capability fact and firstmate uses its verbs for routine backlog mutations; when it is absent or incompatible, firstmate keeps hand-editing `data/backlog.md` exactly as before.
-
-**Run it inside tmux for the best experience.**
-firstmate works from any terminal - outside tmux, crewmates land in a detached `firstmate` session you can attach to - but launching your harness from inside tmux puts every crewmate window in your own session, one per task, where you can watch the crew work in real time or type into any window to intervene.
+Setup guides for tmux (the default) and every other supported backend (herdr, zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
 
 ## How It Works
 
@@ -100,194 +143,102 @@ firstmate works from any terminal - outside tmux, crewmates land in a detached `
  │ reads projects/ + firstmate routes  │
  │ writes guarded backlog/briefs/state │
  └──┬──────────────┬───────────────┬───┘
-    │ tmux send-keys / status files │
+    │ backend sends / status files │
     ▼              ▼               ▼
  ┌────────┐   ┌────────┐      ┌────────┐
- │fm-task1│   │fm-task2│  ... │fm-taskN│   tmux windows you can watch
+ │fm-task1│   │fm-task2│  ... │fm-taskN│   tmux windows, herdr/zellij tabs, cmux workspaces, or Orca terminals
  │crewmate│   │crewmate│      │crewmate│   one autonomous agent each
  └───┬────┘   └───┬────┘      └───┬────┘
      ▼            ▼               ▼
-  treehouse worktree or isolated secondmate home
+  treehouse worktree, Orca worktree, or isolated secondmate home
      │
      ├─ ship: project mode ► PR/local merge ► teardown
      │
-     └─ scout: report at data/<id>/report.md ► relay findings ► teardown
+     └─ scout: report at data/<id>/report.md ► decision inventory ► relay findings ► teardown
 ```
 
-- **Event-driven supervision** - a zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet and wakes the first mate only when a crewmate reports, stalls, a PR merges, or an internal heartbeat review is due.
-  A complementary always-on shell supervisor (`bin/fm-supervisor.sh`) reconciles durable wakes without consuming them, classifies recorded direct reports, writes a machine-readable snapshot, and refreshes the Firstmate Board without injecting chat or spending LLM tokens.
-  Detected wakes are also written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed one-shot process exit can be recovered by draining the queue.
-  Each normal watcher start also ensures one singleton keepalive sidecar is running; the sidecar judges liveness by `state/.last-watcher-beat` age and silently re-arms the one-shot watcher when the beacon goes stale and no live watcher owns the watch lock.
-  The sidecar is bound to in-flight work: it only spawns while a task exists (`state/*.meta`), and it stops cleanly and stops re-arming once the fleet empties, so a torn-down or ended session never leaves a task-less watcher enqueueing heartbeats with no consumer.
-  Routine watcher polling, restarts, elapsed waiting time, and unchanged heartbeat reviews stay silent; an idle crew costs you nothing.
-  A pull-based guard (`bin/fm-guard.sh`) warns through supervision tool output if tasks are in flight and that watcher stops running, queued wakes are waiting to be drained, or the fast read-only stall sweep it runs (`bin/fm-stall-check.sh --fast`) finds dormant workstreams - finished-but-not-advanced tasks, queued items whose blockers or date gates have cleared, or in-flight crews whose committed work is not pushed to any remote.
-  The pane and process checks - dead agent panes, idle in-flight panes, a live domain advisor idle past the threshold whose last status is not captain-gated, and a child escalation left unanswered inside a secondmate home - cost a peek per pane, so they stay in the full sweep rather than on the guard's hot path.
-  A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill activates it, after which it self-handles routine wakes in bash and escalates only captain-relevant events as one batched, single-line digest (prefixed with an in-band sentinel marker so firstmate can tell daemon injections apart from real messages).
-  It also runs that full stall sweep itself every `FM_STALL_CHECK_SCAN_SECS`, so the two stuck-work classes with no wake to trigger on at all - an idle domain advisor, and a child escalation left unanswered inside a secondmate home - still reach you while nobody is watching; each finding is deduped by identity across sweeps and re-alarms only while it stays unresolved past `FM_STALL_REALARM_SECS`.
-  Its injection path shares `bin/fm-tmux-lib.sh` with `fm-send.sh`, so dim-ghost-aware and border-aware composer detection plus verified submit retry stay consistent; when a buffered escalation is still undelivered after `FM_MAX_DEFER_SECS`, the daemon retries once via a bounded, idle-only Escape probe (verified non-destructive to genuine unsubmitted text) before raising the `state/.subsuper-inject-wedged` marker and a durable next-turn wake, instead of silently deferring forever.
-- **Worktrees, not branches in your checkout** - crewmates never touch your clone; treehouse pools clean worktrees so parallel tasks on one repo cannot collide.
-- **Two task shapes** - ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks investigate, plan, reproduce bugs, or audit, then leave a report at `data/<id>/report.md` and never push.
-- **Advisory direct work** - each firstmate home normally keeps at most three ordinary ship/scout reports active, while persistent secondmates remain outside that budget.
-  New work stays queued by default when three are active, but the captain may explicitly override the guidance for a particular dispatch; `fm-spawn.sh` does not enforce a hard cap.
-- **Optional secondmates** - `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
-  `fm-home-seed.sh` provisions the isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same tmux and status-file path as any direct report.
-  When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and is not recycled by later `treehouse get` or pruning.
-  Retirement or seed rollback returns the leased home; normal restart/recovery keeps it leased.
-  If returning the lease fails during teardown, firstmate leaves the route and home intact instead of hiding a still-held lease.
-  Seeding is transactional: if validation, cloning, initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
-  `local-only` projects stay with the main first mate because they merge into the main local checkout instead of a remote-backed PR path.
-  The same project may appear in multiple secondmate homes when their scopes differ, such as issue triage versus feature development.
-  Secondmates are idle by default: after startup recovery reconciles only work already in their own home, an empty queue waits silently for routed tasks, and they never self-initiate surveys or audits.
-  After seeding a secondmate, `fm-backlog-handoff.sh` moves already-judged in-scope queued items from the main backlog into that secondmate home so the domain queue starts in the right place.
-  Idle secondmate panes are healthy; teardown is explicit and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
-- **Project modes are explicit** - `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
-  `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
-- **Project memory belongs to projects** - durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`, with `CLAUDE.md` as a symlink.
-  Ship briefs prompt crewmates to create or update those files through the normal delivery path; `data/projects.md` stays a thin private registry.
-- **Local clones stay fresh** - bootstrap and PR-based teardown refresh remote-backed project clones with clean default-branch fast-forwards when the clone is on the default branch and has no local work, and prune local branches whose remote is gone and that no worktree still needs.
-- **Self-updates stay safe** - `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, activates the main home's current deterministic supervisor (including a one-time post-re-read bridge when the update began on a legacy updater), then re-reads updated instructions and nudges updated secondmates without touching project clones.
-  The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
-- **Restart-proof** - all state lives in tmux, status files, local markdown under `data/`, `data/secondmates.md`, and persistent secondmate homes.
-  Every incoming request is recorded in the local backlog before clarification, routing, or dispatch, so later messages and restarts do not silently drop it.
-  Kill the first mate session anytime; the next one reconciles and carries on.
-- **Windows scratch backstop** - on WSL hosts, the main supervisor checks the known bridge and Chromium-profile scratch families at startup and daily, deleting only directories older than seven days after a fresh Windows process-table scan proves no live command or executable references each candidate.
+You chat with the first mate.
+It routes each request to a crewmate in its own session endpoint and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
+Optional secondmates extend this to persistent local or whole-home remote second mates, dispatch profiles let you steer which harness handles which task, and opt-in Relay lets the same fleet answer public mentions.
+`codex-app` is not a runtime backend yet; [docs/codex-app-backend.md](docs/codex-app-backend.md) owns the Codex App boundary.
 
-## The bin/ toolbelt
+Full architecture - the supervision engine, worktree isolation, secondmates, dispatch profiles, project modes, optional Relay, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
 
-The first mate drives these; you rarely need to, but they work by hand too.
+## Built-in skills
 
-| Script                   | Description                                                                                                         |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------- |
-| `fm-bootstrap.sh`        | Detect required toolchain problems and optional capability facts; refresh clones best-effort; install tools only after consent |
-| `fm-windows-scratch-sweep.sh` | On WSL, safely reclaims stale known Windows scratch directories; use `-DryRun` to inspect candidates |
-| `fm-fleet-sync.sh`       | Fetch clones, clean-fast-forward their checked-out default branches, and safely prune branches whose remote is gone |
-| `fm-update.sh`           | Self-update the running firstmate repo and registered secondmate homes with fast-forward-only pulls from origin     |
-| `fm-backlog-handoff.sh`  | Move already-judged in-scope queued backlog items from the main home into a seeded secondmate home                 |
-| `fm-brief.sh`            | Scaffold an evidence-bearing ship brief, a report-only scout brief with `--scout`, or a secondmate charter with `--secondmate` |
-| `fm-ensure-agents-md.sh` | Ensure project `AGENTS.md` is the real memory file and `CLAUDE.md` symlinks to it                                   |
-| `fm-guard.sh`            | Warn when tasks are in flight but queued wakes are pending, the stall detector has findings, or the watcher liveness beacon is stale or missing |
-| `fm-stall-check.sh`      | Read-only pull-based sweep that flags dead agent panes, finished-but-not-advanced tasks, unblocked or date-gated queued items, in-flight crews with committed-but-unpushed work, idle in-flight stalls, idle domain advisors whose last status is not captain-gated (reported as parked rather than stalled when all their children await your merge), and child escalations left unanswered inside secondmate homes; `--fast` skips the pane/process checks |
-| `fm-home-seed.sh`        | Lease/provision a secondmate home transactionally, clone projects, initialize gates, and maintain `data/secondmates.md` |
-| `fm-spawn.sh`            | Spawn one task, several `id=repo` pairs, or a persistent secondmate with `--secondmate`                            |
-| `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`                                          |
-| `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval                                           |
-| `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
-| `fm-watch.sh`            | Singleton-safe one-shot watcher; blocks until supervision work is due, queues it durably, then exits with one reason line; `--keepalive` silently re-arms stale/missed one-shot watchers |
-| `fm-supervise-daemon.sh` | Presence-gated sub-supervisor for walk-away (`/afk`) supervision: wraps `fm-watch.sh`, self-handles routine wakes in bash, runs the full stall sweep on its own cadence, and escalates only captain-relevant events as one verified, batched, single-line digest prefixed with a sentinel marker |
-| `fm-supervisor.sh`       | Always-on main-home, no-chat supervisor; reconciles wakes, snapshots direct-report contracts, records actionable failures, and refreshes the board |
-| `fm-board.sh`            | Render the Firstmate Board once from the current supervisor snapshot; it has no separate daemon owner |
-| `fm-wake-drain.sh`       | Atomically drain queued watcher wakes before handling supervision work                                              |
-| `fm-send.sh`             | Send one verified literal line (or `--key Escape`) to a live crewmate window; refuses panes whose agent process is gone and exits non-zero unless the composer is confirmed empty afterward |
-| `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, dim-ghost-aware and border-aware composer detection, process-tree agent liveness and pane existence, Codex safety-prompt clearing, and verified submit retry |
-| `fm-peek.sh`             | Print a bounded tail of a crewmate pane                                                                             |
-| `fm-pr-check.sh`         | Record a PR-ready task and arm the watcher's merge poll                                                             |
-| `fm-promote.sh`          | Promote a scout task in place so it becomes a protected ship task                                                   |
-| `fm-teardown.sh`         | Return the worktree or retire/release a secondmate home; protects ship work, requires scout reports, checks child work, and prints the backlog reminder |
-| `fm-harness.sh`          | Detect the running harness; resolve the effective crewmate harness; answer whether a process tree still holds a live verified agent |
-| `fm-lock.sh`             | Per-home firstmate session lock                                                                                     |
+Firstmate ships these user-invocable built-in skills.
+Claude and grok use the slash form shown here; codex uses the same names with `$`, such as `$afk`.
 
-## Configuration
+| Skill              | What it does                                                                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine notifications in bash, escalates captain-relevant events and bounded declared-external-wait rechecks as batched digests, and actively alerts if delivery gets stuck while you step away |
+| `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, then guide the captain through any open decisions one at a time in agent-judged impact order; fall back to Bearings when invoked as the session's first real captain message |
+| `/bearings`        | Generate a concise four-section chat digest from bounded local fleet and registered-secondmate state; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` when live PR enrichment is wanted |
+| `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
+| `/stow`            | Sweep the session for uncaptured durable knowledge, persist the open work records this session knows are unfiled or now wrong, curate tiered startup memory with decay and cold archival, enforce each home's budget or surface the required decision, cascade to registered second mates, and report what is safe to reset |
 
-The shared orchestrator behavior lives in `AGENTS.md` - edit it like any prompt when the fleet is empty, or dispatch shared-repo edits to a crewmate while tasks are in flight.
-The tracked `.tasks.toml` pins the optional `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
-When compatible `tasks-axi` is on `PATH`, firstmate uses its verbs for routine backlog mutations and keeps secondmate transfers behind `fm-backlog-handoff.sh` validation; without it, backlog bookkeeping remains manual.
-Compatible means the shared bootstrap probe accepts `tasks-axi --version` as 0.1.1 or newer.
-Personal preferences for one captain's fleet live locally in `data/captain.md`; it is gitignored and read after `data/projects.md` and optional `data/secondmates.md` during bootstrap.
-Persistent secondmate routes live locally in `data/secondmates.md`.
-Each line records the secondmate id, charter summary, absolute home path, natural-language scope, project clone list, and added date; `fm-home-seed.sh validate` refuses duplicate ids, duplicate homes, and nested or overlapping homes.
-The main first mate routes by reading those scopes with judgment; the project list is provisioning data, not exclusive ownership.
-Use `fm-home-seed.sh <id> - <project>...` to lease a fresh firstmate worktree for the secondmate home.
-The lease is held under the secondmate id until explicit retirement or seed rollback returns it, so normal restarts do not free or recycle the home.
-Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.
-Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` projects remain main-firstmate work.
-For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
-After creating a secondmate, move existing main-backlog items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it is idempotent and refuses in-flight items or non-secondmate homes.
-Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
-`FM_HOME` selects the operational home for one firstmate instance.
-When it is unset, the repo root is the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
-Harness support is a table in section 4: claude, codex, opencode, and pi are all empirically verified; new harnesses get verified through a supervised trial task before joining the table.
+Bearings invocation examples:
 
-Runtime tuning via environment variables (defaults shown):
+- `/bearings` returns the fresh four-section digest in chat only.
+- `/bearings include PRs` keeps chat-only mode and opts into live PR enrichment.
+- `/bearings file` replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch and links it from the four-section chat digest.
+- `/bearings file include PRs` combines the dated report with live PR enrichment.
 
-```sh
-FM_HOME=                 # optional operational home; unset means this repo root
-FM_POLL=15              # seconds between watcher cycles
-FM_HEARTBEAT=600        # base seconds between fleet reviews; backs off exponentially while idle
-FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
-FM_CHECK_INTERVAL=300   # seconds between slow checks (merged-PR polls)
-FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
-FM_GUARD_GRACE=300      # seconds a stale watcher beacon may age before guard warnings
-FM_GUARD_STALL_CHECK=1  # set to 0 to stop fm-guard running the fast stall sweep
-FM_STALL_IDLE_SECS=600  # idle seconds before fm-stall-check flags an in-flight pane as a possible stall
-FM_ADVISOR_IDLE_STALL_SECS=1800  # idle seconds before fm-stall-check flags a live secondmate advisor whose last status is not captain-gated, and an unanswered child escalation inside a secondmate home
-FM_WATCH_KEEPALIVE=1    # set to 0 to disable the watcher keepalive sidecar
-FM_WATCH_KEEPALIVE_INTERVAL=30  # seconds between keepalive stale-beacon checks
-FM_WATCH_KEEPALIVE_CRASH_THRESHOLD=5  # consecutive failed re-arms before backoff
-FM_WATCH_KEEPALIVE_CRASH_BACKOFF=300  # seconds to pause re-arm attempts after a crash loop
-FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
-FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh
-FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
-FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.'   # busy-pane signatures, shared by watcher and tmux helper
-FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
-FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
-FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
-# sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
-FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
-FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
-FM_STALE_ESCALATE_SECS=240         # idle seconds before a stale pane escalates as a possible wedge
-FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
-FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
-FM_INJECT_ESCAPE_SETTLE=0.1        # seconds to wait after the max-defer Escape recovery probe before re-reading the composer
-FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once
-FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks
-FM_HEARTBEAT_SCAN_SECS=300         # cadence of the catch-all status scan for missed captain verbs
-FM_STALL_CHECK_SCAN_SECS=300       # cadence of the catch-all full fm-stall-check.sh sweep (never --fast)
-FM_STALL_REALARM_SECS=1800         # how long a stall finding stays deduped before an unresolved one alarms again; <=0 alarms every sweep
-FM_HOUSEKEEPING_TICK=15            # seconds between batch-flush, stale-recheck, and scan passes
-FM_SUPERVISOR_INTERVAL=15          # seconds between deterministic snapshot and board refresh cycles
-FM_WINDOWS_SCRATCH_SWEEP_INTERVAL=86400   # seconds between the supervisor's Windows scratch sweeps; 0 disables it
-```
+Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 
-### Always-on supervisor runbook
+### Two-tier skill layout
 
-Bootstrap silently starts the main home's supervisor when tmux is available; secondmate homes do not start another owner.
-Self-update ensures the post-update main-home supervisor is active; use `bin/fm-supervisor.sh start` to ensure it is running during manual recovery, `restart` to replace a verified stale owner, and `status` to inspect its singleton PID, heartbeat, snapshot freshness, and last error.
-The running cadence is persisted in `state/.firstmate-supervisor.owner` and governs heartbeat health checks.
-These commands are safe to run immediately after merge; `start` is idempotent and `restart` refuses duplicate ownership.
+Firstmate's skills live in two separate places with different audiences:
 
-The snapshot is `state/firstmate-supervisor.tsv`, current actionable conditions appear in its escalation records and the generated board, and their durable history appends to `state/.firstmate-supervisor.escalations`.
-Per-task supervisor evidence follows the generation recorded by `fm-spawn` and is reclaimed after task metadata disappears.
-Teardown alone writes generation-identified teardown markers and rechecks the generation before same-id state cleanup.
-The supervisor observes matching markers without locks or rewrites, ignores ambiguous legacy and temporary evidence, and reclaims only completed or dead-owner orphan markers after metadata is absent.
-The authoritative state-classification and optional receipt-deadline contract is in the [supervision protocol](AGENTS.md#8-supervision-protocol).
-The supervisor never drains Firstmate's wake queue, changes the backlog, or sends chat, so normal ownership and AFK batching/injection remain unchanged.
+- `.agents/skills/` - agent-loaded skills (this section's table, plus firstmate's agent-only reference skills). Every one of these assumes a live firstmate home and is meaningless, or actively misleading, installed anywhere else, so each carries `metadata.internal: true` in its frontmatter. That flag hides them from installer discovery (tools like the [skills.sh](https://skills.sh) `npx skills add` installer) without affecting how firstmate itself loads them - frontmatter metadata is inert to the agent's own skill loader.
+- `skills/` - public, installer-facing skills meant to be installed standalone into any project, independent of firstmate.
+  Each one is a self-contained skill with no dependency on firstmate's paths, tools, or vocabulary.
+  Today that is `skills/stow`, a generic session-knowledge-sweep skill that routes findings by explicit instruction first, then existing local conventions, then a private `.stow-notes.md` fallback, and curates tiered entries through decay, local archival, and user-approved on-demand offload proposals.
+  It intentionally shares no code with the firstmate-internal `.agents/skills/stow` it is named after, so the two can evolve independently.
 
-## Development
+## Documentation
 
-Tracked changes to firstmate itself, including `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, and agent skill files, ship through the `no-mistakes` pipeline on a feature branch and require the captain's explicit merge approval.
-When supervising live crewmates, keep long validation or build work in the background so watcher wakes can still be handled.
-Human-authored pull requests targeting `main` must be raised through `git push no-mistakes`; see `CONTRIBUTING.md` for the enforced contributor workflow.
-Local `.no-mistakes/` state and test evidence stay out of this repo; `.no-mistakes.yaml` keeps evidence in a temp directory instead.
-The watcher reliability path keeps the one-shot reason-line process model, durable queue, singleton lock, and a beacon-based keepalive sidecar.
-The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides proactive wake routing for walk-away supervision via the `/afk` skill; a blocking-waiter split remains a deferred follow-up phase.
+- [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
+- [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional Relay and its X and Discord setup steps, the files you set, and harness support.
+- [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
+- [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.
+- [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.
+- [docs/tmux-backend.md](docs/tmux-backend.md) - current setup and limits for the tmux reference backend.
+- [docs/herdr-backend.md](docs/herdr-backend.md) - current setup, safety boundaries, and limits for the experimental Herdr backend.
+- [docs/zellij-backend.md](docs/zellij-backend.md) - current setup and limits for the experimental Zellij backend.
+- [docs/orca-backend.md](docs/orca-backend.md) - current setup and limits for the experimental Orca backend.
+- [docs/cmux-backend.md](docs/cmux-backend.md) - current setup, socket security, and limits for the experimental cmux backend.
+- [docs/codex-app-backend.md](docs/codex-app-backend.md) - the current blocked Codex App backend boundary and rollout contract.
+- [docs/verification/runtime-backends.md](docs/verification/runtime-backends.md) - active maintainer verification for runtime backend guarantees.
+- [docs/gitlab-merge-watch.md](docs/gitlab-merge-watch.md) - maintainer verification for GitLab merge watching on arbitrary instances.
+- [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's current "no turn ends blind" backstop, scope, loop safety, and compatibility limits.
+- [docs/verification/supervision.md](docs/verification/supervision.md) - active maintainer verification for session-start, guard, continuity, and wedge integrations.
+- [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi and `pi-signed`, Grok, Cursor, and unknown harness fallback.
+- [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
+- [docs/documentation-audiences.md](docs/documentation-audiences.md) - documentation audiences and the machine-checked placement boundary.
+- [`AGENTS.md`](AGENTS.md) - the distro's always-loaded operating contract and routing index for conditional procedures.
+- [CONTRIBUTING.md](CONTRIBUTING.md) - how to contribute, including the dev/test commands.
 
-```sh
-bash -n bin/*.sh                          # syntax-check the toolbelt
-shellcheck bin/*.sh tests/*.sh            # lint the toolbelt and behavior tests; CI enforces this
-for test_script in tests/*.test.sh; do "$test_script"; done   # behavior tests, matching CI
-tests/fm-wake-queue.test.sh               # durable wake queue, singleton behavior, sub-supervisor classifier, /afk presence-gating, border-aware composer, max-defer, the away-mode stall-check scan (secondmate-child and idle-advisor escalation, cadence gate, dedup, re-alarm, single-absence and failed-sweep marker handling, afk-inactive buffering), and fm-send submit tests
-tests/fm-composer-ghost.test.sh           # dim-ghost stripping, ghost-only composer detection, NBSP-padded prompt detection, and escape-free peek tests
-tests/fm-safety-autoclear.test.sh         # strict Codex safety-dialog detection, Keep waiting key sequence, off switch, and recorded-window watcher wiring
-tests/fm-afk-inject-e2e.test.sh           # private-socket end-to-end test of the afk injection path (partial-input deferral, swallowed-Enter retry)
-tests/fm-agent-liveness.test.sh           # process-tree liveness, dead-pane send refusal/watcher wake, and real-tmux mid-shell/death proof
-tests/fm-bootstrap.test.sh                # bootstrap dependency and feature-probe tests
-tests/fm-supervisor.test.sh               # always-on wake reconciliation, exact states, escalations, no-chat behavior, and singleton restart
-tests/fm-fleet-sync.test.sh               # canonical symlink-target refresh, clean-FF-only skips, and safe gone-branch pruning
-tests/fm-update.test.sh                   # fast-forward-only self-update, supervisor activation, reread, nudge, dedup, and skip-safety tests
-tests/fm-secondmate.test.sh               # persistent secondmate routing, seeding, idle charter, backlog handoff, spawn, recovery, teardown, and FM_HOME tests
-tests/fm-teardown.test.sh                 # fm-teardown.sh safety and reminder checks: local-only fork-remote allow, truly-unpushed refuse, merged-to-main allow, merged-PR head-sha evidence allow with open/errored/error-body/absent-gh-axi/dirty-worktree/other-head/no-head-sha refusals, no-mistakes regression, tasks-axi reminder, --force override
-tests/fm-stall-check.test.sh              # stall detector: finished-but-not-advanced, unblocked/date-gated queued, unlanded-work sweep with secondmate/scout/local-only/pr-parked/fork-remote/mid-rebase exemptions, idle-pane stalls, idle-advisor detection for working/terminal statuses with busy/active-child/needs-decision/blocked exclusions, the advisor-parked?: split for PR-parked-only children including the mixed stuck-child and failed-PR cases, unrelayed child-escalation sweep over needs-decision/blocked/failed children with recent/busy-pane exclusions and advisor-state independence, terminal-child handling, pr-ready skip, done-archive fallback, and guard pointer
-[ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
-[ "$(readlink .claude/skills)" = "../.agents/skills" ]
-FM_HEARTBEAT=2 FM_POLL=1 bin/fm-watch.sh  # watcher smoke test (prints "heartbeat")
-```
+## Contributing
+
+Contributions are welcome - see [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, repo conventions, and how to run the tests.
+
+## License
+
+MIT - see [LICENSE](LICENSE).
+
+## Local additions (this fork only)
+
+These are not upstream. Upstream's README documents none of them because upstream does not
+ship them, so an upstream sync will never mention them and they are easy to lose track of.
+
+| Script | What it does |
+| --- | --- |
+| `bin/fm-supervisor.sh` | Always-on deterministic observer. Reconciles durable wakes without draining them, classifies every recorded direct report, and atomically refreshes `state/firstmate-supervisor.tsv` and the board. Started from `fm-bootstrap.sh` and `fm-update.sh`. |
+| `bin/fm-stall-check.sh` | Read-only pull-based sweep for work that is finished, dormant, unrelayed, or unlanded. Called by `fm-guard.sh --fast` so a finding surfaces in ordinary tool output. |
+| `bin/fm-board.sh` | Renders the Firstmate Board from supervisor state. |
+| `bin/fm-windows-scratch-sweep.sh` / `.ps1` | WSL-only stale Windows scratch cleanup, narrowly scoped and process-checked before every delete. |
+| `bin/fm-local-compat.sh` | Compatibility shims for tmux pane helpers upstream generalised into its backend API, plus the composer Escape probe upstream removed. Kept in its own file so upstream syncs never conflict over it. |
+
+Local-only test suites carry a `-local` suffix (`tests/*-local.test.sh`) so an upstream sync
+can replace the shared suite without silently dropping this fork's coverage.
