@@ -174,8 +174,28 @@ test_detached_unlanded_head_is_classified_without_duplicate_branch_row() {
   pass 'detached unlanded heads are classified once'
 }
 
+test_origin_failure_preserves_confirmed_non_origin_copy() {
+  local w out line
+  w=$(new_repo origin-failure)
+  git init -q --bare "$w/backup.git"
+  git -C "$w/repo" remote add backup "$w/backup.git"
+  git -C "$w/repo" switch -q -c topic
+  printf 'unlanded\n' >> "$w/repo/tracked.txt"
+  git -C "$w/repo" add tracked.txt
+  git -C "$w/repo" commit -qm unlanded
+  git -C "$w/repo" push -q "$w/backup.git" topic:topic
+  mv "$w/origin.git" "$w/origin.offline"
+
+  out=$("$AUDIT" "$w/repo") || fail "audit failed: $out"
+  line=$(branch_line "$out")
+  assert_contains "$line" 'backup copy found; origin status unknown' \
+    'confirmed backup was hidden when origin refresh failed'
+  pass 'origin failure retains confirmed non-origin backup status'
+}
+
 test_stale_origin_ref_is_not_a_remote_copy
 test_stale_non_origin_ref_is_not_a_remote_copy
 test_default_refreshes_all_remotes_and_prunes_stale_refs
 test_detached_unlanded_head_is_classified_without_duplicate_branch_row
+test_origin_failure_preserves_confirmed_non_origin_copy
 printf '%s\n' 'all git audit tests passed'

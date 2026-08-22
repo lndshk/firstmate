@@ -86,13 +86,16 @@ classify_ref() {
     return
   fi
   if remote_refresh_failed origin; then
-    printf '%s' '** REMOTE STATUS UNKNOWN - could not refresh origin **'
-    return
+    unknown=origin
   fi
   while IFS= read -r rem; do
     [ "$rem" = origin ] && continue
     if remote_is_current "$rem" && remote_has_ref "$repo" "$ref" "$rem"; then
-      printf '%s' "$rem only - NOT on origin"
+      if remote_refresh_failed origin; then
+        printf '%s' "$rem copy found; origin status unknown"
+      else
+        printf '%s' "$rem only - NOT on origin"
+      fi
       return
     fi
     if remote_refresh_failed "$rem"; then
