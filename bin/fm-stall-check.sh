@@ -24,6 +24,8 @@ SILENT_LANE_SECS=${FM_SILENT_LANE_SECS:-300}
 # fm_pane_agent_state / fm_pane_current_command helpers were deleted there.
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 
 if [ "$(uname)" = Darwin ]; then
   stat_mtime() { stat -f %m "$1" 2>/dev/null; }
@@ -168,7 +170,23 @@ terminal_status_ids() {
 }
 
 window_for_meta() {
-  grep '^window=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  fm_backend_target_of_meta "$1"
+}
+
+task_is_provably_busy() { # <state> <meta>
+  local state=$1 meta=$2 id verdict
+  id=$(basename "$meta" .meta)
+  verdict=$(fm_busy_classify_meta "$meta" "$id" "$state")
+  [ "${verdict%% *}" = busy ]
+}
+
+task_endpoint_readable() { # <meta>
+  local meta=$1 backend target id
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  id=$(basename "$meta" .meta)
+  [ -n "$target" ] || return 1
+  fm_backend_capture "$backend" "$target" 40 "fm-$id" >/dev/null 2>&1
 }
 
 worktree_for_meta() {
@@ -219,9 +237,8 @@ terminal_status_line() { # <line>
 }
 
 child_has_active_work() { # <child-state> <meta>
-  local child_state=$1 meta=$2 id window status m age last
-  window=$(window_for_meta "$meta")
-  if [ -n "$window" ] && fm_pane_is_busy "$window"; then
+  local child_state=$1 meta=$2 id status m age last
+  if task_is_provably_busy "$child_state" "$meta"; then
     return 0
   fi
 
@@ -381,11 +398,8 @@ check_idle_stalls() {
     [ "$age" -ge "$IDLE_SECS" ] || continue
     window=$(window_for_meta "$meta")
     [ -n "$window" ] || continue
-    # Confirm the pane is readable. fm_pane_is_busy returns non-zero both for
-    # "not busy" and unreadable panes, so capture a bounded peek first to avoid
-    # reporting missing/dead tmux targets as idle work.
-    FM_GUARD_STALL_CHECK=0 "$SCRIPT_DIR/fm-peek.sh" "$window" 40 >/dev/null 2>&1 || continue
-    if ! fm_pane_is_busy "$window"; then
+    task_endpoint_readable "$meta" || continue
+    if ! task_is_provably_busy "$STATE" "$meta"; then
       printf 'stall?: %s - idle %ss, no status advance\n' "$id" "$age"
     fi
   done
@@ -434,9 +448,8 @@ check_advisor_idle_stalls() {
     home=$(home_for_secondmate_meta "$id" "$meta" || true)
     [ -n "$home" ] || continue
     secondmate_has_child_work "$home" && continue
-    # Confirm the pane is readable before treating a non-busy result as idle.
-    FM_GUARD_STALL_CHECK=0 "$SCRIPT_DIR/fm-peek.sh" "$window" 40 >/dev/null 2>&1 || continue
-    if ! fm_pane_is_busy "$window"; then
+    task_endpoint_readable "$meta" || continue
+    if ! task_is_provably_busy "$STATE" "$meta"; then
       if secondmate_only_pr_parked_children "$home"; then
         printf 'advisor-parked?: %s - idle %ss, only PR-parked children awaiting captain merge\n' "$id" "$age"
       else
@@ -502,7 +515,7 @@ check_secondmate_child_escalations() {
       # and is acting on it, just hasn't appended a fresh status line yet -
       # skip only that confirmed-busy case. An idle OR unreadable/dead pane
       # is still a legitimate, unresolved stuck escalation.
-      if [ -n "$cwindow" ] && fm_pane_is_busy "$cwindow"; then
+      if [ -n "$cwindow" ] && task_is_provably_busy "$child_state" "$cmeta"; then
         continue
       fi
       verb=${clast%%:*}

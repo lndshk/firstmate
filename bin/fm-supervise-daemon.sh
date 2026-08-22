@@ -202,6 +202,11 @@ HEARTBEAT_SCAN_SECS_DEFAULT=300
 # to prevent. Fork-only (#25); upstream ships no stall detector.
 STALL_CHECK_SCAN_SECS_DEFAULT=300
 STALL_REALARM_SECS_DEFAULT=1800
+STALL_CHECK_MISSES_TO_CLEAR_DEFAULT=2
+STALL_CHECK_MISSES_TO_CLEAR=${FM_STALL_CHECK_MISSES_TO_CLEAR:-$STALL_CHECK_MISSES_TO_CLEAR_DEFAULT}
+case "$STALL_CHECK_MISSES_TO_CLEAR" in
+  ''|*[!0-9]*|0) STALL_CHECK_MISSES_TO_CLEAR=$STALL_CHECK_MISSES_TO_CLEAR_DEFAULT ;;
+esac
 HOUSEKEEPING_TICK_DEFAULT=15
 # Max time a buffered escalation may sit undelivered before the daemon retries
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge

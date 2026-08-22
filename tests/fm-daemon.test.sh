@@ -25,6 +25,29 @@ TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
 
+test_stall_check_resolved_marker_clears_after_two_valid_sweeps() {
+  local dir state key marker miss output status
+  dir=$(make_supercase stall-check-resolved)
+  state="$dir/state"
+  key=$(printf '%s' 'stall?: resolved-task - idle 900s, no status advance' | awk '{print $1, $2}' | tr -c 'A-Za-z0-9_.-' '_')
+  marker="$state/.subsuper-seen-stallcheck-$key"
+  miss="$state/.subsuper-stallcheck-miss-$key"
+  printf '%s\n' 1 > "$marker"
+
+  output=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_STALL_CHECK_MISSES_TO_CLEAR=invalid \
+    bash -c '. "$1"; stall_check_scan "$2"; test -f "$3"; test "$(cat "$4")" = 1' \
+    bash "$DAEMON" "$state" "$marker" "$miss" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "first resolved stall sweep did not retain its marker: $output"
+
+  output=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_STALL_CHECK_MISSES_TO_CLEAR=invalid \
+    bash -c '. "$1"; stall_check_scan "$2"; test ! -e "$3"; test ! -e "$4"' \
+    bash "$DAEMON" "$state" "$marker" "$miss" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "second resolved stall sweep did not clear its marker: $output"
+  pass "stall findings clear after two valid absent sweeps with an invalid override"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -1924,6 +1947,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
 }
 
 test_afk_start_refuses_when_flag_cannot_be_written
+test_stall_check_resolved_marker_clears_after_two_valid_sweeps
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
