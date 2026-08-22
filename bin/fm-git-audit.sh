@@ -15,8 +15,8 @@
 #      201 GB of it Rust target/ dirs wrapping 2.9 MB of source, and 9 firstmate
 #      branches carrying unlanded commits existed nowhere but this disk.
 #
-# Read-only. It fetches (unless --no-fetch) and otherwise only reads. It never
-# deletes, pushes, commits, or checks anything out.
+# Read-only. It refreshes configured remotes (unless --no-fetch) and otherwise
+# only reads. It never deletes, pushes, commits, or checks anything out.
 #
 # Usage: fm-git-audit.sh [--no-fetch] [--disk] [repo ...]
 #   Repos default to $FM_AUDIT_REPOS (colon-separated), else this repo root.
@@ -60,9 +60,50 @@ worktree_paths() {
   git -C "$1" worktree list --porcelain | awk '/^worktree /{print substr($0, 10)}'
 }
 
-remote_has_tip() {
-  git -C "$1" for-each-ref --contains="refs/heads/$2" --format='%(refname)' \
+remote_has_ref() {
+  git -C "$1" for-each-ref --contains="$2" --format='%(refname)' \
     "refs/remotes/$3/" | grep -q .
+}
+
+remote_is_current() {
+  case "$CURRENT_REMOTES" in
+    *"$1"$'\n'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+remote_refresh_failed() {
+  case "$FAILED_REMOTES" in
+    *"$1"$'\n'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+classify_ref() {
+  local repo=$1 ref=$2 rem unknown=''
+  if remote_is_current origin && remote_has_ref "$repo" "$ref" origin; then
+    printf '%s' 'on origin'
+    return
+  fi
+  if remote_refresh_failed origin; then
+    printf '%s' '** REMOTE STATUS UNKNOWN - could not refresh origin **'
+    return
+  fi
+  while IFS= read -r rem; do
+    [ "$rem" = origin ] && continue
+    if remote_is_current "$rem" && remote_has_ref "$repo" "$ref" "$rem"; then
+      printf '%s' "$rem only - NOT on origin"
+      return
+    fi
+    if remote_refresh_failed "$rem"; then
+      unknown="${unknown}${unknown:+, }$rem"
+    fi
+  done < <(git -C "$repo" remote)
+  if [ -n "$unknown" ]; then
+    printf '** REMOTE STATUS UNKNOWN - no confirmed copy; could not refresh: %s **' "$unknown"
+  else
+    printf '%s' '** LOCAL ONLY - no remote copy **'
+  fi
 }
 
 status=0
@@ -73,8 +114,22 @@ for R in "${REPOS[@]}"; do
     continue
   fi
   printf '===== %s\n' "$R"
-  if [ "$FETCH" -eq 1 ]; then
-    git -C "$R" fetch origin --quiet 2>/dev/null || true
+  CURRENT_REMOTES=''
+  FAILED_REMOTES=''
+  while IFS= read -r rem; do
+    if [ "$FETCH" -eq 0 ] || git -C "$R" fetch --prune --quiet "$rem" 2>/dev/null; then
+      CURRENT_REMOTES="${CURRENT_REMOTES}${rem}"$'\n'
+    else
+      FAILED_REMOTES="${FAILED_REMOTES}${rem}"$'\n'
+    fi
+  done < <(git -C "$R" remote)
+  if [ "$FETCH" -eq 0 ]; then
+    printf '%s\n' '--- remote status: cached refs only; classification may be stale ---'
+  elif [ -n "$FAILED_REMOTES" ]; then
+    while IFS= read -r rem; do
+      [ -z "$rem" ] && continue
+      printf '%s\n' "--- remote status: could not refresh $rem; its refs are ignored ---"
+    done <<<"$FAILED_REMOTES"
   fi
   if git -C "$R" rev-parse --verify -q origin/main >/dev/null 2>&1; then
     base=origin/main
@@ -99,26 +154,37 @@ for R in "${REPOS[@]}"; do
       "$(short_path "$wt")" "$ref" "$dirty" "$ahead" "$size"
   done < <(worktree_paths "$R")
 
-  printf -- '--- branches with commits not on %s ---\n' "$base"
+  printf -- '--- branches and detached HEADs with commits not on %s ---\n' "$base"
   found=0
   while IFS= read -r b; do
     n=$(git -C "$R" rev-list --count "$base".."$b" 2>/dev/null || echo 0)
     [ "$n" -eq 0 ] && continue
     found=1
-    if remote_has_tip "$R" "$b" origin; then
-      where='on origin'
-    else
-      where='** LOCAL ONLY - no remote copy **'
-      while IFS= read -r rem; do
-        [ "$rem" = origin ] && continue
-        if remote_has_tip "$R" "$b" "$rem"; then
-          where="$rem only - NOT on origin"
-          break
-        fi
-      done < <(git -C "$R" remote)
-    fi
+    where=$(classify_ref "$R" "refs/heads/$b")
     printf '  %-46s %4s commits  %s\n' "$b" "$n" "$where"
   done < <(git -C "$R" for-each-ref --format='%(refname:short)' refs/heads/)
+  seen_detached=''
+  while IFS= read -r wt; do
+    [ -d "$wt" ] || continue
+    if git -C "$wt" symbolic-ref --quiet HEAD >/dev/null 2>&1; then
+      continue
+    fi
+    head=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null || true)
+    [ -n "$head" ] || continue
+    case "$seen_detached" in
+      *"$head"$'\n'*) continue ;;
+    esac
+    n=$(git -C "$R" rev-list --count "$base".."$head" 2>/dev/null || echo 0)
+    [ "$n" -eq 0 ] && continue
+    if git -C "$R" for-each-ref --contains="$head" --format='%(refname)' refs/heads/ | grep -q .; then
+      continue
+    fi
+    seen_detached="${seen_detached}${head}"$'\n'
+    found=1
+    where=$(classify_ref "$R" "$head")
+    printf '  %-46s %4s commits  %s\n' \
+      "(detached: $(short_path "$wt") @ ${head:0:12})" "$n" "$where"
+  done < <(worktree_paths "$R")
   [ "$found" -eq 0 ] && printf '  (none - every branch is landed)\n' || true
 
   stashes=$(git -C "$R" stash list 2>/dev/null | wc -l | tr -d ' ')
