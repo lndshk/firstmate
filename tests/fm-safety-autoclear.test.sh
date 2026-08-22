@@ -8,6 +8,8 @@ WATCH="$ROOT/bin/fm-watch.sh"
 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$LIB"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$ROOT/bin/fm-wake-lib.sh"
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-safety-autoclear-tests.XXXXXX")
 cleanup() { [ -n "${TMP_ROOT:-}" ] && rm -rf "$TMP_ROOT"; }
@@ -141,6 +143,14 @@ test_disabled_does_not_capture_or_send() {
 }
 
 run_watch() {  # <fakebin> <capture> <log> <state> <out> [after-down]
+  local state=$4 status
+  status="$state/task.status"
+  # The production watcher stays alive after a quiet cycle.  Seed a terminal
+  # status that its signal pass has already observed, so the heartbeat exits
+  # normally after the cycle under test has completed.
+  printf '%s\n' 'done: watcher test cycle complete' > "$status"
+  printf '%s' "$(fm_wake_signal_sig "$status")" \
+    > "$(fm_wake_signal_seen_path "$state" "$status")"
   FM_STATE_OVERRIDE="$4" FM_WATCH_KEEPALIVE=0 FM_CHECK_INTERVAL=9999999 \
     FM_HEARTBEAT=0 FM_SAFETY_AUTOCLEAR_DELAY=0 FM_FAKE_TMUX_CAPTURE="$2" \
     FM_FAKE_TMUX_AFTER_DOWN="${6:-}" \
