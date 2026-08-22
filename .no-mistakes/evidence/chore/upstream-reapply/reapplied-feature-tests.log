@@ -1,0 +1,6 @@
+FM_TEST_BEGIN 2026-08-22T22:32:14Z tests/fm-safety-autoclear.test.sh family=unclassified expected_gate_skip=none
+ok - active prompt sends Down, verifies Keep waiting, then Enter
+ok - a Down that does not move the selection never confirms option 1
+ok - a retry after Down confirms Keep waiting without selecting Learn more
+ok - dialog words outside the complete menu do not trigger
+ok - FM_SAFETY_AUTOCLEAR=0 disables capture and keypresses

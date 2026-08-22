@@ -1,0 +1,49 @@
+FM_TEST_BEGIN 2026-08-22T22:33:58Z tests/fm-fleet-sync-symlink.test.sh family=unclassified expected_gate_skip=none
+ok - a symlinked projects/ entry syncs through to its target checkout
+FM_TEST_END 2026-08-22T22:33:59Z tests/fm-fleet-sync-symlink.test.sh exit=0 duration_ms=830 gate_skip=false
+FM_TEST_BEGIN 2026-08-22T22:33:59Z tests/fm-error-harvest.test.sh family=unclassified expected_gate_skip=none
+ok - missing transcript root exits 2 rather than reporting clean
+ok - no transcripts in window exits 2 rather than reporting clean
+ok - an unreadable transcript candidate fails the scan
+ok - non-finite and non-positive --days values are rejected before scanning
+ok - a one-off failure stays below the recurrence threshold
+ok - the same failure across two sessions is reported without forged provenance
+ok - a failure spanning two projects is flagged as structural
+ok - interrupted/cancelled aborts are excluded from denials
+ok - a hook cancelled by the user is not counted as a hook failure
+ok - a hook that ran to its timeout is reported
+ok - the same fault with different paths and counts groups into one signature
+ok - long errors retain distinct fixed-size grouping identities
+ok - report strips terminal control bytes from transcript content
+ok - --json emits parseable output without raw transcript samples
+ok - same-basename transcripts in different projects count as two sessions
+ok - nested transcripts are attributed to their top-level project
+ok - non-regular transcript entries are skipped without blocking
+ok - raced transcript replacement cannot follow a symlink
+ok - coverage counts only projects with successfully opened transcripts
+ok - untyped hook labels are normalized without crashing
+ok - schema-invalid transcript records are skipped without crashing
+ok - invalid timestamps are dropped while coverage uses file mtime
+ok - distinct hook labels remain separate findings
+ok - only literal JSON true counts as a failure
+ok - only literal JSON true counts as a timeout
+ok - long tool names remain distinct behind bounded displays
+ok - negative --top is rejected before reporting
+
+all fm-error-harvest tests passed
+FM_TEST_END 2026-08-22T22:34:04Z tests/fm-error-harvest.test.sh exit=0 duration_ms=5151 gate_skip=false
+FM_TEST_BEGIN 2026-08-22T22:34:04Z tests/fm-git-audit.test.sh family=unclassified expected_gate_skip=none
+ok - stale origin ref does not count as a remote copy
+ok - non-origin reachability determines backup status
+ok - default audit refreshes every remote and prunes stale refs
+ok - detached unlanded heads are classified once
+ok - origin failure retains confirmed non-origin backup status
+ok - default audit fetches all remote heads
+ok - missing main skips unlanded classification
+all git audit tests passed
+FM_TEST_END 2026-08-22T22:34:06Z tests/fm-git-audit.test.sh exit=0 duration_ms=1568 gate_skip=false
+FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=7738
+FM_TEST_SUMMARY_FAMILY family=unclassified count=3 duration_ms=7549 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-error-harvest.test.sh duration_ms=5151
+FM_TEST_SLOWEST rank=2 script=tests/fm-git-audit.test.sh duration_ms=1568
+FM_TEST_SLOWEST rank=3 script=tests/fm-fleet-sync-symlink.test.sh duration_ms=830
