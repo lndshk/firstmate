@@ -460,4 +460,61 @@ out=$(run "$TMP_ROOT/live" --top -1 2>&1); rc=$?
 printf '%s' "$out" | grep -Fq -- '--top must be >= 1' || fail "negative --top error was unclear"
 pass "negative --top is rejected before reporting"
 
+
+# --- control characters must not smuggle a secret past the redactor -----------------
+# Regression for review-14 / review-20 / review-22: three rounds of one root cause. A
+# control byte between key and separator, or inside the key itself, defeated every
+# assignment pattern because \s does not match C0/C1 controls - the redactor declined and
+# clean_text() then repaired the string into a readable secret. Verified leaking before
+# the fix. Newlines are deliberately NOT collapsed here, or a header would swallow the
+# error text after it (review-14, in reverse).
+redaction_case() {  # <label> <python-repr-of-input> <needle-that-must-not-appear>
+  local label=$1 src=$2 needle=$3 out
+  out=$(PYTHONDONTWRITEBYTECODE=1 "$PY" - "$src" <<'PYEOF'
+import importlib.util, sys
+src = eval(sys.argv[1])          # read BEFORE argv is replaced for the module load
+spec = importlib.util.spec_from_file_location("h", "bin/fm-error-harvest.py")
+m = importlib.util.module_from_spec(spec)
+sys.argv = ["h"]
+try:
+    spec.loader.exec_module(m)
+except SystemExit:
+    pass
+print(m.untrusted_text(src))
+PYEOF
+) || fail "redaction probe failed for $label"
+  case "$out" in
+    *"$needle"*) fail "$label: secret survived redaction -> $out" ;;
+  esac
+  pass "$label"
+}
+
+redaction_case "plain assignment is redacted"        "'token=super-secret'"          "super-secret"
+redaction_case "ESC before the separator"            "'token\x1b=super-secret'"      "super-secret"
+redaction_case "NUL before the separator"            "'api_key\x00=super-secret'"    "super-secret"
+redaction_case "control inside the key rejoins it"   "'pass\x7fword=super-secret'"   "super-secret"
+redaction_case "control inside the value"            "'token=sup\x1ber-secret'"      "er-secret"
+redaction_case "bearer token split by a control"     "'Authorization: Bearer abc\x1bdefghijkl'" "defghijkl"
+
+# A header must redact its value WITHOUT swallowing the line after it.
+out=$(PYTHONDONTWRITEBYTECODE=1 "$PY" - <<'PYEOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("h", "bin/fm-error-harvest.py")
+m = importlib.util.module_from_spec(spec)
+sys.argv = ["h"]
+try:
+    spec.loader.exec_module(m)
+except SystemExit:
+    pass
+print(m.untrusted_text("Authorization: Bearer abcdefghijklmnop\nrequest failed: timeout"))
+PYEOF
+)
+case "$out" in
+  *abcdefghijklmnop*) fail "header value leaked: $out" ;;
+esac
+case "$out" in
+  *timeout*) pass "a redacted header does not swallow the failure text after it" ;;
+  *) fail "header redaction swallowed the following error text: $out" ;;
+esac
+
 printf '\nall fm-error-harvest tests passed\n'

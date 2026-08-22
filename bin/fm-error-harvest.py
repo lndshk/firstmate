@@ -79,6 +79,14 @@ _HEX = re.compile(r"\b[0-9a-f]{8,}\b", re.I)
 _NUM = re.compile(r"\b\d{2,}\b")
 _WS = re.compile(r"\s+")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# Controls EXCEPT tab/newline/carriage-return. A control byte between a key and its
+# separator (`token\x1b=secret`) defeats every assignment pattern, because `\s` does not
+# match C1/C0 controls - so the redactor declines, and clean_text() then repairs the
+# string into a readable secret. Neutralising these BEFORE the patterns run closes that
+# gap at the one choke point. Newlines are deliberately preserved: _SECRET_HEADER is
+# bounded by [^\r\n]*, so collapsing them here would make a header swallow the error
+# text that follows it and merge distinct failures.
+_CONTROL_INLINE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _SECRET_KEY = (
     r"(?:[A-Za-z0-9_.-]*?(?:token|secret|password|passwd|pwd|api[_-]?key|auth|"
     r"cookie|session|credential|private[_-]?key)[A-Za-z0-9_.-]*)"
@@ -118,6 +126,11 @@ def display(text: str, limit: int | None = None) -> str:
 def redact_secrets(text: str) -> str:
     if not isinstance(text, str):
         return ""
+    # Strip inline controls first; see _CONTROL_INLINE. REMOVED rather than spaced: a
+    # control inside the key (`pass\x7fword=`) would otherwise split the keyword and defeat
+    # detection just as surely as one before the separator. Controls have no display value,
+    # and a redactor must fail toward over-redaction, so rejoining is the safe direction.
+    text = _CONTROL_INLINE.sub("", text)
     text = _PEM.sub("<REDACTED>", text)
     text = _SECRET_HEADER.sub(r"\1<REDACTED>", text)
     text = _SECRET_ASSIGNMENT.sub(r"\1<REDACTED>", text)
