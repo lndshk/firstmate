@@ -189,7 +189,7 @@ test_sweep_invalid_cap_defaults_to_five() {
   key=crew_fm-recorded
   export FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_LOG="$dir/tmux.log"
   PATH="$fb:$PATH"
-  for invalid in not-a-number -1; do
+  for invalid in not-a-number -1 9223372036854775808; do
     echo 5 > "$state/.count-safety-$key"
     : > "$dir/tmux.log"
     FM_SAFETY_AUTOCLEAR_MAX="$invalid" fm_codex_safety_sweep "$state" crew:fm-recorded "$key" >/dev/null
@@ -197,6 +197,25 @@ test_sweep_invalid_cap_defaults_to_five() {
       || fail "invalid retry cap $invalid sent another keypress"
   done
   pass "invalid retry caps default to five attempts"
+}
+
+test_sweep_overflow_count_resets() {
+  local dir fb capture state key
+  dir="$TMP_ROOT/sweep-overflow-count"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/capture"; state="$dir/state"; mkdir -p "$state"
+  write_prompt "$capture" 2
+  key=crew_fm-recorded
+  export FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_LOG="$dir/tmux.log"
+  PATH="$fb:$PATH"
+  echo 9223372036854775808 > "$state/.count-safety-$key"
+  : > "$dir/tmux.log"
+  FM_SAFETY_AUTOCLEAR_MAX=2 fm_codex_safety_sweep "$state" crew:fm-recorded "$key" >/dev/null
+  [ "$(cat "$state/.count-safety-$key")" = 1 ] \
+    || fail "overflowed retry count was not reset"
+  grep -q 'send-keys' "$dir/tmux.log" \
+    || fail "reset retry count did not clear the prompt"
+  pass "overflowed retry counts reset before clearing"
 }
 
 test_sweep_resets_count_when_menu_gone() {
@@ -222,4 +241,5 @@ test_non_menu_content_does_not_trigger
 test_disabled_does_not_capture_or_send
 test_sweep_counts_and_caps_consecutive_clears
 test_sweep_invalid_cap_defaults_to_five
+test_sweep_overflow_count_resets
 test_sweep_resets_count_when_menu_gone

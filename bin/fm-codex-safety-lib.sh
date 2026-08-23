@@ -86,13 +86,20 @@ fm_clear_safety_prompt() {  # <target>
 #
 # Returns 0 when a clear was confirmed (caller should skip further classification
 # of this pane this cycle), 1 otherwise. Never fails the caller.
+fm_codex_safety_nonnegative_integer() {  # <value>
+  local value=$1
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#value}" -lt 10 ] && return 0
+  [ "${#value}" -eq 10 ] && [[ "$value" < 2147483648 ]]
+}
+
 fm_codex_safety_sweep() {  # <state-dir> <window> <key>
   local state=$1 win=$2 key=$3 clearf cleared max
   max=${FM_SAFETY_AUTOCLEAR_MAX:-5}
-  case "$max" in ''|*[!0-9]*) max=5 ;; esac
+  fm_codex_safety_nonnegative_integer "$max" || max=5
   clearf="$state/.count-safety-$key"
   cleared=$(cat "$clearf" 2>/dev/null || echo 0)
-  case "$cleared" in ''|*[!0-9]*) cleared=0 ;; esac
+  fm_codex_safety_nonnegative_integer "$cleared" || cleared=0
 
   if [ "$cleared" -ge "$max" ]; then
     # Budget spent. Reset ONLY once the menu is confirmed gone, so a pane that is
@@ -107,11 +114,11 @@ fm_codex_safety_sweep() {  # <state-dir> <window> <key>
 
   fm_clear_safety_prompt "$win"
   case $? in
-    0) echo $(( cleared + 1 )) > "$clearf"; return 0 ;;
+    0) echo $(( 10#$cleared + 1 )) > "$clearf"; return 0 ;;
     # An unverified attempt still advances the count: keys may have been absorbed
     # (copy-mode, lookalike content), and an attempt that cannot be confirmed must
     # not be free, or a pane could be poked forever.
-    2) echo $(( cleared + 1 )) > "$clearf"; return 1 ;;
+    2) echo $(( 10#$cleared + 1 )) > "$clearf"; return 1 ;;
     *) rm -f "$clearf" 2>/dev/null || true; return 1 ;;
   esac
 }
