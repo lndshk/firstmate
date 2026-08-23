@@ -32,7 +32,10 @@ so an upstream sync replaces it cleanly. Nothing here modifies an upstream file.
 These tools are invoked from home-local `state/*.check.sh` scripts, not from
 edits to upstream's `bin/`. `state/` is gitignored, so the wiring survives every
 upstream sync untouched and adds no conflict surface. `bin/fm-watch.sh` discovers
-`state/*.check.sh` by glob; nothing needs registering.
+`state/*.check.sh` by glob, but executes a custom check only when a matching private `state/<id>.check-trust` exists, bound to that file's exact bytes by `bin/fm-check-register.sh <id>`.
+An unregistered check is rejected silently - no warning, no run.
+The binding covers the current bytes, so editing a check requires rerunning `bin/fm-check-register.sh <id>` or it silently stops running.
+After adopting upstream, register each existing home-local check once: `live-checkout-drift`, `merge-notify`, `open-pr`, `upstream-drift`, `stall-check`, and `codex-safety`.
 
 That split is deliberate and worth preserving: LOGIC lives in additive files here
 (so CI covers it), INVOCATION lives in the home (so the repo keeps zero divergence
