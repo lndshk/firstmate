@@ -112,7 +112,7 @@ test_finished_but_not_advanced() {
 
 ## Done
 EOF
-  printf '%s\n' 'working: tests' 'done: ready for validation' > "$dir/state/ship-fix-a1.status"
+  printf '%s\n' 'working: tests' 'result: ready for validation' > "$dir/state/ship-fix-a1.status"
 
   out=$(run_check "$dir") || fail "finished check exited non-zero"
   printf '%s\n' "$out" | grep -F 'advance: ship-fix-a1 - done but still in-flight; next leg not triggered' >/dev/null \

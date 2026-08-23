@@ -163,9 +163,7 @@ terminal_status_ids() {
     [ -e "$f" ] || continue
     id=$(basename "$f" .status)
     last=$(awk 'NF { line = $0 } END { print line }' "$f" 2>/dev/null || true)
-    case "$last" in
-      done:*|failed:*) printf '%s\n' "$id" ;;
-    esac
+    terminal_status_line "$last" && printf '%s\n' "$id"
   done
 }
 
