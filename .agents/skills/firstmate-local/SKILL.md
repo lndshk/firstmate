@@ -1,6 +1,8 @@
 ---
 name: firstmate-local
 description: Tools and hazards that exist only in this fork of firstmate and nowhere upstream - the stall detector, transcript error harvester, unlanded-work audit, Codex safety-menu clearing, and the symlinked production checkout. Load when working in this firstmate home, when a bin/ script is not documented upstream, or before touching projects/quant-src.
+metadata:
+  internal: true
 ---
 
 # Local to this fork
