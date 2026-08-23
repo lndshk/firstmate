@@ -20,6 +20,12 @@ SILENT_LANE_SECS=${FM_SILENT_LANE_SECS:-300}
 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
+# Upstream owns agent liveness in the backend API; the fork-era
+# fm_pane_agent_state / fm_pane_current_command helpers were deleted there.
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 
 if [ "$(uname)" = Darwin ]; then
   stat_mtime() { stat -f %m "$1" 2>/dev/null; }
@@ -164,7 +170,27 @@ terminal_status_ids() {
 }
 
 window_for_meta() {
-  grep '^window=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  fm_backend_target_of_meta "$1"
+}
+
+task_is_provably_busy() { # <state> <meta>
+  local state=$1 meta=$2 id backend target harness verdict
+  id=$(basename "$meta" .meta)
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  harness=$(fm_meta_get "$meta" harness)
+  [ -n "$target" ] || return 1
+  verdict=$(fm_busy_classify_live "$backend" "$target" "$harness" "$id" "$state" "fm-$id")
+  [ "${verdict%% *}" = busy ]
+}
+
+task_endpoint_readable() { # <meta>
+  local meta=$1 backend target id
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  id=$(basename "$meta" .meta)
+  [ -n "$target" ] || return 1
+  fm_backend_capture "$backend" "$target" 40 "fm-$id" >/dev/null 2>&1
 }
 
 worktree_for_meta() {
@@ -215,9 +241,8 @@ terminal_status_line() { # <line>
 }
 
 child_has_active_work() { # <child-state> <meta>
-  local child_state=$1 meta=$2 id window status m age last
-  window=$(window_for_meta "$meta")
-  if [ -n "$window" ] && fm_pane_is_busy "$window"; then
+  local child_state=$1 meta=$2 id status m age last
+  if task_is_provably_busy "$child_state" "$meta"; then
     return 0
   fi
 
@@ -332,15 +357,31 @@ check_date_gates() {
   done
 }
 
+# The backend a task was spawned on, defaulting to tmux exactly as upstream's
+# window_backend does, so pre-backend metas keep working unchanged.
+backend_for_meta() {  # <meta>
+  local backend
+  backend=$(grep '^backend=' "$1" 2>/dev/null | cut -d= -f2- || true)
+  [ -n "$backend" ] || backend=tmux
+  printf '%s' "$backend"
+}
+
 check_dead_agents() {
-  local meta id window pane_command
+  local meta id window pane_command backend
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
     window=$(window_for_meta "$meta")
     [ -n "$window" ] || continue
-    [ "$(fm_pane_agent_state "$window")" = dead ] || continue
-    pane_command=$(fm_pane_current_command "$window" || true)
+    backend=$(backend_for_meta "$meta")
+    [ "$(fm_backend_agent_alive "$backend" "$window" 2>/dev/null || echo unknown)" = dead ] || continue
+    # Pane command is a tmux-only diagnostic detail; other backends simply
+    # report unknown rather than the detector inventing a primitive for them.
+    if [ "$backend" = tmux ]; then
+      pane_command=$(fm_backend_tmux_current_command "$window" || true)
+    else
+      pane_command=
+    fi
     [ -n "$pane_command" ] || pane_command=unknown
     printf 'dead?: %s - window %s has no live agent process (pane at %s)\n' "$id" "$window" "$pane_command"
   done
@@ -361,11 +402,8 @@ check_idle_stalls() {
     [ "$age" -ge "$IDLE_SECS" ] || continue
     window=$(window_for_meta "$meta")
     [ -n "$window" ] || continue
-    # Confirm the pane is readable. fm_pane_is_busy returns non-zero both for
-    # "not busy" and unreadable panes, so capture a bounded peek first to avoid
-    # reporting missing/dead tmux targets as idle work.
-    FM_GUARD_STALL_CHECK=0 "$SCRIPT_DIR/fm-peek.sh" "$window" 40 >/dev/null 2>&1 || continue
-    if ! fm_pane_is_busy "$window"; then
+    task_endpoint_readable "$meta" || continue
+    if ! task_is_provably_busy "$STATE" "$meta"; then
       printf 'stall?: %s - idle %ss, no status advance\n' "$id" "$age"
     fi
   done
@@ -374,10 +412,9 @@ check_idle_stalls() {
 # A recorded lane with NO status file at all is a defect in its own right, not a
 # quiet lane. Every other detector here keys on status mtime or content, so a
 # lane that never writes one is skipped by all of them - check_idle_stalls
-# literally `continue`s on a missing status file. That is how a lane ran for
-# hours, hit a blocking question, and was never reported (2026-08-18).
-# Reported once past a short grace, measured from the metadata that recorded the
-# spawn, so a just-started lane is not flagged before it can speak.
+# literally `continue`s on a missing status file. Report it once past a short
+# grace, measured from the metadata that recorded the spawn, so a just-started
+# lane is not flagged before it can speak.
 check_silent_lanes() {
   local meta id kind status age m
   for meta in "$STATE"/*.meta; do
@@ -387,6 +424,7 @@ check_silent_lanes() {
     # A secondmate legitimately rests without writing status; it has its own
     # idle detector above.
     [ "$kind" = secondmate ] && continue
+    meta_has_pr "$id" && continue
     status="$STATE/$id.status"
     [ -f "$status" ] && continue
     m=$(stat_mtime "$meta") || continue
@@ -414,9 +452,8 @@ check_advisor_idle_stalls() {
     home=$(home_for_secondmate_meta "$id" "$meta" || true)
     [ -n "$home" ] || continue
     secondmate_has_child_work "$home" && continue
-    # Confirm the pane is readable before treating a non-busy result as idle.
-    FM_GUARD_STALL_CHECK=0 "$SCRIPT_DIR/fm-peek.sh" "$window" 40 >/dev/null 2>&1 || continue
-    if ! fm_pane_is_busy "$window"; then
+    task_endpoint_readable "$meta" || continue
+    if ! task_is_provably_busy "$STATE" "$meta"; then
       if secondmate_only_pr_parked_children "$home"; then
         printf 'advisor-parked?: %s - idle %ss, only PR-parked children awaiting captain merge\n' "$id" "$age"
       else
@@ -482,7 +519,7 @@ check_secondmate_child_escalations() {
       # and is acting on it, just hasn't appended a fresh status line yet -
       # skip only that confirmed-busy case. An idle OR unreadable/dead pane
       # is still a legitimate, unresolved stuck escalation.
-      if [ -n "$cwindow" ] && fm_pane_is_busy "$cwindow"; then
+      if [ -n "$cwindow" ] && task_is_provably_busy "$child_state" "$cmeta"; then
         continue
       fi
       verb=${clast%%:*}

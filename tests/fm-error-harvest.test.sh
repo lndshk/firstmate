@@ -171,6 +171,21 @@ assert 'sample' not in d['groups'][0], d['groups'][0]
 " "$TMP_ROOT/out.json" || fail "--json output malformed"
 pass "--json emits parseable output without raw transcript samples"
 
+mkdir -p "$TMP_ROOT/spaced-tool-use/projK"
+{
+  printf '{ "type": "assistant", "message": { "content": [{ "type": "tool_use", "id": "spaced", "name": "Bash", "input": {"command": "false"}}]}}\n'
+  printf '{ "type": "user", "message": { "content": [{"type": "tool_result", "tool_use_id": "spaced", "is_error": true, "content": "spaced tool failure"}]}}\n'
+} > "$TMP_ROOT/spaced-tool-use/projK/s1.jsonl"
+run "$TMP_ROOT/spaced-tool-use" --min-sessions 1 --json > "$TMP_ROOT/spaced-tool-use.json" 2>/dev/null
+[ $? -eq 1 ] || fail "spaced tool-use transcript should report its failure"
+"$PY" -c "
+import json,sys
+groups=json.load(open(sys.argv[1]))['groups']
+assert len(groups) == 1, groups
+assert groups[0]['display']['tool'] == 'Bash', groups
+" "$TMP_ROOT/spaced-tool-use.json" || fail "spaced tool-use record lost its tool attribution"
+pass "whitespace-formatted tool-use records retain error attribution"
+
 mkdir -p "$TMP_ROOT/shared-name/projL" "$TMP_ROOT/shared-name/projM"
 for project in projL projM; do
   printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"same-%s","name":"Bash","input":{"command":"false"}}]},"timestamp":"2026-08-20T12:00:00Z"}\n' "$project" \

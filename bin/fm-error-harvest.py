@@ -59,7 +59,7 @@ DEFAULT_ROOT = Path.home() / ".claude" / "projects"
 # lines before json.loads ever sees them.
 FAIL_MARKERS = ('"is_error"', "toolDenialKind", '"hook_error', '"hook_non_blocking_error"',
                 '"hook_cancelled"')
-TOOL_USE_MARKER = '"type":"tool_use"'
+TOOL_USE_MARKER = re.compile(r'"type"\s*:\s*"tool_use"')
 
 # Aborts are not denials.
 NON_DENIAL_KINDS = frozenset({"interrupted", "cancelled"})
@@ -286,7 +286,7 @@ def scan_file(path: Path, root: Path, scan: Scan, mtime: float) -> None:
     with fh:
         for line in fh:
             scan.lines += 1
-            has_tool_use = TOOL_USE_MARKER in line
+            has_tool_use = TOOL_USE_MARKER.search(line) is not None
             has_fail = any(m in line for m in FAIL_MARKERS)
             if not has_tool_use and not has_fail:
                 continue

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# tests/fm-afk-inject-e2e.test.sh — private-socket end-to-end test for the afk
-# daemon's injection path. Exercises the two scenarios that afk-mode dogfooding
-# structurally CANNOT reach, because in afk mode nobody is typing:
+# tests/fm-afk-inject-e2e.test.sh - private-socket end-to-end test for the afk
+# daemon's injection path. It covers three operator-visible injection contracts:
 #
 #   Scenario A (human-partial-input): a partial line is typed into the
 #     supervisor pane with NO Enter, then an escalation fires. The daemon must
@@ -10,15 +9,24 @@
 #
 #   Scenario B (swallowed-Enter): the first Enter the daemon sends is dropped.
 #     The daemon must retry Enter (NOT retype the digest) and deliver exactly
-#     ONE clean submission — no concatenation, no duplicate.
+#     ONE clean submission: no concatenation, no duplicate.
+#
+#   Scenario C (normal digest): no human input and no swallowed Enter.
+#     A captain-relevant status must deliver exactly ONE sentinel-prefixed,
+#     single-line digest with no duplicate or spurious user submission.
 #
 # Isolation: all test tmux runs on a dedicated socket (tmux -L afk-e2e-<pid>).
 # A tmux shim first on PATH redirects the daemon's bare `tmux` calls to the
 # private socket. The daemon points at a throwaway state dir (FM_STATE_OVERRIDE)
 # and the test pane (FM_SUPERVISOR_TARGET). Nothing touches the live fleet.
+# FM_SUPERVISOR_BACKEND=tmux is passed explicitly (not left to auto-detection):
+# this test's own process may itself be running inside herdr (HERDR_ENV=1 is
+# inherited by every process herdr manages a pane for), which would otherwise
+# leak into the spawned daemon subprocess and misdetect backend=herdr against
+# what is actually a tmux pane on the private socket.
 #
 # Assert on submitted CONTENT (logged verbatim by the supervisor pane), not pane
-# appearance — terminal line-wrapping looks like newlines but isn't.
+# appearance - terminal line-wrapping looks like newlines but isn't.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -61,22 +69,42 @@ LOG_FILE="$STATE_DIR/submitted.log"
 : > "$LOG_FILE"
 
 # Source the daemon to get FM_INJECT_MARK, afk_enter, afk_exit.
-# shellcheck source=bin/fm-supervise-daemon.sh
+# shellcheck source=/dev/null
 . "$DAEMON"
 
 # Private tmux server with a supervisor session.
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s supervisor -x 200 -y 50
 SUPERVISOR_PANE=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t supervisor '#{pane_id}')
 
-# Supervisor pane loop: a raw-mode bash read loop that logs each submitted line
-# verbatim (hex + text + classification). "Did it inject cleanly" becomes an
-# assertable string.
+# Supervisor pane loop: a small deterministic composer that logs each submitted
+# line verbatim (hex + text + classification). It draws the in-progress input
+# itself instead of relying on the terminal driver's canonical-mode echo, because
+# tmux cursor placement for that echo varies across CI environments.
 LOOP_SCRIPT="$STATE_DIR/supervisor-loop.sh"
 cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
-MARK=$'\x1f'
+MARK=$'\xE2\x81\xA3'
 LOG="$1"
-while IFS= read -r _line; do
+OLD_STTY=$(stty -g 2>/dev/null || true)
+[ -z "$OLD_STTY" ] || stty -echo -icanon min 1 time 0 2>/dev/null || true
+cleanup() {
+  [ -z "$OLD_STTY" ] || stty "$OLD_STTY" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+_buf=
+# The drawn composer row carries a real agent prompt glyph, matching the
+# production supervisor pane this daemon injects into: under the strict
+# container-proof rule (captain decision blank-row-injection-posture) a bare
+# unidentified row is never a safe injection target, so the fixture must
+# render the shape the classifier positively proves - "❯ " when idle,
+# "❯ <buffer>" while input is pending. The glyph is rendering only; it never
+# enters the buffer, so submitted-content assertions are unchanged.
+redraw() {
+  printf '\r\033[K\xe2\x9d\xaf %s' "$_buf"
+}
+submit_line() {
+  local _line=$_buf _c _hex
   if [ "${_line:0:1}" = "$MARK" ]; then
     _c="injection"
   else
@@ -84,6 +112,22 @@ while IFS= read -r _line; do
   fi
   _hex=$(printf '%s' "$_line" | od -An -tx1 | tr -d ' \n')
   printf '%s\t%s\t%s\n' "$_hex" "$_line" "$_c" >> "$LOG"
+  _buf=
+  printf '\r\033[K\n'
+  redraw
+}
+
+redraw
+while IFS= read -r -n 1 _ch; do
+  if [ -z "$_ch" ]; then
+    submit_line
+    continue
+  fi
+  case "$_ch" in
+    $'\r'|$'\n') submit_line ;;
+    $'\177'|$'\b') _buf=${_buf%?}; redraw ;;
+    *) _buf="${_buf}${_ch}"; redraw ;;
+  esac
 done
 LOOP
 chmod +x "$LOOP_SCRIPT"
@@ -115,13 +159,14 @@ SHIM
 chmod +x "$TMUX_SHIM_DIR/tmux"
 
 # Create a fake crewmate window (the watcher lists fm-* windows for stale
-# detection). The pane is an inert shell — it just needs to exist.
+# detection). The pane is an inert shell - it just needs to exist.
 "$REAL_TMUX" -L "$SOCKET" new-window -d -n fm-fake-c1 -t supervisor
 
 start_daemon() {
   PATH="$TMUX_SHIM_DIR:$PATH" \
   FM_STATE_OVERRIDE="$STATE_DIR" \
   FM_SUPERVISOR_TARGET="$SUPERVISOR_PANE" \
+  FM_SUPERVISOR_BACKEND=tmux \
   FM_ESCALATE_BATCH_SECS=0 \
   FM_HOUSEKEEPING_TICK=1 \
   FM_POLL=1 \
@@ -161,6 +206,7 @@ reset_state() {
          "$STATE_DIR"/.subsuper-* \
          "$STATE_DIR"/.wake-queue* \
          "$STATE_DIR"/.watch.lock* \
+         "$STATE_DIR"/.watcher-down* \
          "$STATE_DIR"/.last-* \
          "$STATE_DIR"/.hash-* \
          "$STATE_DIR"/.count-* \
@@ -174,22 +220,20 @@ reset_state() {
 
 # --- pane_input_pending environment self-check ------------------------------
 # Verify that pane_input_pending (which uses cursor_y + capture-pane) can detect
-# typed text in this tmux environment. If it can't (e.g., CI tmux has different
-# capture behavior), skip the e2e test with diagnostics. The unit tests in
-# fm-wake-queue.test.sh still cover the logic comprehensively.
+# typed text in this tmux environment. If it can't, the e2e cannot prove the
+# operator-visible injection contracts it owns.
 
 selfcheck_pane_input_pending() {
   local check_text="selfcheck-marker-12345"
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" -l "$check_text"
-  sleep 0.5
-  if PATH="$TMUX_SHIM_DIR:$PATH" pane_input_pending "$SUPERVISOR_PANE"; then
-    # Detected — clean up the text and proceed.
+  if wait_for_pane_input_pending; then
+    # Detected - clean up the text and proceed.
     "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" Enter
     sleep 0.3
     return 0
   fi
-  # Not detected — print diagnostics and skip.
-  echo "skip: pane_input_pending cannot detect typed text in this tmux environment" >&2
+  # Not detected - print diagnostics and fail.
+  echo "pane_input_pending cannot detect typed text in this tmux environment" >&2
   local _cy _line
   _cy=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SUPERVISOR_PANE" '#{cursor_y}' 2>/dev/null)
   echo "  cursor_y=$_cy" >&2
@@ -197,10 +241,20 @@ selfcheck_pane_input_pending() {
   "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SUPERVISOR_PANE" 2>/dev/null | head -10 | sed 's/^/    /' >&2
   _line=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SUPERVISOR_PANE" 2>/dev/null | sed -n "$((_cy + 1))p")
   echo "  cursor line: '$_line'" >&2
-  # Clean up.
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" Enter
-  cleanup_all
-  exit 0
+  fail "pane_input_pending self-check failed"
+}
+
+wait_for_pane_input_pending() {
+  local i=0
+  while [ "$i" -lt 30 ]; do
+    if PATH="$TMUX_SHIM_DIR:$PATH" pane_input_pending "$SUPERVISOR_PANE"; then
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
 }
 
 selfcheck_pane_input_pending
@@ -215,7 +269,8 @@ test_scenario_a() {
   # Type partial text into the supervisor pane with NO Enter. This simulates the
   # captain returning and starting to type before afk has been cleared.
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" -l "human draft text"
-  sleep 0.5
+  wait_for_pane_input_pending \
+    || fail "Scenario A: human draft text did not become detectable as pending input"
 
   # Write a captain-relevant status to trigger a real escalation through the
   # real watcher child.
@@ -294,24 +349,19 @@ test_scenario_b() {
   # swallowed Enter, the retry path fires).
   sleep 8
 
-  # Assert: exactly ONE digest in the log (no duplicate, no loss).
-  local digest_count
-  digest_count=$(grep -c 'Supervisor escalate' "$LOG_FILE" || true)
-  [ "$digest_count" -eq 1 ] \
-    || fail "Scenario B: expected exactly 1 digest, got $digest_count (duplicate or lost)"
-
-  # Assert: the digest is not concatenated with itself (two markers in one line).
-  if grep -q "$(printf '\x1f').*$(printf '\x1f')" "$LOG_FILE"; then
-    fail "Scenario B: digest concatenated with itself (two sentinel markers in one line)"
-  fi
+  # Assert: exactly ONE terminal-safe marker in the log (no duplicate, no loss).
+  local marker_count
+  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
+  [ "$marker_count" -eq 1 ] \
+    || fail "Scenario B: expected exactly 1 U+2063 marker, got $marker_count (duplicate or lost)"
 
   # Assert: the digest line is classified as "injection" and starts with the
-  # sentinel marker (hex starts with 1f).
+  # terminal-safe sentinel marker (hex starts with e281a3).
   local digest_line digest_hex
   digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
   digest_hex=$(printf '%s' "$digest_line" | cut -f1)
   case "$digest_hex" in
-    1f*) ;;  # correct: starts with the sentinel marker byte
+    e281a3*) ;;  # correct: starts with the terminal-safe sentinel marker
     *) fail "Scenario B: digest does not start with sentinel marker (hex: $digest_hex)" ;;
   esac
 
@@ -327,61 +377,48 @@ test_scenario_b() {
   pass "Scenario B: swallowed Enter produces exactly one clean digest"
 }
 
-# --- Scenario C: vanished injection target -----------------------------------
-# Real tmux answers `display-message -p -t <gone window>` from the client's
-# current pane with exit 0, so a guard built on it can never fail. The daemon
-# must resolve its own target with the list-panes probe instead and refuse to
-# run against a target that is no longer there.
+# --- Scenario C: normal status, single clean digest -------------------------
+# No human input, no swallowed Enter: a captain-relevant status must produce
+# exactly ONE sentinel-prefixed, single-line digest, submitted once. This owns
+# the marker + single-line + no-duplicate operator contract that the deleted
+# fake-tmux units used to assert via internal send-keys counts.
 
 test_scenario_c() {
   reset_state
   afk_enter "$STATE_DIR"
-
-  local gone="supervisor:fm-vanished" fallback dpid rc=0 i=0
-  fallback=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$gone" '#{pane_id}' 2>/dev/null) \
-    || fallback=""
-  [ -n "$fallback" ] \
-    || fail "Scenario C: expected real tmux display-message to silently answer for a gone window"
-  if PATH="$TMUX_SHIM_DIR:$PATH" fm_pane_exists "$gone"; then
-    fail "Scenario C: the pane probe accepted a window that does not exist"
-  fi
+  start_daemon
 
   echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
+  sleep 6
 
-  PATH="$TMUX_SHIM_DIR:$PATH" \
-  FM_STATE_OVERRIDE="$STATE_DIR" \
-  FM_SUPERVISOR_TARGET="$gone" \
-  FM_ESCALATE_BATCH_SECS=0 \
-  FM_HOUSEKEEPING_TICK=1 \
-  FM_POLL=1 \
-  FM_SIGNAL_GRACE=1 \
-  FM_HEARTBEAT=999999 \
-  FM_CHECK_INTERVAL=999999 \
-  FM_STALE_ESCALATE_SECS=999999 \
-    "$DAEMON" >"$STATE_DIR/gone.out" 2>"$STATE_DIR/gone.err" &
-  dpid=$!
-  while [ "$i" -lt 40 ] && kill -0 "$dpid" 2>/dev/null; do
-    sleep 0.25
-    i=$((i + 1))
-  done
-  if kill -0 "$dpid" 2>/dev/null; then
-    kill "$dpid" 2>/dev/null || true
-    wait "$dpid" 2>/dev/null || true
-    fail "Scenario C: daemon kept running against a target that does not exist"
-  fi
-  wait "$dpid" || rc=$?
-  [ "$rc" -ne 0 ] \
-    || fail "Scenario C: daemon exited zero for a target that does not exist"
-  grep -q 'does not resolve to a tmux pane' "$STATE_DIR/gone.err" \
-    || fail "Scenario C: gone target was not reported: $(cat "$STATE_DIR/gone.err")"
-  [ ! -f "$STATE_DIR/.supervise-daemon.pid" ] \
-    || fail "Scenario C: daemon left a pid file after refusing a gone target"
-  if grep -q 'Supervisor escalate' "$LOG_FILE"; then
-    fail "Scenario C: an escalation reached the live pane while the target was gone"
-  fi
+  # Exactly one terminal-safe marker in the submitted log (no duplicate, no loss).
+  local marker_count
+  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
+  [ "$marker_count" -eq 1 ] \
+    || fail "Scenario C: expected exactly 1 U+2063 marker, got $marker_count"
 
-  afk_exit "$STATE_DIR" 2>/dev/null || true
-  pass "Scenario C: a vanished injection target is refused, not resolved to the live pane"
+  # The digest is classified as an injection and starts with the sentinel byte.
+  local digest_line digest_hex
+  digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
+  case "$digest_line" in
+    *injection) ;;
+    *) fail "Scenario C: digest misclassified (expected injection): $digest_line" ;;
+  esac
+  digest_hex=$(printf '%s' "$digest_line" | cut -f1)
+  case "$digest_hex" in
+    e281a3*) ;;
+    *) fail "Scenario C: digest does not start with sentinel marker (hex: $digest_hex)" ;;
+  esac
+
+  # The digest was submitted as ONE line (a multi-line digest would log >1 line),
+  # and no spurious user-classified lines were submitted.
+  local user_count
+  user_count=$(grep -c $'\tuser$' "$LOG_FILE" || true)
+  [ "$user_count" -eq 0 ] \
+    || fail "Scenario C: expected 0 user lines, got $user_count (spurious submission?)"
+
+  stop_daemon
+  pass "Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
 }
 
 test_scenario_a

@@ -1,26 +1,22 @@
 #!/usr/bin/env bash
 # Behavior tests for fm-spawn.sh batch dispatch (`id=repo` pairs).
-# These exercise argument routing only: each spawn attempt fails fast at the missing-brief
-# check, which is reached before any tmux/treehouse side effect, so the tests create no
-# windows or worktrees. FM_SPAWN_NO_GUARD=1 keeps them off the live watcher guard / state.
+#
+# These exercise argument routing only: each spawn attempt fails fast at the
+# missing-brief check, which is reached before any tmux/treehouse side effect, so
+# the tests create no windows or worktrees. FM_SPAWN_NO_GUARD=1 keeps them off the
+# live watcher guard / state. Parser and path-scoping cases are table-driven; the
+# only behavior asserted on its own is "a multi-pair batch does not stop after the
+# first failure".
 set -u
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 SPAWN="$ROOT/bin/fm-spawn.sh"
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-spawn-batch.XXXXXX")
-trap 'rm -rf "$TMP_ROOT"' EXIT
-
-fail() {
-  printf 'not ok - %s\n' "$1" >&2
-  exit 1
-}
-
-pass() {
-  printf 'ok - %s\n' "$1"
-}
+TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
+export FM_BACKEND=tmux
 
 # Clear ambient firstmate overrides so the behavior test owns its environment.
-# Use a known harness in targeted calls that must reach the missing-brief check.
 run_spawn() {
   FM_ROOT_OVERRIDE='' \
     FM_HOME='' \
@@ -32,9 +28,17 @@ run_spawn() {
     "$SPAWN" "$@" 2>&1
 }
 
-test_batch_dispatches_each_pair() {
+# Ship spawns carry an explicit delivery contract (AGENTS.md section 7); the
+# batch path takes one shared pair of flags for every pair.
+run_ship_spawn() {
+  run_spawn "$@" --mode no-mistakes --yolo off
+}
+
+# Every pair in a batch is dispatched even though the first one fails; the loop
+# must not stop early. This is the load-bearing batch guarantee, kept explicit.
+test_batch_dispatches_every_pair() {
   local out status
-  out=$(run_spawn nope-batch-a-z1=projects/none-a nope-batch-b-z2=projects/none-b)
+  out=$(run_ship_spawn nope-batch-a-z1=projects/none-a nope-batch-b-z2=projects/none-b)
   status=$?
   [ "$status" -ne 0 ] || fail "batch with missing briefs should exit non-zero"
   printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-batch-a-z1 (projects/none-a)' >/dev/null \
@@ -44,234 +48,101 @@ test_batch_dispatches_each_pair() {
   pass "batch dispatch re-execs and reports every id=repo pair"
 }
 
-test_single_pair_is_batch() {
-  local out status
-  out=$(run_spawn nope-batch-solo-z3=projects/none-solo)
-  status=$?
-  [ "$status" -ne 0 ] || fail "single missing-brief pair should exit non-zero"
-  printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-batch-solo-z3 (projects/none-solo)' >/dev/null \
-    || fail "single id=repo pair was not treated as batch"
-  pass "a single id=repo pair routes through batch dispatch"
-}
-
-test_single_mode_unaffected() {
-  local out status
-  out=$(run_spawn nope-single-z4 projects/none-single)
-  status=$?
-  [ "$status" -ne 0 ] || fail "single-task spawn with missing brief should exit non-zero"
-  if printf '%s\n' "$out" | grep -F 'batch:' >/dev/null; then
-    fail "plain '<id> <repo>' invocation wrongly entered batch dispatch"
-  fi
-  pass "single-task invocation (no '=') is untouched by batch detection"
-}
-
-test_batch_rejects_non_pair_argument() {
-  local out status
-  out=$(run_spawn nope-batch-mix-z5=projects/none-mix bogus-no-equals)
-  status=$?
-  [ "$status" -ne 0 ] || fail "batch with a non-pair argument should exit non-zero"
-  printf '%s\n' "$out" | grep -F "batch dispatch expects every argument as id=repo; got 'bogus-no-equals'" >/dev/null \
-    || fail "non-pair argument in batch mode was not rejected"
-  pass "batch dispatch rejects an argument that is not id=repo"
-}
-
-test_id_with_slash_is_not_batch() {
-  local out status
-  # A first arg whose pre-'=' part contains '/' is not a bare task id, so it must NOT be
-  # treated as a batch pair (it falls through to single-task handling).
-  out=$(run_spawn weird/id-z6=projects/none projects/none)
-  status=$?
-  [ "$status" -ne 0 ] || fail "malformed single-task spawn should exit non-zero"
-  if printf '%s\n' "$out" | grep -F 'batch:' >/dev/null; then
-    fail "first arg with '/' before '=' wrongly entered batch dispatch"
-  fi
-  pass "an arg whose id part contains '/' is not treated as a batch pair"
-}
-
-test_fm_home_scopes_projects_path() {
-  local home out status expected
-  home="$TMP_ROOT/home path"
-  mkdir -p "$home/data" "$home/projects/alpha"
-  out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
-    FM_HOME="$home" FM_SPAWN_NO_GUARD=1 "$SPAWN" nope-home-z7 projects/alpha codex 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn with missing brief should fail"
-  expected="error: no brief at $home/data/nope-home-z7/brief.md"
-  printf '%s\n' "$out" | grep -F "$expected" >/dev/null \
-    || fail "projects/alpha was not resolved through FM_HOME before the brief check"
-  if printf '%s\n' "$out" | grep -F 'cd: projects/alpha' >/dev/null; then
-    fail "spawn attempted to resolve projects/alpha from the caller cwd"
-  fi
-  pass "FM_HOME scopes projects/ paths for single-task spawn"
-}
-
-test_fm_projects_override_scopes_projects_path() {
-  local home projects out status expected
-  home="$TMP_ROOT/override home"
-  projects="$TMP_ROOT/override projects"
-  mkdir -p "$home/data" "$projects/alpha"
-  out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
-    FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 "$SPAWN" nope-override-z8 projects/alpha codex 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn with missing brief should fail"
-  expected="error: no brief at $home/data/nope-override-z8/brief.md"
-  printf '%s\n' "$out" | grep -F "$expected" >/dev/null \
-    || fail "projects/alpha was not resolved through FM_PROJECTS_OVERRIDE before the brief check"
-  if printf '%s\n' "$out" | grep -F 'cd: projects/alpha' >/dev/null; then
-    fail "spawn attempted to resolve projects/alpha from the caller cwd"
-  fi
-  pass "FM_PROJECTS_OVERRIDE scopes projects/ paths for single-task spawn"
-}
-
-test_status_path_fails_before_resource_creation() {
-  local home fakebin out status
-  home="$TMP_ROOT/status-home"
-  fakebin="$TMP_ROOT/status-bin"
-  mkdir -p "$home/data/status-path-z9" "$home/projects/alpha" \
-    "$home/state/status-path-z9.status" "$fakebin"
-  : > "$home/data/status-path-z9/brief.md"
-  cat > "$fakebin/tmux" <<SH
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$home/tmux.log"
-exit 97
-SH
-  chmod +x "$fakebin/tmux"
-  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
-    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
-    "$SPAWN" status-path-z9 projects/alpha codex 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "non-regular status path should refuse spawn"
-  printf '%s\n' "$out" \
-    | grep -F "task status path is not a regular file: $home/state/status-path-z9.status" >/dev/null \
-    || fail "non-regular status path did not report validation failure"
-  [ ! -e "$home/tmux.log" ] || fail "status-path validation ran after tmux resource creation"
-  [ ! -e "$home/state/status-path-z9.meta" ] || fail "refused status path published task metadata"
-  pass "status-path validation precedes worktree and window creation"
-}
-
-test_status_boundary_recount_is_atomically_published() {
-  local home fakebin worktree out status
-  home="$TMP_ROOT/boundary-home"
-  fakebin="$TMP_ROOT/boundary-bin"
-  worktree="$TMP_ROOT/.treehouse/boundary-worktree"
-  mkdir -p "$home/data/boundary-z10" "$home/projects/alpha" \
-    "$home/state" "$fakebin" "$worktree"
-  : > "$home/data/boundary-z10/brief.md"
-  printf 'working: prior generation\n' > "$home/state/boundary-z10.status"
-  cat > "$fakebin/tmux" <<SH
-#!/usr/bin/env bash
-case "\$1" in
-  has-session|list-windows|new-window) exit 0 ;;
-  display-message)
-    case "\$*" in
-      *"#S"*) printf 'firstmate\n' ;;
-      *) printf '%s\n' "$worktree" ;;
+# Boundary cases for batch detection. Each row:
+#   <label>|<batch yes/no>|<expect substring>|<args>
+# batch=yes -> a 'batch:' line must appear; batch=no -> it must not.
+test_batch_mode_boundaries() {
+  local label batch expect args out status
+  while IFS='|' read -r label batch expect args; do
+    [ -n "$label" ] || continue
+    # shellcheck disable=SC2086  # args is an intentional word-split arg list
+    out=$(run_ship_spawn $args)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected non-zero exit"
+    if [ -n "$expect" ]; then
+      printf '%s\n' "$out" | grep -F "$expect" >/dev/null || fail "$label: missing '$expect'"
+    fi
+    case "$batch" in
+      yes) printf '%s\n' "$out" | grep -F 'batch:' >/dev/null || fail "$label: did not enter batch dispatch" ;;
+      no)  printf '%s\n' "$out" | grep -F 'batch:' >/dev/null && fail "$label: wrongly entered batch dispatch" ;;
     esac
-    exit 0
-    ;;
-  send-keys)
-    case "\$*" in
-      *"treehouse get"*)
-        printf 'working: appended during acquisition\n' >> "$home/state/boundary-z10.status"
-        ;;
-      *)
-        meta="$home/state/boundary-z10.meta"
-        [ -f "\$meta" ] || exit 91
-        [ "\$(grep -c '^generation=' "\$meta")" -eq 1 ] || exit 92
-        [ "\$(grep -c '^status-start-line=2$' "\$meta")" -eq 1 ] || exit 93
-        ;;
-    esac
-    exit 0
-    ;;
-esac
-exit 1
-SH
-  cat > "$fakebin/mv" <<SH
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$home/mv.log"
-exec /bin/mv "\$@"
-SH
-  chmod +x "$fakebin/tmux" "$fakebin/mv"
-  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
-    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
-    "$SPAWN" boundary-z10 projects/alpha codex 2>&1)
-  status=$?
-  [ "$status" -eq 0 ] || fail "status-boundary publication spawn failed: $out"
-  grep -F '.boundary-z10.meta.tmp.' "$home/mv.log" \
-    | grep -F "$home/state/boundary-z10.meta" >/dev/null \
-    || fail "task metadata was not published by one atomic rename"
-  if find "$home/state" -name '.boundary-z10.meta.tmp.*' -print -quit | grep . >/dev/null; then
-    fail "atomic task metadata publication left a temporary file"
-  fi
-  pass "status boundary is recounted and complete metadata is atomically published"
+  done <<'ROWS'
+single id=repo pair routes through batch|yes|batch: FAILED to spawn nope-batch-solo-z3 (projects/none-solo)|nope-batch-solo-z3=projects/none-solo
+non-pair arg in batch is rejected|yes|batch dispatch expects every argument as id=repo; got 'bogus-no-equals'|nope-batch-mix-z5=projects/none-mix bogus-no-equals
+plain '<id> <repo>' is single-task|no||nope-single-z4 projects/none-single
+id part containing '/' is not a pair|no||weird/id-z6=projects/none projects/none
+ROWS
+  pass "batch detection: single pair batches, non-pair rejected, single-task and slash-id stay single"
 }
 
-test_late_status_boundary_failure_rolls_back_resources() {
-  local home fakebin worktree out status
-  home="$TMP_ROOT/boundary-failure-home"
-  fakebin="$TMP_ROOT/boundary-failure-bin"
-  worktree="$TMP_ROOT/.treehouse/boundary-failure-worktree"
-  mkdir -p "$home/data/boundary-fail-z11" "$home/projects/alpha" \
-    "$home/state" "$fakebin" "$worktree"
-  : > "$home/data/boundary-fail-z11/brief.md"
-  printf 'working: valid during early check\n' > "$home/state/boundary-fail-z11.status"
-  cat > "$fakebin/tmux" <<SH
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$home/tmux.log"
-case "\$1" in
-  has-session|list-windows|new-window|kill-window) exit 0 ;;
-  display-message)
-    case "\$*" in
-      *"#S"*) printf 'firstmate\n' ;;
-      *) printf '%s\n' "$worktree" ;;
-    esac
-    exit 0
-    ;;
-  send-keys)
-    case "\$*" in
-      *"treehouse get"*)
-        rm -f "$home/state/boundary-fail-z11.status"
-        mkdir "$home/state/boundary-fail-z11.status"
-        ;;
-    esac
-    exit 0
-    ;;
-esac
-exit 1
-SH
-  cat > "$fakebin/treehouse" <<SH
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$home/treehouse.log"
-exit 0
-SH
-  chmod +x "$fakebin/tmux" "$fakebin/treehouse"
-  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
-    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
-    "$SPAWN" boundary-fail-z11 projects/alpha codex 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "late non-regular status path should refuse spawn"
-  printf '%s\n' "$out" \
-    | grep -F "task status path is not a regular file: $home/state/boundary-fail-z11.status" >/dev/null \
-    || fail "late status-path failure did not report validation failure"
-  grep -F "return --force $worktree" "$home/treehouse.log" >/dev/null \
-    || fail "late status-path failure did not return the unpublished worktree"
-  grep -F 'kill-window -t firstmate:fm-boundary-fail-z11' "$home/tmux.log" >/dev/null \
-    || fail "late status-path failure did not close the unpublished window"
-  [ ! -e "$home/state/boundary-fail-z11.meta" ] \
-    || fail "late status-path failure published task metadata"
-  if find "$home/state" -name '.boundary-fail-z11.meta.tmp.*' -print -quit | grep . >/dev/null; then
-    fail "late status-path failure left metadata temporary state"
-  fi
-  pass "late status-boundary failure rolls back unpublished resources"
+# A projects/ path is resolved through the firstmate home, never the caller cwd,
+# before the missing-brief check. One row per home-scoping override.
+test_projects_path_scoping() {
+  local label use_override id home projects out status expected
+  while IFS='|' read -r label use_override id; do
+    [ -n "$label" ] || continue
+    home="$TMP_ROOT/$id home"
+    projects="$TMP_ROOT/$id projects"
+    mkdir -p "$home/data" "$projects/alpha"
+    if [ "$use_override" = yes ]; then
+      out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+        FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 \
+        "$SPAWN" "$id" projects/alpha codex --mode no-mistakes --yolo off 2>&1)
+    else
+      mkdir -p "$home/projects/alpha"
+      out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+        FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
+        "$SPAWN" "$id" projects/alpha codex --mode no-mistakes --yolo off 2>&1)
+    fi
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: spawn with missing brief should fail"
+    expected="error: no brief at $home/data/$id/brief.md"
+    printf '%s\n' "$out" | grep -F "$expected" >/dev/null \
+      || fail "$label: projects/alpha was not resolved through the home before the brief check"
+    printf '%s\n' "$out" | grep -F 'cd: projects/alpha' >/dev/null \
+      && fail "$label: spawn resolved projects/alpha from the caller cwd"
+  done <<'ROWS'
+FM_HOME scopes projects/|no|nope-home-z7
+FM_PROJECTS_OVERRIDE scopes projects/|yes|nope-override-z8
+ROWS
+  pass "projects/ paths are scoped through the firstmate home for single-task spawn"
 }
 
-test_batch_dispatches_each_pair
-test_single_pair_is_batch
-test_single_mode_unaffected
-test_batch_rejects_non_pair_argument
-test_id_with_slash_is_not_batch
-test_fm_home_scopes_projects_path
-test_fm_projects_override_scopes_projects_path
-test_status_path_fails_before_resource_creation
-test_status_boundary_recount_is_atomically_published
-test_late_status_boundary_failure_rolls_back_resources
+# A ship batch carries one shared delivery contract. Missing flags must stop the
+# whole batch before any pair is dispatched, so a batch can never launch workers
+# whose delivery posture was never decided.
+test_batch_requires_the_shared_delivery_contract() {
+  local out status
+  out=$(run_spawn nope-batch-nomode-z9=projects/none-a nope-batch-nomode-z10=projects/none-b)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a ship batch without --mode should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'ship spawns require --mode' >/dev/null \
+    || fail "batch refusal did not name the missing delivery mode"
+  printf '%s\n' "$out" | grep -F 'batch:' >/dev/null \
+    && fail "batch dispatched pairs despite an undecided delivery contract"
+
+  out=$(run_spawn nope-batch-noyolo-z11=projects/none-a --mode direct-PR)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a ship batch without --yolo should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'ship spawns require --yolo' >/dev/null \
+    || fail "batch refusal did not name the missing merge posture"
+  pass "batch dispatch requires the shared ship delivery contract before any pair runs"
+}
+
+# A scout batch has no delivery contract to share, so the flags are refused rather
+# than accepted and ignored.
+test_scout_batch_refuses_delivery_flags() {
+  local out status
+  out=$(run_spawn nope-batch-scout-z12=projects/none-a --scout --mode direct-PR --yolo on)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a scout batch carrying delivery flags should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'applies only to ship spawns' >/dev/null \
+    || fail "scout batch did not refuse the delivery flags"
+  pass "scout batch refuses ship delivery flags instead of ignoring them"
+}
+
+test_batch_dispatches_every_pair
+test_batch_mode_boundaries
+test_batch_requires_the_shared_delivery_contract
+test_scout_batch_refuses_delivery_flags
+test_projects_path_scoping

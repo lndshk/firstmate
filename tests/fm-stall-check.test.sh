@@ -3,7 +3,7 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHECK="$ROOT/bin/fm-stall-check.sh"
-GUARD="$ROOT/bin/fm-guard.sh"
+BUSY_EVENT="$ROOT/bin/fm-busy-event.sh"
 TMP_ROOT=
 
 fail() {
@@ -38,6 +38,9 @@ case "${1:-}" in
   list-windows)
     [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
     exit 0 ;;
+  display-message)
+    printf '%s\n' '%1'
+    exit 0 ;;
   capture-pane)
     target=""
     prev=""
@@ -58,6 +61,17 @@ esac
 exit 1
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}:${2:-}" in
+  terminal:read)
+    [ "${FM_FAKE_ORCA_UNREADABLE:-0}" = 1 ] && exit 1
+    printf '%s\n' '{"result":{"terminal":{"tail":["active terminal"]}}}' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/orca"
   printf '%s\n' "$dir"
 }
 
@@ -66,10 +80,15 @@ run_check() {
   PATH="$dir/fakebin:$PATH" \
   FM_FAKE_TMUX_CAPTURE="${FM_FAKE_TMUX_CAPTURE:-}" \
   FM_FAKE_TMUX_CAPTURE_DIR="${FM_FAKE_TMUX_CAPTURE_DIR:-}" \
+  FM_FAKE_ORCA_UNREADABLE="${FM_FAKE_ORCA_UNREADABLE:-}" \
   FM_HOME="$dir" \
   FM_STALL_IDLE_SECS="${FM_STALL_IDLE_SECS:-600}" \
   FM_ADVISOR_IDLE_STALL_SECS="${FM_ADVISOR_IDLE_STALL_SECS:-1800}" \
     "$CHECK"
+}
+
+mark_busy() { # <state-dir> <id>
+  "$BUSY_EVENT" arm "$1" "$2" --state busy --source fm-spawn --event launch-brief >/dev/null
 }
 
 # Every fake-pane variable is set as a prefix on a bare "out=$(run_check ...)"
@@ -77,7 +96,7 @@ run_check() {
 # call, so each test starts from a cleared fake-pane environment rather than
 # whatever the previous test last configured.
 run_test() { # <test-fn>
-  unset FM_FAKE_TMUX_CAPTURE FM_FAKE_TMUX_CAPTURE_DIR
+  unset FM_FAKE_TMUX_CAPTURE FM_FAKE_TMUX_CAPTURE_DIR FM_FAKE_ORCA_UNREADABLE
   "$@"
 }
 
@@ -205,7 +224,9 @@ EOF
   cat > "$dir/state/active-e5.meta" <<'EOF'
 window=fm-active-e5
 kind=ship
+harness=claude
 EOF
+  mark_busy "$dir/state" active-e5
   printf '%s\n' 'working: still busy' > "$dir/state/active-e5.status"
   touch -d '2000-01-01 00:00:00' "$dir/state/active-e5.status" 2>/dev/null || touch -t 200001010000 "$dir/state/active-e5.status"
   cat > "$dir/state/secondmate-s1.meta" <<'EOF'
@@ -245,6 +266,23 @@ EOF
   FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "pr-ready check exited non-zero"
   [ -z "$out" ] || fail "expected silence for PR-ready parked task, got: $out"
   pass "does not flag a task parked awaiting captain merge (pr= in meta)"
+}
+
+test_pr_tracked_silent_task_not_flagged() {
+  local dir out capture
+  dir=$(make_case pr_silent)
+  capture="$dir/capture.txt"
+  cat > "$dir/state/pr-silent-p2.meta" <<'EOF'
+window=fm-pr-silent-p2
+kind=ship
+pr=https://github.com/lndshk/firstmate/pull/10
+EOF
+  touch -d '2000-01-01 00:00:00' "$dir/state/pr-silent-p2.meta" 2>/dev/null || touch -t 200001010000 "$dir/state/pr-silent-p2.meta"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "PR-tracked silent check exited non-zero"
+  [ -z "$out" ] || fail "PR-tracked task must not be reported as a silent lane: $out"
+  pass "does not flag a PR-tracked task without a status file"
 }
 
 test_advisor_idle_terminal_no_children_flagged() {
@@ -307,7 +345,9 @@ EOF
   cat > "$home/state/child-a1.meta" <<'EOF'
 window=fm-child-a1
 kind=ship
+harness=claude
 EOF
+  mark_busy "$home/state" child-a1
   printf '%s\n' 'working: actively running child task' > "$home/state/child-a1.status"
   touch -d '2000-01-01 00:00:00' "$home/state/child-a1.status" 2>/dev/null || touch -t 200001010000 "$home/state/child-a1.status"
   printf '%s\n' 'all quiet' '> ' > "$capture"
@@ -460,7 +500,9 @@ test_advisor_busy_not_flagged() {
 window=fm-busy-advisor
 kind=secondmate
 home=$home
+harness=claude
 EOF
+  mark_busy "$dir/state" busy-advisor
   printf '%s\n' 'result: routed work complete' > "$dir/state/busy-advisor.status"
   touch -d '2000-01-01 00:00:00' "$dir/state/busy-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/busy-advisor.status"
   printf '%s\n' 'thinking' '• Working (10s • esc to interrupt)' > "$capture"
@@ -528,7 +570,9 @@ test_advisor_working_busy_pane_not_flagged() {
 window=fm-rt-advisor
 kind=secondmate
 home=$home
+harness=claude
 EOF
+  mark_busy "$dir/state" rt-advisor
   printf '%s\n' 'working: still on task' > "$dir/state/rt-advisor.status"
   touch -d '2000-01-01 00:00:00' "$dir/state/rt-advisor.status" 2>/dev/null || touch -t 200001010000 "$dir/state/rt-advisor.status"
   printf '%s\n' 'thinking' '• Working (10s • esc to interrupt)' > "$capture"
@@ -555,7 +599,9 @@ EOF
   cat > "$home/state/child-a1.meta" <<'EOF'
 window=fm-child-a1
 kind=ship
+harness=claude
 EOF
+  mark_busy "$home/state" child-a1
   printf '%s\n' 'working: actively running child task' > "$home/state/child-a1.status"
   touch -d '2000-01-01 00:00:00' "$home/state/child-a1.status" 2>/dev/null || touch -t 200001010000 "$home/state/child-a1.status"
   printf '%s\n' 'all quiet' '> ' > "$capture"
@@ -687,7 +733,9 @@ EOF
   cat > "$home/state/rt-issue48.meta" <<'EOF'
 window=fm-rt-issue48
 kind=ship
+harness=claude
 EOF
+  mark_busy "$home/state" rt-issue48
   printf '%s\n' 'needs-decision: pick a rollout option' > "$home/state/rt-issue48.status"
   touch -d '2000-01-01 00:00:00' "$home/state/rt-issue48.status" 2>/dev/null || touch -t 200001010000 "$home/state/rt-issue48.status"
   printf '%s\n' 'all quiet' '> ' > "$capture"
@@ -698,6 +746,84 @@ EOF
   unset FM_FAKE_TMUX_CAPTURE_DIR  # bash persists prefix assignments on a bare "out=$(...)" command; do not leak into later tests
   [ -z "$out" ] || fail "expected silence when the child pane is actively busy (likely already answered), got: $out"
   pass "does not flag a needs-decision child whose pane is busy (already acting on an answer)"
+}
+
+test_orca_busy_task_not_reported_idle() {
+  local dir out capture
+  dir=$(make_case orca_busy_task)
+  capture="$dir/capture.txt"
+  cat > "$dir/state/orca-worker.meta" <<'EOF'
+window=fm-orca-worker
+terminal=term-orca-worker
+backend=orca
+kind=ship
+harness=claude
+EOF
+  mark_busy "$dir/state" orca-worker
+  printf '%s\n' 'working: waiting for terminal work' > "$dir/state/orca-worker.status"
+  touch -d '2000-01-01 00:00:00' "$dir/state/orca-worker.status" 2>/dev/null || touch -t 200001010000 "$dir/state/orca-worker.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "Orca busy-task check exited non-zero"
+  [ -z "$out" ] || fail "expected silence for a semantically busy Orca task, got: $out"
+  pass "does not flag an Orca task with a recorded busy turn"
+}
+
+test_secondmate_orca_busy_child_not_unrelayed() {
+  local dir out capture home
+  dir=$(make_case orca_busy_child)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  cat > "$home/state/orca-child.meta" <<'EOF'
+window=fm-orca-child
+terminal=term-orca-child
+backend=orca
+kind=ship
+harness=claude
+EOF
+  mark_busy "$home/state" orca-child
+  printf '%s\n' 'needs-decision: choose a rollout option' > "$home/state/orca-child.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/orca-child.status" 2>/dev/null || touch -t 200001010000 "$home/state/orca-child.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "Orca busy-child check exited non-zero"
+  [ -z "$out" ] || fail "expected no unrelayed finding for a semantically busy Orca child, got: $out"
+  pass "does not re-escalate a busy Orca child as unrelayed"
+}
+
+test_secondmate_dead_orca_child_is_unrelayed() {
+  local dir out capture home
+  dir=$(make_case dead_orca_child)
+  capture="$dir/capture.txt"
+  home="$dir/advisor-home"
+  mkdir -p "$home/state"
+  cat > "$dir/state/rt-advisor.meta" <<EOF
+window=fm-rt-advisor
+kind=secondmate
+home=$home
+EOF
+  cat > "$home/state/orca-child.meta" <<'EOF'
+window=fm-orca-child
+terminal=term-orca-child
+backend=orca
+kind=ship
+harness=claude
+EOF
+  mark_busy "$home/state" orca-child
+  printf '%s\n' 'needs-decision: choose a rollout option' > "$home/state/orca-child.status"
+  touch -d '2000-01-01 00:00:00' "$home/state/orca-child.status" 2>/dev/null || touch -t 200001010000 "$home/state/orca-child.status"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_ORCA_UNREADABLE=1 FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "dead Orca child check exited non-zero"
+  printf '%s\n' "$out" | grep -E 'unrelayed\?: rt-advisor/orca-child - needs-decision: unanswered for [0-9]+s inside the secondmate home; confirm it reached you' >/dev/null \
+    || fail "dead Orca child must remain unrelayed, got: $out"
+  pass "reports an unrelayed child when its previously busy Orca endpoint is gone"
 }
 
 # Independence check: the new detector must not depend on the secondmate's
@@ -868,28 +994,13 @@ test_unlanded_work_mid_rebase_exempt() {
   pass "exempts a worktree mid-rebase, flags the same unpushed commit after abort"
 }
 
-test_guard_surfaces_stall_pointer() {
-  local dir err
-  dir=$(make_case guard)
-  cat > "$dir/data/backlog.md" <<'EOF'
-## In flight
-- [ ] guard-i9 - done but parked (repo: firstmate)
-
-## Queued
-
-## Done
-EOF
-  cat > "$dir/state/guard-i9.meta" <<'EOF'
-window=fm-guard-i9
-kind=ship
-EOF
-  printf '%s\n' 'done: ready' > "$dir/state/guard-i9.status"
-
-  err=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" "$GUARD" 2>&1 >/dev/null) || fail "guard exited non-zero"
-  printf '%s\n' "$err" | grep -F 'WARNING: stall detector has findings - run bin/fm-stall-check.sh and act on each line.' >/dev/null \
-    || fail "guard stall pointer missing: $err"
-  pass "fm-guard surfaces a stall-check pointer"
-}
+# REMOVED: test_guard_surfaces_stall_pointer
+# It asserted that bin/fm-guard.sh emits a stall-check pointer. That pointer was a
+# graft into an upstream file and is gone: the wiring now lives in the home-local
+# state/stall-check.check.sh, which bin/fm-watch.sh discovers by glob. A repo test
+# cannot assert a gitignored home file, so this case cannot be ported - it is
+# removed rather than left failing or quietly weakened. The detector's own
+# behaviour stays fully covered by the cases above; only the invocation moved.
 
 run_test test_finished_but_not_advanced
 run_test test_unblocked_parked_item
@@ -898,6 +1009,7 @@ run_test test_date_gate_ready
 run_test test_idle_stall_candidate
 run_test test_silent_when_clear_and_secondmate_skip
 run_test test_pr_ready_task_not_flagged
+run_test test_pr_tracked_silent_task_not_flagged
 run_test test_advisor_idle_terminal_no_children_flagged
 run_test test_advisor_needs_decision_not_flagged
 run_test test_advisor_with_child_work_not_flagged
@@ -915,8 +1027,10 @@ run_test test_secondmate_child_blocked_unrelayed_flagged
 run_test test_secondmate_child_failed_unrelayed_flagged
 run_test test_secondmate_child_needs_decision_recent_not_flagged
 run_test test_secondmate_child_needs_decision_busy_pane_not_flagged
+run_test test_orca_busy_task_not_reported_idle
+run_test test_secondmate_orca_busy_child_not_unrelayed
+run_test test_secondmate_dead_orca_child_is_unrelayed
 run_test test_secondmate_child_escalation_independent_of_advisor_own_state
 run_test test_unlanded_work_matrix
 run_test test_unlanded_work_fork_remote_is_landed
 run_test test_unlanded_work_mid_rebase_exempt
-run_test test_guard_surfaces_stall_pointer

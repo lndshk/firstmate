@@ -1,6 +1,8 @@
 ---
 name: ops-execution
 description: Execute known operational runbooks—deploys, jobs, migrations, recoveries, validations, and other documented commands—with durable manifests and artifact-based proof. Use whenever a request has a known command or supported operational procedure and needs execution, monitoring, retry, or a definitive outcome.
+metadata:
+  internal: true
 ---
 
 # Operations Execution
