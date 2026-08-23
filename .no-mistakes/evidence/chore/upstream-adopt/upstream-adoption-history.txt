@@ -1,0 +1,50 @@
+merge=96b1370be27b7c053213ee93b6c1302c5207442f
+parents=09004f9f200eb513e17c93d8a766be18e92d6b43 1231b6ae7fd4c5ff7e94d2f5ca2159536c4c41cb
+subject=merge: adopt upstream kunchenguid/firstmate wholesale
+upstream_commits_not_in_base=396
+
+modified_paths_vs_upstream:
+M	docs/documentation-audiences.json
+
+additive_paths_vs_upstream:
+A	.agents/skills/firstmate-local/SKILL.md
+A	.agents/skills/frontend-design/SKILL.md
+A	.agents/skills/ops-execution/SKILL.md
+A	.agents/skills/ops-execution/agents/openai.yaml
+A	.agents/skills/runbook-enforcement/SKILL.md
+A	.agents/skills/runbook-enforcement/agents/openai.yaml
+A	bin/fm-codex-safety-lib.sh
+A	bin/fm-error-harvest.py
+A	bin/fm-git-audit.sh
+A	bin/fm-stall-check.sh
+A	tests/fm-error-harvest.test.sh
+A	tests/fm-fleet-sync-symlink.test.sh
+A	tests/fm-git-audit.test.sh
+A	tests/fm-safety-autoclear.test.sh
+A	tests/fm-stall-check.test.sh
+
+tmux_history_at_target:
+4930d2caaba8a14b13b754cefc4bd22d77d993d0 feat: add Cursor CLI crew harness (#2238)
+930ca7627a30124ec22951b0e12daf80f2e19e6b feat: add Muse Code crewmate adapter (#1786)
+cf9511217d885cd2127d50993e672c2dfa0539cf fix(bin): harden tmux agent liveness across harnesses (#1577)
+fbece9c394004b48dda7aa77c99be2465b17f2a6 fix: adapt Grok Stop continuation and harden endpoint cleanup (#1171)
+b29621ba19a4d15b688ae277ca06b67f80baa365 feat(bin): add verified pi-signed runtime adapter (#1145)
+c64ad1c42550534d56ff381cadc9072195a92357 feat: add verified Kimi crewmate adapter (#1047)
+f017572eab2930cc4c03e830d44620935ba77035 fix: relaunch missing second mates at session start (#950)
+6d90240593f5b5d5314a38e10f16608a0bdc4ab2 fix(spawn): make tmux window handling robust under non-default config (#134)
+95dd1a0f09544fe5b671b57176ecdf3efe488bab fix: deliver AFK escalations through herdr supervisors (#353)
+a894c3af8fa98cb85485114764ffc62d9bb53dbe fix: resolve backend selectors by exact task id first (#342)
+121b9029c08a88c78a63efc81e0bda11016a2dd2 fix(session-start): respawn dead secondmate agents conservatively
+309f2694cc66cc1fe45708ad12c2d82f7e92bb0d feat(bin): add runtime backend interface (#183)
+
+tmux_blame_source_commits_at_target:
+121b9029c08a88c78a63efc81e0bda11016a2dd2
+309f2694cc66cc1fe45708ad12c2d82f7e92bb0d
+4930d2caaba8a14b13b754cefc4bd22d77d993d0
+6d90240593f5b5d5314a38e10f16608a0bdc4ab2
+930ca7627a30124ec22951b0e12daf80f2e19e6b
+95dd1a0f09544fe5b671b57176ecdf3efe488bab
+a894c3af8fa98cb85485114764ffc62d9bb53dbe
+cf9511217d885cd2127d50993e672c2dfa0539cf
+f017572eab2930cc4c03e830d44620935ba77035
+fbece9c394004b48dda7aa77c99be2465b17f2a6
