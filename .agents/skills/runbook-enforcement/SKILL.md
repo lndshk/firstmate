@@ -1,6 +1,8 @@
 ---
 name: runbook-enforcement
 description: Enforce durable, execution-first runbooks for delegated or long-running work. Use when starting, supervising, retrying, or reporting work that needs a command, observable evidence, a deadline, and an unambiguous completion condition.
+metadata:
+  internal: true
 ---
 
 # Runbook Enforcement

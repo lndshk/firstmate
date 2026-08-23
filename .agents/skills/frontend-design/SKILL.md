@@ -1,6 +1,8 @@
 ---
 name: frontend-design
 description: Guidance for intentional, legible visual design when building or reshaping an HTML surface - telemetry dashboards, the status board, review and report pages. Covers layout, typography, CSS structure, honest data binding, and a mandatory render-and-screenshot verification loop. Adapted from Anthropic's frontend-design skill.
+metadata:
+  internal: true
 ---
 
 # Frontend Design

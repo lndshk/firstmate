@@ -89,7 +89,10 @@ fm_clear_safety_prompt() {  # <target>
 fm_codex_safety_sweep() {  # <state-dir> <window> <key>
   local state=$1 win=$2 key=$3 clearf cleared max
   max=${FM_SAFETY_AUTOCLEAR_MAX:-5}
-  case "$max" in ''|*[!0-9]*) max=5 ;; esac
+  if ! [[ "$max" =~ ^[0-9]+$ ]] || [ "${#max}" -gt 19 ] \
+    || { [ "${#max}" -eq 19 ] && [[ "$max" > 9223372036854775807 ]]; }; then
+    max=5
+  fi
   clearf="$state/.count-safety-$key"
   cleared=$(cat "$clearf" 2>/dev/null || echo 0)
   case "$cleared" in ''|*[!0-9]*) cleared=0 ;; esac
