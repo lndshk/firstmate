@@ -180,6 +180,25 @@ test_sweep_counts_and_caps_consecutive_clears() {
   pass "consecutive clears are counted and capped at FM_SAFETY_AUTOCLEAR_MAX"
 }
 
+test_sweep_invalid_cap_defaults_to_five() {
+  local dir fb capture state key invalid
+  dir="$TMP_ROOT/sweep-invalid-cap"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/capture"; state="$dir/state"; mkdir -p "$state"
+  write_prompt "$capture" 2
+  key=crew_fm-recorded
+  export FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_LOG="$dir/tmux.log"
+  PATH="$fb:$PATH"
+  for invalid in not-a-number -1; do
+    echo 5 > "$state/.count-safety-$key"
+    : > "$dir/tmux.log"
+    FM_SAFETY_AUTOCLEAR_MAX="$invalid" fm_codex_safety_sweep "$state" crew:fm-recorded "$key" >/dev/null
+    ! grep -q 'send-keys' "$dir/tmux.log" \
+      || fail "invalid retry cap $invalid sent another keypress"
+  done
+  pass "invalid retry caps default to five attempts"
+}
+
 test_sweep_resets_count_when_menu_gone() {
   local dir fb capture state key
   dir="$TMP_ROOT/sweep-reset"; mkdir -p "$dir"
@@ -202,4 +221,5 @@ test_selected_keep_waiting_is_confirmed_without_moving
 test_non_menu_content_does_not_trigger
 test_disabled_does_not_capture_or_send
 test_sweep_counts_and_caps_consecutive_clears
+test_sweep_invalid_cap_defaults_to_five
 test_sweep_resets_count_when_menu_gone
