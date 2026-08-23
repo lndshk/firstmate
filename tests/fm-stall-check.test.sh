@@ -978,28 +978,13 @@ test_unlanded_work_mid_rebase_exempt() {
   pass "exempts a worktree mid-rebase, flags the same unpushed commit after abort"
 }
 
-test_guard_surfaces_stall_pointer() {
-  local dir err
-  dir=$(make_case guard)
-  cat > "$dir/data/backlog.md" <<'EOF'
-## In flight
-- [ ] guard-i9 - done but parked (repo: firstmate)
-
-## Queued
-
-## Done
-EOF
-  cat > "$dir/state/guard-i9.meta" <<'EOF'
-window=fm-guard-i9
-kind=ship
-EOF
-  printf '%s\n' 'done: ready' > "$dir/state/guard-i9.status"
-
-  err=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" "$GUARD" 2>&1 >/dev/null) || fail "guard exited non-zero"
-  printf '%s\n' "$err" | grep -F 'WARNING: stall detector has findings - run bin/fm-stall-check.sh and act on each line.' >/dev/null \
-    || fail "guard stall pointer missing: $err"
-  pass "fm-guard surfaces a stall-check pointer"
-}
+# REMOVED: test_guard_surfaces_stall_pointer
+# It asserted that bin/fm-guard.sh emits a stall-check pointer. That pointer was a
+# graft into an upstream file and is gone: the wiring now lives in the home-local
+# state/stall-check.check.sh, which bin/fm-watch.sh discovers by glob. A repo test
+# cannot assert a gitignored home file, so this case cannot be ported - it is
+# removed rather than left failing or quietly weakened. The detector's own
+# behaviour stays fully covered by the cases above; only the invocation moved.
 
 run_test test_finished_but_not_advanced
 run_test test_unblocked_parked_item
@@ -1032,4 +1017,3 @@ run_test test_secondmate_child_escalation_independent_of_advisor_own_state
 run_test test_unlanded_work_matrix
 run_test test_unlanded_work_fork_remote_is_landed
 run_test test_unlanded_work_mid_rebase_exempt
-run_test test_guard_surfaces_stall_pointer
