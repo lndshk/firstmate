@@ -90,7 +90,7 @@ fm_codex_safety_nonnegative_integer() {  # <value>
   local value=$1
   case "$value" in ''|*[!0-9]*) return 1 ;; esac
   [ "${#value}" -lt 10 ] && return 0
-  [ "${#value}" -eq 10 ] && [[ "$value" < 2147483648 ]]
+  [ "${#value}" -eq 10 ] && [ "$((10#$value))" -lt 2147483648 ]
 }
 
 fm_codex_safety_sweep() {  # <state-dir> <window> <key>

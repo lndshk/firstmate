@@ -3,7 +3,6 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHECK="$ROOT/bin/fm-stall-check.sh"
-GUARD="$ROOT/bin/fm-guard.sh"
 BUSY_EVENT="$ROOT/bin/fm-busy-event.sh"
 TMP_ROOT=
 
