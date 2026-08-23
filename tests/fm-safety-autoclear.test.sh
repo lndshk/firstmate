@@ -196,6 +196,25 @@ test_sweep_resets_count_when_menu_gone() {
   pass "the consecutive-clear count resets only when the menu is confirmed gone"
 }
 
+test_sweep_invalid_cap_uses_default_bound() {
+  local dir fb capture state key i
+  dir="$TMP_ROOT/sweep-invalid-cap"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/capture"; state="$dir/state"; mkdir -p "$state"
+  write_prompt "$capture" 2
+  key=crew_fm-recorded
+  export FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_LOG="$dir/tmux.log"
+  PATH="$fb:$PATH"
+  for i in 1 2 3 4 5; do
+    FM_SAFETY_AUTOCLEAR_MAX=5 fm_codex_safety_sweep "$state" crew:fm-recorded "$key" >/dev/null
+  done
+  : > "$dir/tmux.log"
+  FM_SAFETY_AUTOCLEAR_MAX=oops fm_codex_safety_sweep "$state" crew:fm-recorded "$key" >/dev/null
+  grep -q 'send-keys' "$dir/tmux.log" \
+    && fail "an invalid FM_SAFETY_AUTOCLEAR_MAX must retain the default retry bound"
+  pass "an invalid retry cap falls back to the default bound"
+}
+
 test_active_prompt_selects_keep_waiting
 test_dropped_down_does_not_confirm
 test_selected_keep_waiting_is_confirmed_without_moving
@@ -203,3 +222,4 @@ test_non_menu_content_does_not_trigger
 test_disabled_does_not_capture_or_send
 test_sweep_counts_and_caps_consecutive_clears
 test_sweep_resets_count_when_menu_gone
+test_sweep_invalid_cap_uses_default_bound

@@ -424,6 +424,7 @@ check_silent_lanes() {
     # A secondmate legitimately rests without writing status; it has its own
     # idle detector above.
     [ "$kind" = secondmate ] && continue
+    meta_has_pr "$id" && continue
     status="$STATE/$id.status"
     [ -f "$status" ] && continue
     m=$(stat_mtime "$meta") || continue

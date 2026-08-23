@@ -268,6 +268,23 @@ EOF
   pass "does not flag a task parked awaiting captain merge (pr= in meta)"
 }
 
+test_pr_tracked_silent_task_not_flagged() {
+  local dir out capture
+  dir=$(make_case pr_silent)
+  capture="$dir/capture.txt"
+  cat > "$dir/state/pr-silent-p2.meta" <<'EOF'
+window=fm-pr-silent-p2
+kind=ship
+pr=https://github.com/lndshk/firstmate/pull/10
+EOF
+  touch -d '2000-01-01 00:00:00' "$dir/state/pr-silent-p2.meta" 2>/dev/null || touch -t 200001010000 "$dir/state/pr-silent-p2.meta"
+  printf '%s\n' 'all quiet' '> ' > "$capture"
+
+  FM_FAKE_TMUX_CAPTURE="$capture" out=$(run_check "$dir") || fail "PR-tracked silent check exited non-zero"
+  [ -z "$out" ] || fail "PR-tracked task must not be reported as a silent lane: $out"
+  pass "does not flag a PR-tracked task without a status file"
+}
+
 test_advisor_idle_terminal_no_children_flagged() {
   local dir out capture home
   dir=$(make_case advisor_idle)
@@ -992,6 +1009,7 @@ run_test test_date_gate_ready
 run_test test_idle_stall_candidate
 run_test test_silent_when_clear_and_secondmate_skip
 run_test test_pr_ready_task_not_flagged
+run_test test_pr_tracked_silent_task_not_flagged
 run_test test_advisor_idle_terminal_no_children_flagged
 run_test test_advisor_needs_decision_not_flagged
 run_test test_advisor_with_child_work_not_flagged
