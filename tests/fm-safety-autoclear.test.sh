@@ -197,7 +197,7 @@ test_sweep_resets_count_when_menu_gone() {
 }
 
 test_sweep_invalid_cap_uses_default_bound() {
-  local dir fb capture state key i max
+  local dir fb capture state key max
   dir="$TMP_ROOT/sweep-invalid-cap"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
   capture="$dir/capture"; state="$dir/state"; mkdir -p "$state"
@@ -205,16 +205,34 @@ test_sweep_invalid_cap_uses_default_bound() {
   key=crew_fm-recorded
   export FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_LOG="$dir/tmux.log"
   PATH="$fb:$PATH"
-  for i in 1 2 3 4 5; do
+  for _ in 1 2 3 4 5; do
     FM_SAFETY_AUTOCLEAR_MAX=5 fm_codex_safety_sweep "$state" crew:fm-recorded "$key" >/dev/null
   done
-  for max in oops 999999999999999999999; do
+  for max in oops 9223372036854775808 999999999999999999999; do
     : > "$dir/tmux.log"
     FM_SAFETY_AUTOCLEAR_MAX="$max" fm_codex_safety_sweep "$state" crew:fm-recorded "$key" >/dev/null
     grep -q 'send-keys' "$dir/tmux.log" \
       && fail "an invalid FM_SAFETY_AUTOCLEAR_MAX must retain the default retry bound"
   done
   pass "malformed or unrepresentable retry caps fall back to the default bound"
+}
+
+test_sweep_accepts_signed_64_bit_maximum_cap() {
+  local dir fb capture state key
+  dir="$TMP_ROOT/sweep-maximum-cap"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/capture"; state="$dir/state"; mkdir -p "$state"
+  write_prompt "$capture" 2
+  key=crew_fm-recorded
+  export FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_LOG="$dir/tmux.log"
+  PATH="$fb:$PATH"
+  echo 5 > "$state/.count-safety-$key"
+
+  FM_SAFETY_AUTOCLEAR_MAX=9223372036854775807 \
+    fm_codex_safety_sweep "$state" crew:fm-recorded "$key" >/dev/null
+  grep -q 'send-keys' "$dir/tmux.log" \
+    || fail "the signed 64-bit maximum retry cap must not fall back to the default bound"
+  pass "the signed 64-bit maximum retry cap remains a valid budget"
 }
 
 test_active_prompt_selects_keep_waiting
@@ -225,3 +243,4 @@ test_disabled_does_not_capture_or_send
 test_sweep_counts_and_caps_consecutive_clears
 test_sweep_resets_count_when_menu_gone
 test_sweep_invalid_cap_uses_default_bound
+test_sweep_accepts_signed_64_bit_maximum_cap

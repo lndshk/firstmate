@@ -101,10 +101,12 @@ resolve_base_ref() {
 BASE_REF=$(resolve_base_ref) \
   || fail "fm-backend baseline requires local main or origin/main; fetch the default branch before running this test"
 
-# Newest first-parent revision whose bin/backends/tmux.sh still uses the
-# pre-exact permissive kill-window target. Content-addressed from history so the
-# fixture stays historical on default-branch CI and on branches cut after the
-# exact-selector change, where merge-base with main is self-referential.
+# A reachable revision whose bin/backends/tmux.sh still uses the pre-exact
+# permissive kill-window target. Content-addressed from history so the fixture
+# stays historical on default-branch CI and on branches cut after the
+# exact-selector change, where merge-base with main is self-referential. PR CI
+# checks out a synthetic base-first merge, so first-parent traversal there would
+# omit the adopted upstream history that this fixture must exercise.
 resolve_permissive_tmux_kill_ref() {
   local commit body
   while IFS= read -r commit; do
@@ -121,7 +123,7 @@ resolve_permissive_tmux_kill_ref() {
         return 0
         ;;
     esac
-  done < <(git -C "$ROOT" log --first-parent --format='%H' HEAD -- bin/backends/tmux.sh)
+  done < <(git -C "$ROOT" log --all --format='%H' -- bin/backends/tmux.sh)
   return 1
 }
 

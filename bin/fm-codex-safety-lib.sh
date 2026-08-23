@@ -87,11 +87,27 @@ fm_clear_safety_prompt() {  # <target>
 # Returns 0 when a clear was confirmed (caller should skip further classification
 # of this pane this cycle), 1 otherwise. Never fails the caller.
 fm_codex_safety_sweep() {  # <state-dir> <window> <key>
-  local state=$1 win=$2 key=$3 clearf cleared max
+  local state=$1 win=$2 key=$3 clearf cleared max max_remaining limit_remaining max_digit limit_digit
   max=${FM_SAFETY_AUTOCLEAR_MAX:-5}
-  if ! [[ "$max" =~ ^[0-9]+$ ]] || [ "${#max}" -gt 19 ] \
-    || { [ "${#max}" -eq 19 ] && [[ "$max" > 9223372036854775807 ]]; }; then
+  if ! [[ "$max" =~ ^[0-9]+$ ]] || [ "${#max}" -gt 19 ]; then
     max=5
+  elif [ "${#max}" -eq 19 ]; then
+    # Compare one digit at a time so the upper-bound validation never relies
+    # on shell arithmetic overflowing at the signed 64-bit limit.
+    max_remaining=$max
+    limit_remaining=9223372036854775807
+    while [ -n "$max_remaining" ]; do
+      max_digit=${max_remaining%"${max_remaining#?}"}
+      limit_digit=${limit_remaining%"${limit_remaining#?}"}
+      if [ "$max_digit" -gt "$limit_digit" ]; then
+        max=5
+        break
+      elif [ "$max_digit" -lt "$limit_digit" ]; then
+        break
+      fi
+      max_remaining=${max_remaining#?}
+      limit_remaining=${limit_remaining#?}
+    done
   fi
   clearf="$state/.count-safety-$key"
   cleared=$(cat "$clearf" 2>/dev/null || echo 0)
