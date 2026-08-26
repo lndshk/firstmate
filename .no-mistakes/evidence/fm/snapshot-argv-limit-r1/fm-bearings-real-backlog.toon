@@ -1,0 +1,53 @@
+backlog_bytes=153516
+schema: fm-bearings.v1
+home: rob/firstmate
+generated: "2026-08-26T12:00:00Z"
+prs: "not_requested (run: /bearings include PRs)"
+in_flight[1]{id,kind,state,doing}:
+  snapshot-argv-limit-r1,ship,working,validating (running)
+secondmates[1]{id,state,doing,provenance,freshness,age_seconds,contradiction,reason}:
+  rt-advisor-2,unknown,"structured home state invalid: in-flight backlog item has no child metadata: dead-agent-guard-k7, restore-vici-style-g3",unknown,unknown,null,false,"structured home state invalid: in-flight backlog item has no child metadata: dead-agent-guard-k7, restore-vici-style-g3"
+decisions_open: []
+landed[6]{id,what,artifact,owner}:
+  runtime-state-out-of-src-r1,"close quant-issue-tracking#56: relocate the realtime draw-marker lock …","-",(main)
+  rt-tester-never-called,SUPERSEDED by tester-tcp-transport-m5 above; retained only for the les…,"-",(main)
+  rt-level-ownership-tag-loss,"ROOT CAUSE, still open. Analyst levels from 2026-07-24/27/28 survived …","-",(main)
+  monitor-diagnostics-d1,three es_monitor diagnostic defects that made a healthy monitor look b…,"-",(main)
+  level-tester-symmetry-t1,level tester counted a close exactly at the level asymmetrically,"-",(main)
+  fix-footprint-tcp-fanout-r1,"TIER-1 LIVE BUG from the branch audit, captain ruled fix 2026-08-01. V…","-",(main)
+gates[20]{id,title,blocked_by,reason,owner}:
+  (main-inventory),unstructured current backlog row,"-",main inventory,(main)
+  rt-rust-thin-wire-k6,"BLOCKED ON THE CAPTAIN, and it is the same gate as the drawe…","-",captain decides whether to fix the red t…,(main)
+  board-live-shell-state,branch fm/board-live-shell-state IS pushed to origin but NO …,"-",captain decides whether to open a PR for…,(main)
+  resume-land-lean-salvage,"PARKED 2026-08-02, FULL RESUME RECIPE AT `data/land-lean-sal…","-","-",(main)
+  no-mistakes-rerun-restarts-not-resumes,"TOOLING FINDING 2026-08-02, cost a full extra review cycle: …","-","-",(main)
+  audit-firstmate-home-worktrees,"the branch audit blind spot, found 2026-08-02. Remote-branch…","-","-",(main)
+  fm-lock-release-wrong-pid-race,"REAL RACE in our own lock helper, root-caused 2026-08-02 by …","-","-",(main)
+  watcher-false-stale-on-gate-owned-agent,"OBSERVED 2026-08-02 during fix-advisor-idle-detector-r1: the…","-","-",(main)
+  fm-home-seed-fail-open-idiom,DEFERRED from fix-secondmate-registry-parse-r1 (PR #23) as a…,"-","-",(main)
+  fix-registry-parse-remaining-two,FOLDED INTO fix-secondmate-registry-parse-r1 on captain inst…,"-","-",(main)
+  fm-spawn-display-message-probe,the FOURTH and last instance of the display-message self-dec…,"-","-",(main)
+  fm-supervisor-heartbeat-test-flake,"PRE-EXISTING, isolated 2026-08-01 by ship-dead-agent-guard-r…","-","-",(main)
+  eod-stage1-calendar-free-scope-call,"RULED 2026-08-01: captain chose (b)+(c), the conservative co…","-","-",(main)
+  afk-daemon-refuse-unreachable-target,REAL DEFECT found 2026-07-31 while invoking /afk. fm-supervi…,"-","-",(main)
+  branch-audit-and-autodelete,"AUDIT APPROVED by the captain 2026-07-31, not yet dispatched…","-","-",(main)
+  dash-nav-proposal-review,"TOMORROW MORNING (captain 2026-07-31, after the data work la…","-","-",(main)
+  relay-4-unread-audits,"VERIFY-THEN-RELAY (narrowed 2026-07-31): S2 (VIX gap) is alr…","-","-",(main)
+  rt-12-12-captain-capture-bridge,implement §12.12 captain-level capture in **quant-sc-bridge*…,"-","-",(main)
+  fm-spawn-crew-model-pr,`bin/fm-spawn.sh` was edited DIRECTLY on 2026-07-30 under ti…,"-","-",(main)
+  fm-dead-agent-guard-pr,the advisor-liveness fix the captain asked for. Branch `fix/…,"-","-",(main)
+reports: []
+recorded_prs: []
+omitted[12]{surface,reveal}:
+  backlog item bodies,"--fields bodies"
+  task paths,"--fields paths"
+  watch/steer actions,"--fields actions"
+  healthy endpoint detail,"--fields endpoints"
+  full scout-report inventory,"--all-reports"
+  superseded or prose-deferred queued items,"--all-queued"
+  landed per-home capped at 6 for 1 home(s),"--all-landed"
+  "secondmate home(s) with unreadable backlog: 1",inspect the listed secondmate home backlogs
+  "main in-flight backlog item(s) have no child metadata: 6",inspect main data/backlog.md In flight vs state/*.meta
+  "main unstructured current backlog row(s): 10",inspect main data/backlog.md In flight and Queued free-form rows
+  gates showing 20 of 74,"--all-queued"
+  live PR discovery + checks,"--include-prs"

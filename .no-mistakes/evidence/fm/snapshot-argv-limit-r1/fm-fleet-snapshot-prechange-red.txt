@@ -1,0 +1,5 @@
+ok - empty fleet snapshot and view use explicit absence markers
+/tmp/fm-snapshot-baseline.PbC42d/bin/fm-fleet-snapshot.sh: line 635: /home/rob/.local/bin/jq: Argument list too long
+fm-fleet-snapshot: main inventory summary failed
+not ok - snapshot failed for an oversized backlog
+prechange_exit=1

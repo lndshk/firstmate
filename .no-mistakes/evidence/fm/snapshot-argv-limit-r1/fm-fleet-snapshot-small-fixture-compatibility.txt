@@ -1,0 +1,1 @@
+small_fixture_byte_identical=true bytes=4978 sha256=179da179cd99def08d1da60e9d1ad0752f2c44487414e1c2b6b632b0921166ed

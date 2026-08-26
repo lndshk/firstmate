@@ -1,0 +1,4 @@
+raw_backlog_bytes=153516
+canonical_backlog_json_bytes=211607
+canonical_snapshot_bytes=276131
+fm_fleet_snapshot_exit=0
