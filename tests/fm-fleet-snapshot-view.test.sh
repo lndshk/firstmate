@@ -6,7 +6,7 @@ set -u
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
+SNAPSHOT="${FM_FLEET_SNAPSHOT_BIN:-$ROOT/bin/fm-fleet-snapshot.sh}"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
 
@@ -149,6 +149,30 @@ test_empty_fleet_json() {
   view=$(FM_HOME="$home" "$VIEW")
   assert_contains "$view" "No live task metadata found." "empty fleet view should say no live metadata"
   pass "empty fleet snapshot and view use explicit absence markers"
+}
+
+test_oversized_backlog_snapshot_survives() {
+  local home filler i bytes out
+  home=$(make_home oversized-backlog)
+  filler=$(printf '%*s' 256 '')
+  filler=${filler// /x}
+  {
+    printf '## In flight\n\n## Queued\n'
+    i=1
+    while [ "$i" -le 600 ]; do
+      printf -- '- [ ] oversized-%04d - Oversized backlog record %04d %s (repo: firstmate) (kind: ship)\n' "$i" "$i" "$filler"
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+  bytes=$(LC_ALL=C wc -c < "$home/data/backlog.md" | tr -d ' ')
+  [ "$bytes" -gt 131072 ] || fail "oversized backlog fixture did not exceed MAX_ARG_STRLEN"
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) || fail "snapshot failed for an oversized backlog"
+  printf '%s' "$out" | jq -e --arg id oversized-0600 '
+    (.backlog.records | length) == 600
+      and any(.backlog.records[]; .id == $id and (.title | contains("Oversized backlog record 0600")))
+  ' >/dev/null || fail "snapshot lost the far-end oversized backlog record"
+  pass "oversized backlogs survive the snapshot without losing far-end records"
 }
 
 test_fixture_snapshot_json() {
@@ -800,6 +824,7 @@ test_parked_scout_decision_stays_pending() {
 }
 
 test_empty_fleet_json
+test_oversized_backlog_snapshot_survives
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
