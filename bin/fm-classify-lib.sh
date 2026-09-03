@@ -106,14 +106,14 @@ last_status_line() {
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
-# (done, awaiting-merge, needs-decision, blocked, failed). Free-text tokens alone never count here;
+# (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
 # callers that need legacy free-text matching use status_is_captain_relevant.
 status_is_terminal_verb() {
   local line=$1 verb
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
   case "$verb" in
-    done|"${FM_CLASSIFY_AWAITING_MERGE_VERB:-$FM_CLASSIFY_AWAITING_MERGE_VERB_DEFAULT}"|needs-decision|blocked|failed) return 0 ;;
+    done|needs-decision|blocked|failed) return 0 ;;
     *) return 1 ;;
   esac
 }

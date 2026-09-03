@@ -171,6 +171,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
 
+# shellcheck source=bin/fm-pr-lib.sh
+. "$FM_DAEMON_DIR/fm-pr-lib.sh"
+
 # Supervisor-pane discovery (FM_SUPERVISOR_TARGET_DEFAULT,
 # FM_SUPERVISOR_BACKEND_DEFAULT, discover_supervisor_target,
 # discover_supervisor_backend). Shared with the script-owned away launcher
@@ -375,6 +378,14 @@ classify_stale() {  # <window> <state>
   local win=$1 state=$2 task last seen
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
+  if awaiting_merge_poll_valid "$win" "$state" "$last"; then
+    printf 'awaiting-merge|awaiting merge decision (authenticated merge poll owns it): %s' "$last"
+    return
+  fi
+  if status_is_awaiting_merge "$last"; then
+    printf 'self|transient stale (%s): unauthenticated awaiting-merge claim' "$win"
+    return
+  fi
   if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
     # A DECLARED external-wait pause or a verified captain-held transfer
     # (fm-classify-lib.sh owns which declarations qualify): an idle pane is
@@ -480,6 +491,19 @@ clear_pause_tracking() {  # <window> <state>
     "$state/.writing-since-$watcher_key" "$state/.writing-resurfaced-$watcher_key"
 }
 
+awaiting_merge_poll_valid() {  # <window> <state> <last-status-line>
+  local win=$1 state=$2 last=$3 task
+  status_is_awaiting_merge "$last" || return 1
+  task=$(window_to_task "$win" "$state")
+  fm_pr_poll_artifacts_valid "$state" "$task" "$FM_DAEMON_DIR/fm-pr-poll.sh"
+}
+
+reconcile_awaiting_merge_tracking() {  # <window> <state> <last-status-line>
+  local win=$1 state=$2 last=$3
+  awaiting_merge_poll_valid "$win" "$state" "$last" || return 1
+  clear_pause_tracking "$win" "$state"
+}
+
 reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   local win=$1 state=$2 last=$3 task key marker watcher_key
   task=$(window_to_task "$win" "$state")
@@ -504,7 +528,9 @@ migrate_watcher_pause_markers() {  # <state>
     key=$(_stale_key "$task")
     watcher_key=$(_stale_key "$win")
     last=$(last_status_line "$state/$task.status")
-    if status_is_paused_or_captain_held "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
+    if reconcile_awaiting_merge_tracking "$win" "$state" "$last"; then
+      continue
+    elif status_is_paused_or_captain_held "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
       reconcile_pause_tracking "$win" "$state" "$last"
     fi
   done
@@ -521,7 +547,8 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
     task=$(basename "$f"); task=${task%.status}
     win=$(window_for_task "$task" "$state" 2>/dev/null || true)
     [ -n "$win" ] || continue
-    reconcile_pause_tracking "$win" "$state" "$last"
+    reconcile_awaiting_merge_tracking "$win" "$state" "$last" \
+      || reconcile_pause_tracking "$win" "$state" "$last"
   done
 }
 
@@ -1013,7 +1040,9 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
-    if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
+    if reconcile_awaiting_merge_tracking "$win" "$state" "$last"; then
+      continue
+    elif [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
@@ -1248,6 +1277,15 @@ handle_wake() {  # <reason> <state>
       mark_escalated_seen "$kind" "$arg" "$state"
       [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
       ;;
+    awaiting-merge)
+      if reconcile_awaiting_merge_tracking "$arg" "$state" \
+        "$(last_status_line "$state/$(window_to_task "$arg" "$state").status")"; then
+        log "self-handle (awaiting merge): $reason -> $distilled"
+      else
+        stale_marker_record "$arg" "$state"
+        log "self-handle (awaiting merge poll no longer valid): $reason -> $distilled"
+      fi
+      ;;
     pause)
       # Declared wait, an external-wait pause or a verified captain-held transfer:
       # record a pause marker (long re-surface cadence in housekeeping) and drop any
@@ -1276,7 +1314,7 @@ handle_wake() {  # <reason> <state>
             _clear_wedge=1
           else
             case "$(status_line_verb "$last")" in
-              working|resolved|captain-held) _clear_wedge=0 ;;
+              working|resolved|captain-held|"${FM_CLASSIFY_AWAITING_MERGE_VERB:-$FM_CLASSIFY_AWAITING_MERGE_VERB_DEFAULT}") _clear_wedge=0 ;;
               *) _clear_wedge=1 ;;
             esac
           fi

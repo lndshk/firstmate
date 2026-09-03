@@ -12,6 +12,7 @@ set -u
 
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 AFK_START="$ROOT/bin/fm-afk-start.sh"
+POLL="$ROOT/bin/fm-pr-poll.sh"
 # Source the daemon's pure functions once. Its main loop is skipped under sourcing
 # via a BASH_SOURCE guard, so only classify_*/housekeeping/escalate_*/afk_* and the
 # pane/submit helpers become defined.
@@ -138,6 +139,64 @@ test_stale_transient_self_records_marker() {
   key=$(printf '%s' "$(window_to_task "sess:fm-qux-w4")" | tr ':/.' '___')
   [ -e "$state/.subsuper-stale-$key" ] || fail "stale marker was not recorded"
   pass "transient stale self-handles and records a persistence marker"
+}
+
+arm_daemon_merge_poll() {  # <state> <id>
+  local state=$1 id=$2
+  fm_pr_poll_prepare "$state" "$id" github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
+    || fail "could not prepare daemon merge-poll fixture"
+  fm_pr_poll_publish_prepared || fail "could not publish daemon merge-poll fixture"
+}
+
+test_afk_invalid_awaiting_merge_still_escalates_wedge() {
+  local scenario dir state fakebin win task key pane
+  for scenario in unarmed tampered; do
+    dir=$(make_supercase "afk-awaiting-merge-$scenario")
+    state="$dir/state"; fakebin="$dir/fakebin"; task="awaiting-$scenario"
+    win="sess:fm-$task"; pane="$dir/pane.txt"; key=$(printf '%s' "$task" | tr ':/. ' '____')
+    printf 'window=%s\nkind=ship\npr=https://github.com/o/r/pull/1\n' "$win" > "$state/$task.meta"
+    printf 'awaiting-merge: PR https://github.com/o/r/pull/1 checks green; merge poll armed\n' > "$state/$task.status"
+    afk_enter "$state"
+    if [ "$scenario" = tampered ]; then
+      arm_daemon_merge_poll "$state" "$task"
+      printf 'tampered\n' > "$state/$task.pr-poll"
+      chmod 0600 "$state/$task.pr-poll"
+    fi
+    FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+    [ -e "$state/.subsuper-stale-$key" ] || fail "$scenario awaiting-merge claim did not enter stale tracking"
+    printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+    printf 'idle prompt\n' > "$pane"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_HEARTBEAT_SCAN_SECS=999999 housekeeping "$state"
+    grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null \
+      || fail "$scenario awaiting-merge claim suppressed the ordinary wedge escalation"
+  done
+  pass "unarmed and tampered awaiting-merge claims still escalate as wedges in AFK mode"
+}
+
+test_afk_valid_awaiting_merge_signal_retires_open_wedge() {
+  local dir state task win key watcher_key
+  dir=$(make_supercase afk-awaiting-merge-valid)
+  state="$dir/state"; task=awaiting-valid; win="sess:fm-$task"
+  key=$(printf '%s' "$task" | tr ':/. ' '____')
+  watcher_key=$(printf '%s' "$win" | tr ':/. ' '____')
+  printf 'window=%s\nkind=ship\npr=https://github.com/o/r/pull/1\n' "$win" > "$state/$task.meta"
+  arm_daemon_merge_poll "$state" "$task"
+  printf 'awaiting-merge: PR https://github.com/o/r/pull/1 checks green; merge poll armed\n' > "$state/$task.status"
+  afk_enter "$state"
+  : > "$state/.subsuper-stale-$key"
+  : > "$state/.subsuper-paused-$key"
+  : > "$state/.stale-$watcher_key"
+  : > "$state/.stale-since-$watcher_key"
+  : > "$state/.wedge-escalations-$watcher_key"
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/$task.status" "$state"
+  for marker in "$state/.subsuper-stale-$key" "$state/.subsuper-paused-$key" \
+    "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key"; do
+    [ ! -e "$marker" ] || fail "authenticated awaiting-merge signal retained $marker"
+  done
+  [ ! -s "$state/.subsuper-escalations" ] || grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null \
+    && fail "authenticated awaiting-merge signal escalated an already-open wedge"
+  pass "an authenticated awaiting-merge signal supersedes and retires an open AFK wedge"
 }
 
 test_stale_diagnostic_wedge_survives_busy_housekeeping() {
@@ -1931,6 +1990,8 @@ test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
+test_afk_invalid_awaiting_merge_still_escalates_wedge
+test_afk_valid_awaiting_merge_signal_retires_open_wedge
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
