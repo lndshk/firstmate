@@ -1,0 +1,3 @@
+ok - rechain accepts a thread reachable one simulated year later
+ok - expiry escalation is pinned by FMX_NOW_OVERRIDE
+TARGETED PUBLIC-FOLLOWUP CLOCK CHECKS PASSED

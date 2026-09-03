@@ -1,0 +1,23 @@
+SIMULATED_CLOCK_EPOCH=1819946728
+THREAD_EXPIRY=2027-09-10T04:45:28Z
+retired public-final-future-a reason=handed on to public-final-future-b
+When this work reaches its promised terminal outcome, report it as typed data
+(never as a sentence for someone to parse) by running exactly:
+
+  /home/rob/.no-mistakes/worktrees/bf04c844c877/01M1JS0C31Q7MJC3QEQQ1EBAJF/bin/fm-public-followup-emit.sh \
+    --home /tmp/fm-public-followup.j7XJyC/reviewer-future \
+    --obligation public-final-future-b \
+    --relation rel-1 \
+    --source-home main \
+    --work-id ship-future \
+    --generation 1 \
+    --outcome pr-merged \
+    --deliverable pr_url=<value> \
+    --outcome-text '<one bounded public-safe sentence>'
+
+Do not post anything publicly yourself and do not look for the public thread:
+the home above owns the reply.
+{"id":"public-final-future-b","state":"queued","follows":null,"delivery":"pending-work"}
+EXPIRED_CLOCK_EPOCH=1819946733
+fm-public-followup: followup_expires_at 2026-09-10T04:45:31Z is in the past: the thread can no longer be reached, so this loop cannot be closed publicly. This is a captain decision.
+PUBLIC_FOLLOWUP_CLOCK_E2E_PASSED
