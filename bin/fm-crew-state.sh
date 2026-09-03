@@ -148,7 +148,9 @@ map_log_state() {  # <line>
     working)        echo working ;;
     needs-decision) echo parked ;;
     blocked)        echo blocked ;;
-    awaiting-merge) echo awaiting-merge ;;
+    awaiting-merge)
+      awaiting_merge_poll_valid && echo awaiting-merge || echo unknown
+      ;;
     done)           echo "done" ;;
     failed)         echo failed ;;
     *)              echo unknown ;;

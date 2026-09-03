@@ -995,6 +995,40 @@ test_no_run_idle_pane_uses_log() {
   pass "no run + idle pane uses the status-log verb"
 }
 
+test_no_run_idle_pane_awaiting_merge_requires_authenticated_poll() {
+  local scenario d out
+  for scenario in unarmed tampered valid; do
+    reset_fakes
+    d=$(new_case "idle-awaiting-merge-$scenario")
+    make_repo_on_branch "$d/wt" "fm/feat-idle-awaiting-$scenario"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-idle-awaiting-$scenario.meta" \
+      "window=fm:fm-feat-idle-awaiting-$scenario" "worktree=$d/wt" "kind=ship" "harness=claude"
+    printf 'pr=https://github.com/o/r/pull/4\n' >> "$d/state/feat-idle-awaiting-$scenario.meta"
+    if [ "$scenario" != unarmed ]; then
+      arm_merge_poll "$d/state" "feat-idle-awaiting-$scenario" https://github.com/o/r/pull/4
+    fi
+    if [ "$scenario" = tampered ]; then
+      printf 'tampered\n' > "$d/state/feat-idle-awaiting-$scenario.pr-poll"
+      chmod 0600 "$d/state/feat-idle-awaiting-$scenario.pr-poll"
+    fi
+    printf 'awaiting-merge: PR https://github.com/o/r/pull/4 checks green; merge poll armed\n' \
+      > "$d/state/feat-idle-awaiting-$scenario.status"
+    FM_FAKE_AXI_STATUS=""
+    FM_FAKE_BUSY=0
+    arm_idle_record "$d/state" "feat-idle-awaiting-$scenario"
+    out=$(run_crew_state "$d" "feat-idle-awaiting-$scenario")
+    if [ "$scenario" = valid ]; then
+      assert_contains "$out" "state: awaiting-merge" "a valid poll permits the idle fallback merge-wait state"
+      assert_contains "$out" "source: status-log" "a valid poll keeps the fallback sourced from the lifecycle receipt"
+    else
+      assert_contains "$out" "state: unknown" "$scenario merge-wait claim must not authenticate the idle fallback"
+      assert_not_contains "$out" "state: awaiting-merge" "$scenario merge-wait claim must not report awaiting merge"
+    fi
+  done
+  pass "idle fallback requires an authenticated poll before reporting awaiting-merge"
+}
+
 test_no_run_idle_pane_uses_keyed_log() {
   reset_fakes
   local d; d=$(new_case keyed-idle)
@@ -1496,6 +1530,7 @@ test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log
+test_no_run_idle_pane_awaiting_merge_requires_authenticated_poll
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
