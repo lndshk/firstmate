@@ -1374,12 +1374,17 @@ signal_crew_provably_working() {  # <file> ...
 }
 
 # 0 (terminal/actionable) if a stale window's last status line is
-# captain-relevant; 1 otherwise, including the no-status case. A 1 only means
-# "non-terminal"; the always-on watcher then applies crew_is_provably_working,
-# while the away-mode daemon applies its persistence recheck.
+# captain-relevant; 1 otherwise, including the no-status case. An
+# awaiting-merge: declaration is deliberately non-terminal here until the
+# watcher has separately verified its canonical merge poll: its initial status
+# signal remains captain-relevant, but an unarmed or invalid declaration must
+# take the ordinary stale and wedge path. A 1 only means "non-terminal"; the
+# always-on watcher then applies crew_is_provably_working, while the away-mode
+# daemon applies its persistence recheck.
 stale_is_terminal() {  # <window> <state>
   local win=$1 state=$2 last
   last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
+  status_is_awaiting_merge "$last" && return 1
   [ -n "$last" ] && status_is_captain_relevant "$last"
 }
 

@@ -201,7 +201,8 @@ test_signal_reason_is_actionable_classifier() {
 # A green PR's explicit lifecycle receipt skips pane supervision only after its
 # canonical merge poll has been authenticated. This is intentionally stronger
 # than trusting an agent-written status line: the merge poll remains active,
-# while stale and wedge bookkeeping from the active lifetime is retired.
+# while stale and wedge bookkeeping from even an open active-lifetime episode
+# is retired.
 test_awaiting_merge_validated_poll_skips_pane_supervision() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case awaiting-merge-validated); state="$dir/state"; fakebin="$dir/fakebin"
@@ -260,6 +261,7 @@ test_unarmed_awaiting_merge_worker_still_wedges() {
     fail "unarmed awaiting-merge worker did not enter the ordinary stale timer"
   fi
   reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional unarmed-wedge phase-A watcher stop"
   printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -282,6 +284,9 @@ test_stale_is_terminal_classifier() {
   stale_is_terminal "default:w1:p2" "$state" || fail "terminal herdr stale status not resolved through metadata"
   printf 'working: compiling\n' > "$state/nonterm.status"
   stale_is_terminal "sess:fm-nonterm" "$state" && fail "non-terminal stale classified terminal"
+  printf 'awaiting-merge: PR https://example.test/pr/4 checks green; merge poll armed\n' > "$state/unarmed-awaiting.status"
+  stale_is_terminal "sess:fm-unarmed-awaiting" "$state" \
+    && fail "an unarmed awaiting-merge receipt bypassed ordinary stale triage"
   stale_is_terminal "sess:fm-missing" "$state" && fail "stale with no status classified terminal"
   pass "stale_is_terminal: terminal status surfaces, non-terminal and no-status are benign"
 }

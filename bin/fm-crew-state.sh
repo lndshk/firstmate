@@ -577,9 +577,9 @@ if [ "$HAVE_RUN" = 1 ]; then
   # attributed run is in its green ci-monitor phase, so a later re-arm or fix
   # round immediately returns to `working` instead of letting stale status text
   # hide renewed work.
-  if [ "$RUN_STATE" = done ] && [ "$CI_STEP_STATUS" = running ] \
+  if [ "$RUN_STATE" = "done" ] && [ "$CI_STEP_STATUS" = "running" ] \
     && [ "$CI_LOG_STATE" = green ] && status_is_awaiting_merge "$LOG_LINE"; then
-    RUN_STATE=awaiting-merge
+    RUN_STATE='awaiting-merge'
     RUN_DETAIL="awaiting captain merge decision (checks green; merge poll armed)"
   fi
 

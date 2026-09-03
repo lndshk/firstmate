@@ -491,9 +491,10 @@ clear_pause_tracking() {  # <window-key>
 
 # 0 only when <task> has an authenticated, canonical merge poll. An
 # awaiting-merge: status line is a worker claim; this separate proof is what
-# makes it safe to stop pane supervision. If the declaration is forged,
-# incomplete, or its poll is missing or tampered with, the ordinary stale path
-# remains in force and can still surface a genuine wedge.
+# makes it safe to supersede even an already-open wedge episode and stop pane
+# supervision. If the declaration is forged, incomplete, or its poll is missing
+# or tampered with, the ordinary stale path remains in force and can still
+# surface a genuine wedge.
 task_has_armed_merge_poll() {  # <task>
   fm_pr_poll_artifacts_valid "$STATE" "$1" "$SCRIPT_DIR/fm-pr-poll.sh"
 }
@@ -1146,9 +1147,11 @@ EOF
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if status_is_awaiting_merge "$last" && task_has_armed_merge_poll "$task"; then
-      # The worker supplied a terminal-but-unlanded lifecycle receipt and its
-      # validated poll now owns the next transition. Drop prior active-lifetime
-      # markers so lifting the declaration starts fresh supervision.
+      # This admission deliberately precedes stale classification: an ordinary
+      # declared wait may remain masked by an open wedge episode, but only this
+      # authenticated poll can safely supersede that episode. Drop prior
+      # active-lifetime markers so lifting the declaration starts fresh
+      # supervision.
       clear_pause_tracking "$key"
       triage_log "skipped terminal awaiting-merge task (validated merge poll owns it): $w"
       continue
