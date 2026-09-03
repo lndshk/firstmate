@@ -61,7 +61,7 @@ unset _fm_classify_nounset
 # verb-aware: a nonterminal working: or paused: line never becomes captain-relevant
 # merely because its prose contains one of those tokens (for example
 # "working: rebased onto merged #76").
-FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|awaiting-merge:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 
 # The deliberate-external-wait verb. A crew (or firstmate steering it) appends
 #   paused: <reason>
@@ -75,6 +75,12 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # (status_is_paused) rather than hardcoding the literal, so the vocabulary cannot
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
+
+# The terminal-but-unlanded declaration. A ship worker writes this only after
+# its PR is pushed, checks are green, and bin/fm-pr-check.sh has armed the
+# authenticated merge poll. The watcher verifies that poll before it exempts
+# the task from pane supervision, so an unarmed declaration cannot hide a wedge.
+FM_CLASSIFY_AWAITING_MERGE_VERB_DEFAULT='awaiting-merge'
 
 # Bounded re-surface cadence for a declared pause or a verified captain hold.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
@@ -100,14 +106,14 @@ last_status_line() {
 }
 
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
-# (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
+# (done, awaiting-merge, needs-decision, blocked, failed). Free-text tokens alone never count here;
 # callers that need legacy free-text matching use status_is_captain_relevant.
 status_is_terminal_verb() {
   local line=$1 verb
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
   case "$verb" in
-    done|needs-decision|blocked|failed) return 0 ;;
+    done|"${FM_CLASSIFY_AWAITING_MERGE_VERB:-$FM_CLASSIFY_AWAITING_MERGE_VERB_DEFAULT}"|needs-decision|blocked|failed) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -129,7 +135,7 @@ status_is_captain_relevant() {
   esac
   if [ -z "${FM_CAPTAIN_RE+x}" ]; then
     case "$verb" in
-      done|needs-decision|blocked|failed) return 0 ;;
+      done|"${FM_CLASSIFY_AWAITING_MERGE_VERB:-$FM_CLASSIFY_AWAITING_MERGE_VERB_DEFAULT}"|needs-decision|blocked|failed) return 0 ;;
     esac
   fi
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
@@ -144,6 +150,17 @@ status_is_paused() {  # <status-line>
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
+}
+
+# 0 if a status line declares completed work retained while its already-armed
+# merge poll waits for the captain's merge decision. This pure vocabulary check
+# does NOT itself suppress supervision; fm-watch.sh also proves the matching
+# canonical poll artifacts are present before it skips the task.
+status_is_awaiting_merge() {  # <status-line>
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  [ "$verb" = "${FM_CLASSIFY_AWAITING_MERGE_VERB:-$FM_CLASSIFY_AWAITING_MERGE_VERB_DEFAULT}" ]
 }
 
 # 0 if a status line's leading verb is the verified captain-held transfer verb.

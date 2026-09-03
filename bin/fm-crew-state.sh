@@ -16,7 +16,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|awaiting-merge|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -41,7 +41,9 @@
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      green, so a green PR is never silently read as still-validating. A
+#      worker's explicit awaiting-merge: declaration refines that green ci state
+#      when its PR remains open for the captain's merge decision.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -139,6 +141,7 @@ map_log_state() {  # <line>
     working)        echo working ;;
     needs-decision) echo parked ;;
     blocked)        echo blocked ;;
+    awaiting-merge) echo awaiting-merge ;;
     done)           echo "done" ;;
     failed)         echo failed ;;
     *)              echo unknown ;;
@@ -291,7 +294,7 @@ nm_gate_findings_count() {
   printf '%s' "$rest"
 }
 log_reports_ci_ready() {
-  [ "$LOG_VERB" = "done" ] || return 1
+  [ "$LOG_VERB" = "done" ] || status_is_awaiting_merge "$LOG_LINE" || return 1
   case "$(status_line_note "$LOG_LINE")" in
     *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
     *) return 1 ;;
@@ -345,7 +348,7 @@ nm_ci_checks_state() {
   log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
   [ -n "$log_tail" ] || { printf 'unknown'; return; }
   marker=$(printf '%s\n' "$log_tail" \
-    | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
+    | grep -E 'CI checks passed|no CI checks reported - still monitoring|repository declares no CI \(no_ci: true\) - treating as all checks passed - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
     *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
@@ -547,6 +550,9 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
+      if status_is_awaiting_merge "$LOG_LINE"; then
+        emit "awaiting-merge" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      fi
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
@@ -558,8 +564,23 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
+      if status_is_awaiting_merge "$LOG_LINE"; then
+        emit "awaiting-merge" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      fi
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
+  fi
+
+  # A green CI monitor ordinarily renders `done`: it may still be waiting for a
+  # merge, but legacy status logs do not state that custody explicitly. The
+  # dedicated declaration is narrower. It is valid only while this same
+  # attributed run is in its green ci-monitor phase, so a later re-arm or fix
+  # round immediately returns to `working` instead of letting stale status text
+  # hide renewed work.
+  if [ "$RUN_STATE" = done ] && [ "$CI_STEP_STATUS" = running ] \
+    && [ "$CI_LOG_STATE" = green ] && status_is_awaiting_merge "$LOG_LINE"; then
+    RUN_STATE=awaiting-merge
+    RUN_DETAIL="awaiting captain merge decision (checks green; merge poll armed)"
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step

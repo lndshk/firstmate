@@ -9,7 +9,10 @@
 # working signal is never silently swallowed. A declared wait, either a paused:
 # external wait or a verified captain-held transfer, is the separate idle absorb
 # case and re-surfaces only on its long bounded cadence, although its initial
-# no-verb status signal still surfaces in normal mode.
+# no-verb status signal still surfaces in normal mode. A separately declared
+# awaiting-merge: ship is terminal-but-unlanded: once its canonical merge poll
+# is verified, pane supervision skips it entirely and that poll alone owns the
+# future merge transition.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -484,6 +487,15 @@ clear_pause_tracking() {  # <window-key>
   clear_pause_state "$key"
   clear_write_tracking "$key"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+}
+
+# 0 only when <task> has an authenticated, canonical merge poll. An
+# awaiting-merge: status line is a worker claim; this separate proof is what
+# makes it safe to stop pane supervision. If the declaration is forged,
+# incomplete, or its poll is missing or tampered with, the ordinary stale path
+# remains in force and can still surface a genuine wedge.
+task_has_armed_merge_poll() {  # <task>
+  fm_pr_poll_artifacts_valid "$STATE" "$1" "$SCRIPT_DIR/fm-pr-poll.sh"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -1133,6 +1145,14 @@ EOF
     task=$(window_to_task "$w" "$STATE")
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
+    if status_is_awaiting_merge "$last" && task_has_armed_merge_poll "$task"; then
+      # The worker supplied a terminal-but-unlanded lifecycle receipt and its
+      # validated poll now owns the next transition. Drop prior active-lifetime
+      # markers so lifting the declaration starts fresh supervision.
+      clear_pause_tracking "$key"
+      triage_log "skipped terminal awaiting-merge task (validated merge poll owns it): $w"
+      continue
+    fi
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
