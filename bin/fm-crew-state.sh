@@ -359,8 +359,9 @@ nm_ci_checks_state() {
   marker=$(printf '%s\n' "$log_tail" \
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|repository declares no CI \(no_ci: true\) - treating as all checks passed - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
+  # The explicit no-CI declaration and ordinary success markers both map green.
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*|*"repository declares no CI (no_ci: true) - treating as all checks passed - still monitoring"*) printf 'green' ;;
+    *"repository declares no CI (no_ci: true) - treating as all checks passed - still monitoring"*|*"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
