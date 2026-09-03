@@ -42,7 +42,7 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating. A
-#      worker's explicit awaiting-merge: declaration refines that green ci state
+#      Firstmate's explicit awaiting-merge: receipt refines that green ci state
 #      when its PR remains open for the captain's merge decision.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and

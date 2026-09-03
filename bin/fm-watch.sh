@@ -490,7 +490,7 @@ clear_pause_tracking() {  # <window-key>
 }
 
 # 0 only when <task> has an authenticated, canonical merge poll. An
-# awaiting-merge: status line is a worker claim; this separate proof is what
+# awaiting-merge: status line is an untrusted claim; this separate proof is what
 # makes it safe to supersede even an already-open wedge episode and stop pane
 # supervision. If the declaration is forged, incomplete, or its poll is missing
 # or tampered with, the ordinary stale path remains in force and can still

@@ -76,7 +76,7 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|awaiting-merge:|needs-decision:|blocked:|f
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# The terminal-but-unlanded declaration. A ship worker writes this only after
+# The terminal-but-unlanded declaration. Firstmate writes this only after
 # its PR is pushed, checks are green, and bin/fm-pr-check.sh has armed the
 # authenticated merge poll. The watcher verifies that poll before it exempts
 # the task from pane supervision, so an unarmed declaration cannot hide a wedge.
