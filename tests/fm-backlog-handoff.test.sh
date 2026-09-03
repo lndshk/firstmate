@@ -15,6 +15,15 @@ command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found (requi
 
 TMP_ROOT=$(fm_test_tmproot fm-backlog-handoff)
 
+# future_rfc3339 <seconds-from-now>: promised-reply fixtures need a thread
+# window that remains reachable whenever this suite is run.
+future_rfc3339() {
+  local seconds=$1 epoch
+  epoch=$(( $(date +%s) + seconds ))
+  date -u -r "$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+    || date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ'
+}
+
 setup_homes() {
   local home=$1 subhome=$2 id=${3:-design}
   mkdir -p "$home/data" "$home/state"
@@ -60,15 +69,16 @@ assert_block_equals() {
 # this home's registration - so a later handoff can be observed against a real
 # unresolved commitment rather than a stub.
 seed_public_commitment() {
-  local home=$1 obligation=$2 work_home=$3 work_id=$4
+  local home=$1 obligation=$2 work_home=$3 work_id=$4 expiry
+  expiry=$(future_rfc3339 604800)
   printf 'FMX_PAIRING_TOKEN=test-token\n' > "$home/.env"
   cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
-  jq -n '{request_id:"req-handoff", platform:"x",
+  jq -n --arg expiry "$expiry" '{request_id:"req-handoff", platform:"x",
           context_binding:{version:"ctx1", value:"ctx1_req-handoff"},
           public_safe_summary:"looking into the sign-in redirect",
           received_at:"2026-07-30T10:00:00Z",
-          followup_expires_at:"2026-08-06T10:00:00Z",
-          reservation_expires_at:"2026-08-06T10:00:00Z"}' > "$home/request.json"
+          followup_expires_at:$expiry,
+          reservation_expires_at:$expiry}' > "$home/request.json"
   jq -n '{type:"pr-merged", project:"alpha",
           required_deliverables:["pr_url"], completion_policy:"all-required"}' \
     > "$home/expected.json"
@@ -77,7 +87,7 @@ seed_public_commitment() {
       role:"fulfills", required:true, generation:1}' > "$home/relation.json"
   (cd "$home" && tasks-axi public-followup add "$obligation" \
     --request-context-file "$home/request.json" --purpose promised-final \
-    --expected-final-file "$home/expected.json" --expires-at 2026-10-01T00:00:00Z) >/dev/null \
+    --expected-final-file "$home/expected.json" --expires-at "$(future_rfc3339 2592000)") >/dev/null \
     || fail "could not create the public commitment"
   (cd "$home" && tasks-axi public-followup bind-work "$obligation" \
     --relation-file "$home/relation.json") >/dev/null \
