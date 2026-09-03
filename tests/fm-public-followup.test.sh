@@ -106,15 +106,21 @@ tasks_in() {  # <home> <tasks-axi args...>
   (cd "$home" && tasks-axi "$@")
 }
 
+# rfc3339_from_epoch <epoch>: format a UTC expiry with the BSD or GNU date
+# form available on the current runner.
+rfc3339_from_epoch() {
+  local epoch=$1
+  date -u -r "$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+    || date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ'
+}
+
 # future_rfc3339 <seconds-from-now>: format a real future expiry for fixtures
 # that exercise a reachable public thread.  Keeping this relative makes the
 # fixture valid whenever the suite runs, while expiry-specific cases below
 # still move the code-under-test clock past it explicitly.
 future_rfc3339() {
-  local seconds=$1 epoch
-  epoch=$(( $(date +%s) + seconds ))
-  date -u -r "$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
-    || date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ'
+  local seconds=$1
+  rfc3339_from_epoch "$(( $(date +%s) + seconds ))"
 }
 
 # seed_commitment <home> <obligation> <request> <platform> <work-home> <work-id>
@@ -1513,8 +1519,7 @@ test_rechain_accepts_a_thread_reachable_one_year_later() {
   home=$(make_home rechain-future-clock)
   now=$(date +%s)
   future_now=$((now + 31536000))
-  expiry=$(date -u -r $((future_now + 604800)) '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
-    || date -u -d "@$((future_now + 604800))" '+%Y-%m-%dT%H:%M:%SZ')
+  expiry=$(rfc3339_from_epoch "$((future_now + 604800))")
 
   FM_TEST_FOLLOWUP_EXPIRES_AT="$expiry" \
     seed_repro_commitment "$home" public-final-future-a req-future main scout-future
