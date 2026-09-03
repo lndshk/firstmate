@@ -42,8 +42,11 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating. A
-#      Firstmate's explicit awaiting-merge: receipt refines that green ci state
-#      when its PR remains open for the captain's merge decision.
+#      Firstmate's explicit awaiting-merge: receipt refines only that current
+#      green ci state when its PR remains open for the captain's merge decision;
+#      an active, rearmed, or fixing run remains authoritative. With no
+#      attributed run, the fallback accepts that state only with the canonical
+#      authenticated merge poll.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log

@@ -10,9 +10,9 @@
 # external wait or a verified captain-held transfer, is the separate idle absorb
 # case and re-surfaces only on its long bounded cadence, although its initial
 # no-verb status signal still surfaces in normal mode. A separately declared
-# awaiting-merge: ship is terminal-but-unlanded: once its canonical merge poll
-# is verified, pane supervision skips it entirely and that poll alone owns the
-# future merge transition.
+# awaiting-merge: ship is terminal-but-unlanded only when its canonical merge
+# poll and current crew state agree; pane supervision then skips it entirely and
+# that poll owns the future merge transition.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -490,11 +490,11 @@ clear_pause_tracking() {  # <window-key>
 }
 
 # 0 only when <task> has an authenticated, canonical merge poll. An
-# awaiting-merge: status line is an untrusted claim; this separate proof is what
-# makes it safe to supersede even an already-open wedge episode and stop pane
-# supervision. If the declaration is forged, incomplete, or its poll is missing
-# or tampered with, the ordinary stale path remains in force and can still
-# surface a genuine wedge.
+# awaiting-merge: status line is an untrusted claim; this is one required half
+# of admission, while crew_is_awaiting_merge supplies the current-state half.
+# Together they safely supersede an already-open wedge episode. If the
+# declaration is forged, incomplete, stale, or its poll is missing or tampered
+# with, the ordinary stale path remains in force and can still surface a wedge.
 task_has_armed_merge_poll() {  # <task>
   fm_pr_poll_artifacts_valid "$STATE" "$1" "$SCRIPT_DIR/fm-pr-poll.sh"
 }
@@ -1150,9 +1150,9 @@ EOF
       && crew_is_awaiting_merge "$task"; then
       # This admission deliberately precedes stale classification: an ordinary
       # declared wait may remain masked by an open wedge episode, but only this
-      # authenticated poll can safely supersede that episode. Drop prior
-      # active-lifetime markers so lifting the declaration starts fresh
-      # supervision.
+      # authenticated poll plus its current awaiting-merge state can safely
+      # supersede that episode. Drop prior active-lifetime markers so lifting
+      # the declaration starts fresh supervision.
       clear_pause_tracking "$key"
       triage_log "skipped terminal awaiting-merge task (validated merge poll owns it): $w"
       continue

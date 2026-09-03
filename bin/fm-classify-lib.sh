@@ -77,9 +77,10 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|awaiting-merge:|needs-decision:|blocked:|f
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
 # The terminal-but-unlanded declaration. Firstmate writes this only after
-# its PR is pushed, checks are green, and bin/fm-pr-check.sh has armed the
-# authenticated merge poll. The watcher verifies that poll before it exempts
-# the task from pane supervision, so an unarmed declaration cannot hide a wedge.
+# bin/fm-pr-check.sh has armed the authenticated merge poll: after checks green
+# for no-mistakes, or after opening a direct PR. The supervisors additionally
+# require fm-crew-state's current awaiting-merge verdict before exemption, so an
+# unarmed declaration or stale receipt cannot hide a wedge or active work.
 FM_CLASSIFY_AWAITING_MERGE_VERB_DEFAULT='awaiting-merge'
 
 # Bounded re-surface cadence for a declared pause or a verified captain hold.
@@ -1386,11 +1387,12 @@ signal_crew_provably_working() {  # <file> ...
 # 0 (terminal/actionable) if a stale window's last status line is
 # captain-relevant; 1 otherwise, including the no-status case. An
 # awaiting-merge: declaration is deliberately non-terminal here until the
-# watcher has separately verified its canonical merge poll: its initial status
-# signal remains captain-relevant, but an unarmed or invalid declaration must
-# take the ordinary stale and wedge path. A 1 only means "non-terminal"; the
-# always-on watcher then applies crew_is_provably_working, while the away-mode
-# daemon applies its persistence recheck.
+# supervisors have separately verified its canonical merge poll and current
+# crew state: its initial status signal remains captain-relevant, but an
+# unarmed, invalid, or stale declaration must take the ordinary stale and
+# wedge path. A 1 only means "non-terminal"; the always-on watcher then
+# applies crew_is_provably_working, while the away-mode daemon applies its
+# persistence recheck.
 stale_is_terminal() {  # <window> <state>
   local win=$1 state=$2 last
   last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")

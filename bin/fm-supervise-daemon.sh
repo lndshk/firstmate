@@ -491,6 +491,8 @@ clear_pause_tracking() {  # <window> <state>
     "$state/.writing-since-$watcher_key" "$state/.writing-resurfaced-$watcher_key"
 }
 
+# Require both poll identity and current state: a stale receipt must not hide an
+# active, rearmed, or fixing run merely because the canonical artifacts remain.
 awaiting_merge_poll_valid() {  # <window> <state> <last-status-line>
   local win=$1 state=$2 last=$3 task
   status_is_awaiting_merge "$last" || return 1

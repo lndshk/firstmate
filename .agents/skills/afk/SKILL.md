@@ -146,6 +146,7 @@ Classify each wake this way:
   A nonterminal progress verb remains nonterminal even when its prose contains a legacy free-text token such as `PR ready`, `checks green`, `ready in branch`, or `merged`; only a bare legacy line with such a token escalates.
   Other signals with no captain-relevant status -> self-handle.
 - `awaiting-merge:` is captain-relevant on its initial signal, but it self-handles a stale pane only after the canonical merge-poll artifacts and `fm-crew-state` authenticate the same captain merge wait.
+  A current-code-matched no-mistakes run authenticates that wait only during its green `ci` monitor phase, so an active, rearmed, or fixing run follows ordinary stale handling rather than letting a stale receipt mask it.
   That valid terminal-but-unlanded wait clears any earlier wedge tracking and lets the poll own the merge transition; an unarmed, invalid, missing, or tampered poll follows ordinary stale detection and possible-wedge escalation.
 - `signal` or `stale` for a declared wait, either a `paused:` external wait or a verified `captain-held` transfer -> self-handle and track the pause rather than a wedge.
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one recheck and resets the pause window.
