@@ -303,7 +303,7 @@ nm_gate_findings_count() {
   printf '%s' "$rest"
 }
 log_reports_ci_ready() {
-  [ "$LOG_VERB" = "done" ] || status_is_awaiting_merge "$LOG_LINE" || return 1
+  [ "$LOG_VERB" = "done" ] || return 1
   case "$(status_line_note "$LOG_LINE")" in
     *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
     *) return 1 ;;

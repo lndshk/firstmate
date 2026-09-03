@@ -583,6 +583,25 @@ test_awaiting_merge_requires_an_authenticated_poll() {
   pass "fleet state requires an authenticated poll before reporting awaiting-merge"
 }
 
+test_stale_awaiting_merge_receipt_cannot_override_active_review() {
+  reset_fakes
+  local d; d=$(new_case stale-awaiting-merge-active-review)
+  make_repo_on_branch "$d/wt" fm/feat-stale-awaiting
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-stale-awaiting.meta" \
+    "window=fm:fm-feat-stale-awaiting" "worktree=$d/wt" "kind=ship"
+  printf 'pr=https://github.com/o/r/pull/3\n' >> "$d/state/feat-stale-awaiting.meta"
+  arm_merge_poll "$d/state" feat-stale-awaiting https://github.com/o/r/pull/3
+  printf 'awaiting-merge: PR https://github.com/o/r/pull/3 checks green; merge poll armed\n' \
+    > "$d/state/feat-stale-awaiting.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-stale-awaiting)"
+  local out; out=$(run_crew_state "$d" feat-stale-awaiting)
+  assert_contains "$out" "state: working" "active review remains authoritative over a stale merge receipt"
+  assert_contains "$out" "source: run-step" "active review remains attributed to its current run"
+  assert_not_contains "$out" "state: awaiting-merge" "stale merge receipt must not suppress active review"
+  pass "stale authenticated merge receipt cannot suppress active review"
+}
+
 test_ci_monitoring_green_then_rearm_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-green-then-rearm)
@@ -1525,6 +1544,7 @@ test_ci_monitoring_no_checks_terminal_surfaces_done
 test_ci_monitoring_declared_no_ci_surfaces_done
 test_no_ci_awaiting_merge_is_a_distinct_lifecycle_state
 test_awaiting_merge_requires_an_authenticated_poll
+test_stale_awaiting_merge_receipt_cannot_override_active_review
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
