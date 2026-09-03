@@ -524,6 +524,21 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   pass "terminal no-checks ci-monitor marker surfaces done"
 }
 
+test_ci_monitoring_declared_no_ci_surfaces_done() {
+  reset_fakes
+  local d; d=$(new_case ci-declared-no-ci)
+  make_repo_on_branch "$d/wt" fm/feat-cideclarednoci
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cideclarednoci.meta" "window=fm:fm-feat-cideclarednoci" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cideclarednoci)"
+  FM_FAKE_CI_LOGS='repository declares no CI (no_ci: true) - treating as all checks passed - still monitoring until merged or closed'
+  local out; out=$(run_crew_state "$d" feat-cideclarednoci)
+  assert_contains "$out" "state: done" "declared no-CI monitor -> done without a status receipt"
+  assert_contains "$out" "source: run-step" "declared no-CI completion is attributed to the active CI monitor"
+  assert_not_contains "$out" "state: working" "declared no-CI completion must not remain working"
+  pass "declared no-CI ci-monitor marker surfaces done without a receipt"
+}
+
 test_no_ci_awaiting_merge_is_a_distinct_lifecycle_state() {
   reset_fakes
   local d; d=$(new_case no-ci-awaiting-merge)
@@ -1507,6 +1522,7 @@ test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
+test_ci_monitoring_declared_no_ci_surfaces_done
 test_no_ci_awaiting_merge_is_a_distinct_lifecycle_state
 test_awaiting_merge_requires_an_authenticated_poll
 test_ci_monitoring_green_then_rearm_stays_working

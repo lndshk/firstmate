@@ -495,7 +495,8 @@ awaiting_merge_poll_valid() {  # <window> <state> <last-status-line>
   local win=$1 state=$2 last=$3 task
   status_is_awaiting_merge "$last" || return 1
   task=$(window_to_task "$win" "$state")
-  fm_pr_poll_artifacts_valid "$state" "$task" "$FM_DAEMON_DIR/fm-pr-poll.sh"
+  fm_pr_poll_artifacts_valid "$state" "$task" "$FM_DAEMON_DIR/fm-pr-poll.sh" \
+    && crew_is_awaiting_merge "$task"
 }
 
 reconcile_awaiting_merge_tracking() {  # <window> <state> <last-status-line>

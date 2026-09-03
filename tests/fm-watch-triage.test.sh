@@ -221,6 +221,8 @@ test_awaiting_merge_validated_poll_skips_pane_supervision() {
   printf '2\n' > "$state/.wedge-escalations-$key"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: awaiting-merge · source: run-step · checks green' \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$WATCH" > "$out" &
   pid=$!
@@ -233,6 +235,47 @@ test_awaiting_merge_validated_poll_skips_pane_supervision() {
   [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "awaiting-merge retained wedge escalation history"; }
   reap "$pid"
   pass "a validated awaiting-merge lifecycle receipt skips pane supervision while its merge poll remains armed"
+}
+
+test_awaiting_merge_rearmed_ci_still_wedges() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case awaiting-merge-rearmed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-awaiting-merge-rearmed"
+  printf 'idle after CI re-arm\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/awaiting-merge-rearmed.meta"
+  printf 'pr=https://github.com/o/r/pull/1\n' >> "$state/awaiting-merge-rearmed.meta"
+  arm_merge_poll "$state" awaiting-merge-rearmed
+  printf 'awaiting-merge: PR https://github.com/o/r/pull/1 checks green; merge poll armed\n' > "$state/awaiting-merge-rearmed.status"
+  sig=$(seen_sig "$state/awaiting-merge-rearmed.status"); printf '%s' "$sig" > "$state/.seen-awaiting-merge-rearmed_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  pane_hash=$(hash_text 'idle after CI re-arm')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · CI re-arming' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    fail "a re-armed CI monitor did not enter ordinary stale tracking"
+  fi
+  [ -s "$state/.stale-$key" ] || { reap "$pid"; fail "a re-armed CI monitor did not record its stale hash"; }
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "a re-armed CI monitor did not start its wedge timer"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the re-armed CI stale phase"
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · CI re-arming' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a re-armed CI monitor did not reach ordinary wedge escalation"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    || fail "a re-armed CI monitor remained suppressed by a stale merge receipt: $(cat "$out")"
+  pass "a re-armed CI monitor cannot suppress a genuine wedge through an old merge poll"
 }
 
 # A status line alone is not a permit to silence stale detection. This directly
@@ -2720,6 +2763,7 @@ test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_awaiting_merge_validated_poll_skips_pane_supervision
+test_awaiting_merge_rearmed_ci_still_wedges
 test_unarmed_awaiting_merge_worker_still_wedges
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

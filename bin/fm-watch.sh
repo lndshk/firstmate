@@ -1146,7 +1146,8 @@ EOF
     task=$(window_to_task "$w" "$STATE")
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
-    if status_is_awaiting_merge "$last" && task_has_armed_merge_poll "$task"; then
+    if status_is_awaiting_merge "$last" && task_has_armed_merge_poll "$task" \
+      && crew_is_awaiting_merge "$task"; then
       # This admission deliberately precedes stale classification: an ordinary
       # declared wait may remain masked by an open wedge episode, but only this
       # authenticated poll can safely supersede that episode. Drop prior

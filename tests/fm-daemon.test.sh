@@ -175,9 +175,10 @@ test_afk_invalid_awaiting_merge_still_escalates_wedge() {
 }
 
 test_afk_valid_awaiting_merge_signal_retires_open_wedge() {
-  local dir state task win key watcher_key
+  local dir state fakebin task win key watcher_key
   dir=$(make_supercase afk-awaiting-merge-valid)
-  state="$dir/state"; task=awaiting-valid; win="sess:fm-$task"
+  state="$dir/state"; fakebin="$dir/fakebin"; task=awaiting-valid; win="sess:fm-$task"
+  make_fake_crew_state "$fakebin" >/dev/null
   key=$(printf '%s' "$task" | tr ':/. ' '____')
   watcher_key=$(printf '%s' "$win" | tr ':/. ' '____')
   printf 'window=%s\nkind=ship\npr=https://github.com/o/r/pull/1\n' "$win" > "$state/$task.meta"
@@ -189,7 +190,9 @@ test_afk_valid_awaiting_merge_signal_retires_open_wedge() {
   : > "$state/.stale-$watcher_key"
   : > "$state/.stale-since-$watcher_key"
   : > "$state/.wedge-escalations-$watcher_key"
-  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/$task.status" "$state"
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: awaiting-merge · source: run-step · checks green' \
+    FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/$task.status" "$state"
   for marker in "$state/.subsuper-stale-$key" "$state/.subsuper-paused-$key" \
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key"; do
     [ ! -e "$marker" ] || fail "authenticated awaiting-merge signal retained $marker"
@@ -197,6 +200,33 @@ test_afk_valid_awaiting_merge_signal_retires_open_wedge() {
   [ ! -s "$state/.subsuper-escalations" ] || grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null \
     && fail "authenticated awaiting-merge signal escalated an already-open wedge"
   pass "an authenticated awaiting-merge signal supersedes and retires an open AFK wedge"
+}
+
+test_afk_rearmed_ci_awaiting_merge_still_escalates_wedge() {
+  local dir state fakebin task win key pane
+  dir=$(make_supercase afk-awaiting-merge-rearmed)
+  state="$dir/state"; fakebin="$dir/fakebin"; task=awaiting-rearmed; win="sess:fm-$task"
+  make_fake_crew_state "$fakebin" >/dev/null
+  key=$(printf '%s' "$task" | tr ':/. ' '___')
+  pane="$dir/pane.txt"
+  printf 'window=%s\nkind=ship\npr=https://github.com/o/r/pull/1\n' "$win" > "$state/$task.meta"
+  arm_daemon_merge_poll "$state" "$task"
+  printf 'awaiting-merge: PR https://github.com/o/r/pull/1 checks green; merge poll armed\n' > "$state/$task.status"
+  afk_enter "$state"
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · CI re-arming' \
+    FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "a re-armed CI monitor did not enter AFK stale tracking"
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  printf 'idle after CI re-arm\n' > "$pane"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · CI re-arming' \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_HEARTBEAT_SCAN_SECS=999999 housekeeping "$state"
+  grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null \
+    || fail "a re-armed CI monitor remained suppressed in AFK mode"
+  pass "a re-armed CI monitor cannot suppress a genuine AFK wedge through an old merge poll"
 }
 
 test_stale_diagnostic_wedge_survives_busy_housekeeping() {
@@ -1992,6 +2022,7 @@ test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_afk_invalid_awaiting_merge_still_escalates_wedge
 test_afk_valid_awaiting_merge_signal_retires_open_wedge
+test_afk_rearmed_ci_awaiting_merge_still_escalates_wedge
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
