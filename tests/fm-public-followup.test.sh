@@ -106,19 +106,31 @@ tasks_in() {  # <home> <tasks-axi args...>
   (cd "$home" && tasks-axi "$@")
 }
 
+# future_rfc3339 <seconds-from-now>: format a real future expiry for fixtures
+# that exercise a reachable public thread.  Keeping this relative makes the
+# fixture valid whenever the suite runs, while expiry-specific cases below
+# still move the code-under-test clock past it explicitly.
+future_rfc3339() {
+  local seconds=$1 epoch
+  epoch=$(( $(date +%s) + seconds ))
+  date -u -r "$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+    || date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ'
+}
+
 # seed_commitment <home> <obligation> <request> <platform> <work-home> <work-id>
 # Simulates the intake half that already works today: the relay mention arrives,
 # the typed obligation is created with its opaque thread binding, the work is
 # bound, and the private request context is retained.
 seed_commitment() {
-  local home=$1 obligation=$2 request=$3 platform=$4 work_home=$5 work_id=$6
-  jq -n --arg r "$request" --arg p "$platform" \
+  local home=$1 obligation=$2 request=$3 platform=$4 work_home=$5 work_id=$6 expiry
+  expiry=$(future_rfc3339 604800)
+  jq -n --arg r "$request" --arg p "$platform" --arg expiry "$expiry" \
     '{request_id:$r, platform:$p,
       context_binding:{version:"ctx1", value:("ctx1_" + $r)},
       public_safe_summary:"fix worker placement when two spaces share a name",
       received_at:"2026-07-30T10:00:00Z",
-      followup_expires_at:"2026-08-06T10:00:00Z",
-      reservation_expires_at:"2026-08-06T10:00:00Z"}' > "$home/request.json"
+      followup_expires_at:$expiry,
+      reservation_expires_at:$expiry}' > "$home/request.json"
   jq -n '{type:"pr-merged", project:"firstmate",
           required_deliverables:["pr_url"], completion_policy:"all-required"}' \
     > "$home/expected.json"
@@ -128,7 +140,7 @@ seed_commitment() {
 
   tasks_in "$home" public-followup add "$obligation" \
     --request-context-file "$home/request.json" --purpose promised-final \
-    --expected-final-file "$home/expected.json" --expires-at 2026-10-01T00:00:00Z >/dev/null \
+    --expected-final-file "$home/expected.json" --expires-at "$(future_rfc3339 2592000)" >/dev/null \
     || fail "could not create the public commitment"
   tasks_in "$home" public-followup bind-work "$obligation" \
     --relation-file "$home/relation.json" >/dev/null \
@@ -153,14 +165,15 @@ seed_commitment() {
 
 # The pi-rearm shape: a report-ready promised-final bound to a secondmate.
 seed_repro_commitment() {   # <home> <obligation> <request> <work-home> <work-id>
-  local home=$1 obligation=$2 request=$3 work_home=$4 work_id=$5
-  jq -n --arg r "$request" \
+  local home=$1 obligation=$2 request=$3 work_home=$4 work_id=$5 expiry
+  expiry=${FM_TEST_FOLLOWUP_EXPIRES_AT:-$(future_rfc3339 604800)}
+  jq -n --arg r "$request" --arg expiry "$expiry" \
     '{request_id:$r, platform:"discord",
       context_binding:{version:"ctx1", value:("ctx1_" + $r)},
       public_safe_summary:"reproduce a Pi recovery notification loop",
       received_at:"2026-08-21T01:12:00Z",
-      followup_expires_at:"2026-08-28T01:12:00Z",
-      reservation_expires_at:"2026-08-28T01:12:00Z"}' > "$home/request.json"
+      followup_expires_at:$expiry,
+      reservation_expires_at:$expiry}' > "$home/request.json"
   jq -n '{type:"report-ready", project:"firstmate",
           required_deliverables:["report_path"], completion_policy:"all-required"}' \
     > "$home/expected.json"
@@ -169,7 +182,7 @@ seed_repro_commitment() {   # <home> <obligation> <request> <work-home> <work-id
       role:"fulfills", required:true, generation:1}' > "$home/relation.json"
   tasks_in "$home" public-followup add "$obligation" --request-context-file "$home/request.json" \
     --purpose promised-final --expected-final-file "$home/expected.json" \
-    --expires-at 2026-10-01T00:00:00Z >/dev/null || fail "add failed"
+    --expires-at "$(future_rfc3339 2592000)" >/dev/null || fail "add failed"
   tasks_in "$home" public-followup bind-work "$obligation" --relation-file "$home/relation.json" >/dev/null \
     || fail "bind-work failed"
   FM_HOME="$home" bash -c \
@@ -1495,6 +1508,28 @@ SH
   pass "rechain posts the shipped follow-on into the same thread"
 }
 
+test_rechain_accepts_a_thread_reachable_one_year_later() {
+  local home now future_now expiry
+  home=$(make_home rechain-future-clock)
+  now=$(date +%s)
+  future_now=$((now + 31536000))
+  expiry=$(date -u -r $((future_now + 604800)) '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+    || date -u -d "@$((future_now + 604800))" '+%Y-%m-%dT%H:%M:%SZ')
+
+  FM_TEST_FOLLOWUP_EXPIRES_AT="$expiry" \
+    seed_repro_commitment "$home" public-final-future-a req-future main scout-future
+  "$EMIT" --home "$home" --obligation public-final-future-a --relation rel-code \
+    --source-home main --work-id scout-future --generation 1 \
+    --outcome report-ready --deliverable report_path=data/scout-future/report.md \
+    --outcome-text 'The future-clock investigation is complete.' >/dev/null || fail "emit failed"
+  run_pf "$home" consume >/dev/null || fail "consume failed"
+  run_pf "$home" deliver public-final-future-a >/dev/null || fail "deliver failed"
+  FMX_NOW_OVERRIDE="$future_now" run_pf "$home" rechain public-final-future-b \
+    --from public-final-future-a --work-home main --work-id ship-future --expected pr-merged \
+    >/dev/null || fail "rechain must accept a thread still reachable one simulated year later"
+  pass "rechain accepts a thread reachable one simulated year later"
+}
+
 test_rechain_resumes_after_partial_add() {
   local home log real_tasks marker out count
   home=$(make_home rechain-resume)
@@ -1832,7 +1867,7 @@ test_rechain_refuses_unclaimed_existing_destination() {
   tasks_in "$home" public-followup add public-final-existing-b \
     --request-context-file "$home/request.json" --purpose promised-final \
     --expected-final-file "$home/collision-expected.json" \
-    --expires-at 2026-08-28T01:12:00Z >/dev/null || fail "could not seed destination collision"
+    --expires-at "$(future_rfc3339 604800)" >/dev/null || fail "could not seed destination collision"
 
   expect_failure "a first rechain must not adopt an unrelated existing obligation" \
     run_pf "$home" rechain public-final-existing-b --from public-final-existing-a \
@@ -2010,8 +2045,8 @@ test_expiry_escalation_uses_now_override() {
   local home out exp now_closing now_expired registry tmp
   home=$(make_home expiry-window)
   seed_repro_commitment "$home" pf-exp req-exp main work-exp
-  exp=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' '2026-08-28T01:12:00Z' +%s 2>/dev/null) \
-    || exp=$(date -u -d '2026-08-28T01:12:00Z' +%s)
+  exp=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$(jq -r '.followup_expires_at' "$home/request.json")" +%s 2>/dev/null) \
+    || exp=$(date -u -d "$(jq -r '.followup_expires_at' "$home/request.json")" +%s)
   now_closing=$((exp - 3600))
   now_expired=$((exp + 60))
   out=$(FMX_NOW_OVERRIDE="$now_expired" run_pf "$home" pending)
@@ -2236,6 +2271,7 @@ test_typed_records_exclude_raw_public_material
 test_dropped_baton_now_surfaces_open_loop
 test_control_registered_followon_is_guarded
 test_rechain_delivers_second_post_on_same_thread
+test_rechain_accepts_a_thread_reachable_one_year_later
 test_rechain_resumes_after_partial_add
 test_rechain_claims_delivered_source_once
 test_failed_rechain_retirement_keeps_source_claimed
