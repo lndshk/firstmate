@@ -58,6 +58,7 @@ ok - typed public-followup records carry only public-safe summaries and delivera
 ok - dropped-baton regression: delivery retains the loop and pending prints open-loop
 ok - CONTROL: the identical teardown REFUSES the moment a commitment is registered
 ok - rechain posts the shipped follow-on into the same thread
+ok - rechain accepts a thread reachable one simulated year later
 ok - rechain resumes the same obligation after an interrupted bind
 ok - concurrent rechains cannot fork one delivered source
 ok - failed rechain retirement keeps the source claimed by one resumable destination
@@ -83,6 +84,7 @@ It reproduces the stranded state first (work bound, no reconciled terminal resul
 The dropped-baton case is the end-to-end proof of guarantee 3.
 It delivers a `report-ready` promised-final, asserts the registration is retained and `pending` prints `open-loop`, then shows that an unbound follow-on ship is not teardown-refused (the one-variable control still refuses the moment a commitment is registered for that work).
 `rechain` then binds a fresh `pr-merged` obligation onto the same request/thread, and a second follow-up carries the shipped text.
+The future-clock rechain case advances `FMX_NOW_OVERRIDE` by one year while retaining a thread expiry beyond that simulated time, proving reachability is evaluated against the supplied clock rather than the fixture's original wall-clock date.
 `retire --reason` records its private receipt before removal and is the only close; replayed registration cannot reopen that retired loop.
 The concurrency and interrupted-bind cases verify that one delivered source cannot fork and that retry converges on the same destination obligation.
 A pre-change on-disk record (no `state=`, no `request_context_b64`) is an open loop and un-rechainable rather than a crash.
