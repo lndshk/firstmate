@@ -1,0 +1,3 @@
+ok - unarmed and tampered awaiting-merge claims still escalate as wedges in AFK mode
+ok - an authenticated awaiting-merge signal supersedes and retires an open AFK wedge
+ok - a re-armed CI monitor cannot suppress a genuine AFK wedge through an old merge poll

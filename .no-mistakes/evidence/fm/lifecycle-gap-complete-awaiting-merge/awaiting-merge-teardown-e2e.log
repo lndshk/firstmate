@@ -1,0 +1,2 @@
+ok - no-mistakes worktree with genuinely unlanded work is refused (safety preserved)
+ok - a merged awaiting-merge PR tears down under the unchanged landed-work guard

@@ -1,0 +1,3 @@
+ok - a validated awaiting-merge lifecycle receipt skips pane supervision while its merge poll remains armed
+ok - a re-armed CI monitor cannot suppress a genuine wedge through an old merge poll
+ok - an unarmed awaiting-merge claim cannot silence a genuinely wedged worker
