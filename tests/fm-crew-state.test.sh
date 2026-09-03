@@ -31,8 +31,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CREW_STATE="$ROOT/bin/fm-crew-state.sh"
+POLL="$ROOT/bin/fm-pr-poll.sh"
 TMP_ROOT=$(fm_test_tmproot fm-crew-state)
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -141,6 +144,14 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+}
+
+arm_merge_poll() {  # <state> <id> <url>
+  local state=$1 id=$2 url=$3
+  fm_pr_url_parse "$url" || fail "invalid merge-poll fixture URL"
+  fm_pr_poll_prepare "$state" "$id" "$FM_PR_PROVIDER" "$FM_PR_URL" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" "$POLL" \
+    || fail "could not prepare merge-poll fixture"
+  fm_pr_poll_publish_prepared || fail "could not publish merge-poll fixture"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -519,6 +530,8 @@ test_no_ci_awaiting_merge_is_a_distinct_lifecycle_state() {
   make_repo_on_branch "$d/wt" fm/feat-noci-awaiting
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-noci-awaiting.meta" "window=fm:fm-feat-noci-awaiting" "worktree=$d/wt" "kind=ship"
+  printf 'pr=https://github.com/o/r/pull/2\n' >> "$d/state/feat-noci-awaiting.meta"
+  arm_merge_poll "$d/state" feat-noci-awaiting https://github.com/o/r/pull/2
   printf 'awaiting-merge: PR https://github.com/o/r/pull/2 checks green; merge poll armed\n' > "$d/state/feat-noci-awaiting.status"
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-noci-awaiting)"
   FM_FAKE_CI_LOGS='repository declares no CI (no_ci: true) - treating as all checks passed - still monitoring until merged or closed'
@@ -527,6 +540,32 @@ test_no_ci_awaiting_merge_is_a_distinct_lifecycle_state() {
   assert_contains "$out" "source: run-step" "lifecycle receipt is confirmed against the active CI monitor"
   assert_not_contains "$out" "state: working" "no-CI merge wait must not read as still validating"
   pass "no-CI green PR with an explicit receipt reports awaiting-merge"
+}
+
+test_awaiting_merge_requires_an_authenticated_poll() {
+  local scenario d out
+  for scenario in unarmed tampered; do
+    reset_fakes
+    d=$(new_case "awaiting-merge-$scenario")
+    make_repo_on_branch "$d/wt" "fm/feat-awaiting-$scenario"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-awaiting-$scenario.meta" \
+      "window=fm:fm-feat-awaiting-$scenario" "worktree=$d/wt" "kind=ship"
+    printf 'pr=https://github.com/o/r/pull/3\n' >> "$d/state/feat-awaiting-$scenario.meta"
+    if [ "$scenario" = tampered ]; then
+      arm_merge_poll "$d/state" "feat-awaiting-$scenario" https://github.com/o/r/pull/3
+      printf 'tampered\n' > "$d/state/feat-awaiting-$scenario.pr-poll"
+      chmod 0600 "$d/state/feat-awaiting-$scenario.pr-poll"
+    fi
+    printf 'awaiting-merge: PR https://github.com/o/r/pull/3 checks green; merge poll armed\n' \
+      > "$d/state/feat-awaiting-$scenario.status"
+    FM_FAKE_AXI_STATUS="$(run_ci_monitoring "fm/feat-awaiting-$scenario")"
+    FM_FAKE_CI_LOGS='repository declares no CI (no_ci: true) - treating as all checks passed - still monitoring until merged or closed'
+    out=$(run_crew_state "$d" "feat-awaiting-$scenario")
+    assert_contains "$out" "state: done" "$scenario awaiting-merge claim must retain the verified CI-ready state"
+    assert_not_contains "$out" "state: awaiting-merge" "$scenario awaiting-merge claim must not report an unarmed poll"
+  done
+  pass "fleet state requires an authenticated poll before reporting awaiting-merge"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -1435,6 +1474,7 @@ test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
 test_no_ci_awaiting_merge_is_a_distinct_lifecycle_state
+test_awaiting_merge_requires_an_authenticated_poll
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working

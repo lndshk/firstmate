@@ -71,6 +71,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
@@ -90,6 +92,11 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
+
+awaiting_merge_poll_valid() {
+  status_is_awaiting_merge "$LOG_LINE" \
+    && fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh"
+}
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
@@ -550,7 +557,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      if status_is_awaiting_merge "$LOG_LINE"; then
+      if awaiting_merge_poll_valid; then
         emit "awaiting-merge" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
       fi
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
@@ -564,7 +571,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
-      if status_is_awaiting_merge "$LOG_LINE"; then
+      if awaiting_merge_poll_valid; then
         emit "awaiting-merge" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
       fi
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
@@ -578,7 +585,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   # round immediately returns to `working` instead of letting stale status text
   # hide renewed work.
   if [ "$RUN_STATE" = "done" ] && [ "$CI_STEP_STATUS" = "running" ] \
-    && [ "$CI_LOG_STATE" = green ] && status_is_awaiting_merge "$LOG_LINE"; then
+    && [ "$CI_LOG_STATE" = green ] && awaiting_merge_poll_valid; then
     RUN_STATE='awaiting-merge'
     RUN_DETAIL="awaiting captain merge decision (checks green; merge poll armed)"
   fi

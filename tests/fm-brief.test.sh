@@ -345,6 +345,12 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
   assert_grep "exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific" "$brief" \
     "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
+  assert_grep 'append `done: PR {url} checks green` and stop' "$brief" \
+    "no-mistakes DOD must hand CI-green completion to firstmate before awaiting merge"
+  assert_grep 'Firstmate will run `bin/fm-pr-check.sh <id> <PR url>`' "$brief" \
+    "no-mistakes DOD must identify firstmate as the merge-poll arming owner"
+  assert_grep 'only after it arms the canonical merge poll, append the `awaiting-merge:` receipt' "$brief" \
+    "no-mistakes DOD must require poll arming before the awaiting-merge receipt"
   # The apostrophe in "firstmate's authority check" is now structurally safe
   # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
   # being reworded or escaped away. test_no_heredoc_in_command_substitution
