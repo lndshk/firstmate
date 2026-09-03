@@ -31,8 +31,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CREW_STATE="$ROOT/bin/fm-crew-state.sh"
+POLL="$ROOT/bin/fm-pr-poll.sh"
 TMP_ROOT=$(fm_test_tmproot fm-crew-state)
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -141,6 +144,14 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+}
+
+arm_merge_poll() {  # <state> <id> <url>
+  local state=$1 id=$2 url=$3
+  fm_pr_url_parse "$url" || fail "invalid merge-poll fixture URL"
+  fm_pr_poll_prepare "$state" "$id" "$FM_PR_PROVIDER" "$FM_PR_URL" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" "$POLL" \
+    || fail "could not prepare merge-poll fixture"
+  fm_pr_poll_publish_prepared || fail "could not publish merge-poll fixture"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -511,6 +522,84 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
   assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
   pass "terminal no-checks ci-monitor marker surfaces done"
+}
+
+test_ci_monitoring_declared_no_ci_surfaces_done() {
+  reset_fakes
+  local d; d=$(new_case ci-declared-no-ci)
+  make_repo_on_branch "$d/wt" fm/feat-cideclarednoci
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cideclarednoci.meta" "window=fm:fm-feat-cideclarednoci" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cideclarednoci)"
+  FM_FAKE_CI_LOGS='repository declares no CI (no_ci: true) - treating as all checks passed - still monitoring until merged or closed'
+  local out; out=$(run_crew_state "$d" feat-cideclarednoci)
+  assert_contains "$out" "state: done" "declared no-CI monitor -> done without a status receipt"
+  assert_contains "$out" "source: run-step" "declared no-CI completion is attributed to the active CI monitor"
+  assert_not_contains "$out" "state: working" "declared no-CI completion must not remain working"
+  pass "declared no-CI ci-monitor marker surfaces done without a receipt"
+}
+
+test_no_ci_awaiting_merge_is_a_distinct_lifecycle_state() {
+  reset_fakes
+  local d; d=$(new_case no-ci-awaiting-merge)
+  make_repo_on_branch "$d/wt" fm/feat-noci-awaiting
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-noci-awaiting.meta" "window=fm:fm-feat-noci-awaiting" "worktree=$d/wt" "kind=ship"
+  printf 'pr=https://github.com/o/r/pull/2\n' >> "$d/state/feat-noci-awaiting.meta"
+  arm_merge_poll "$d/state" feat-noci-awaiting https://github.com/o/r/pull/2
+  printf 'awaiting-merge: PR https://github.com/o/r/pull/2 checks green; merge poll armed\n' > "$d/state/feat-noci-awaiting.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-noci-awaiting)"
+  FM_FAKE_CI_LOGS='repository declares no CI (no_ci: true) - treating as all checks passed - still monitoring until merged or closed'
+  local out; out=$(run_crew_state "$d" feat-noci-awaiting)
+  assert_contains "$out" "state: awaiting-merge" "no-CI green PR -> awaiting-merge"
+  assert_contains "$out" "source: run-step" "lifecycle receipt is confirmed against the active CI monitor"
+  assert_not_contains "$out" "state: working" "no-CI merge wait must not read as still validating"
+  pass "no-CI green PR with an explicit receipt reports awaiting-merge"
+}
+
+test_awaiting_merge_requires_an_authenticated_poll() {
+  local scenario d out
+  for scenario in unarmed tampered; do
+    reset_fakes
+    d=$(new_case "awaiting-merge-$scenario")
+    make_repo_on_branch "$d/wt" "fm/feat-awaiting-$scenario"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-awaiting-$scenario.meta" \
+      "window=fm:fm-feat-awaiting-$scenario" "worktree=$d/wt" "kind=ship"
+    printf 'pr=https://github.com/o/r/pull/3\n' >> "$d/state/feat-awaiting-$scenario.meta"
+    if [ "$scenario" = tampered ]; then
+      arm_merge_poll "$d/state" "feat-awaiting-$scenario" https://github.com/o/r/pull/3
+      printf 'tampered\n' > "$d/state/feat-awaiting-$scenario.pr-poll"
+      chmod 0600 "$d/state/feat-awaiting-$scenario.pr-poll"
+    fi
+    printf 'awaiting-merge: PR https://github.com/o/r/pull/3 checks green; merge poll armed\n' \
+      > "$d/state/feat-awaiting-$scenario.status"
+    FM_FAKE_AXI_STATUS="$(run_ci_monitoring "fm/feat-awaiting-$scenario")"
+    FM_FAKE_CI_LOGS='repository declares no CI (no_ci: true) - treating as all checks passed - still monitoring until merged or closed'
+    out=$(run_crew_state "$d" "feat-awaiting-$scenario")
+    assert_contains "$out" "state: done" "$scenario awaiting-merge claim must retain the verified CI-ready state"
+    assert_not_contains "$out" "state: awaiting-merge" "$scenario awaiting-merge claim must not report an unarmed poll"
+  done
+  pass "fleet state requires an authenticated poll before reporting awaiting-merge"
+}
+
+test_stale_awaiting_merge_receipt_cannot_override_active_review() {
+  reset_fakes
+  local d; d=$(new_case stale-awaiting-merge-active-review)
+  make_repo_on_branch "$d/wt" fm/feat-stale-awaiting
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-stale-awaiting.meta" \
+    "window=fm:fm-feat-stale-awaiting" "worktree=$d/wt" "kind=ship"
+  printf 'pr=https://github.com/o/r/pull/3\n' >> "$d/state/feat-stale-awaiting.meta"
+  arm_merge_poll "$d/state" feat-stale-awaiting https://github.com/o/r/pull/3
+  printf 'awaiting-merge: PR https://github.com/o/r/pull/3 checks green; merge poll armed\n' \
+    > "$d/state/feat-stale-awaiting.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-stale-awaiting)"
+  local out; out=$(run_crew_state "$d" feat-stale-awaiting)
+  assert_contains "$out" "state: working" "active review remains authoritative over a stale merge receipt"
+  assert_contains "$out" "source: run-step" "active review remains attributed to its current run"
+  assert_not_contains "$out" "state: awaiting-merge" "stale merge receipt must not suppress active review"
+  pass "stale authenticated merge receipt cannot suppress active review"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -938,6 +1027,40 @@ test_no_run_idle_pane_uses_log() {
   assert_contains "$out" "state: parked" "needs-decision log -> parked"
   assert_contains "$out" "source: status-log" "idle pane -> status-log source"
   pass "no run + idle pane uses the status-log verb"
+}
+
+test_no_run_idle_pane_awaiting_merge_requires_authenticated_poll() {
+  local scenario d out
+  for scenario in unarmed tampered valid; do
+    reset_fakes
+    d=$(new_case "idle-awaiting-merge-$scenario")
+    make_repo_on_branch "$d/wt" "fm/feat-idle-awaiting-$scenario"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-idle-awaiting-$scenario.meta" \
+      "window=fm:fm-feat-idle-awaiting-$scenario" "worktree=$d/wt" "kind=ship" "harness=claude"
+    printf 'pr=https://github.com/o/r/pull/4\n' >> "$d/state/feat-idle-awaiting-$scenario.meta"
+    if [ "$scenario" != unarmed ]; then
+      arm_merge_poll "$d/state" "feat-idle-awaiting-$scenario" https://github.com/o/r/pull/4
+    fi
+    if [ "$scenario" = tampered ]; then
+      printf 'tampered\n' > "$d/state/feat-idle-awaiting-$scenario.pr-poll"
+      chmod 0600 "$d/state/feat-idle-awaiting-$scenario.pr-poll"
+    fi
+    printf 'awaiting-merge: PR https://github.com/o/r/pull/4 checks green; merge poll armed\n' \
+      > "$d/state/feat-idle-awaiting-$scenario.status"
+    FM_FAKE_AXI_STATUS=""
+    FM_FAKE_BUSY=0
+    arm_idle_record "$d/state" "feat-idle-awaiting-$scenario"
+    out=$(run_crew_state "$d" "feat-idle-awaiting-$scenario")
+    if [ "$scenario" = valid ]; then
+      assert_contains "$out" "state: awaiting-merge" "a valid poll permits the idle fallback merge-wait state"
+      assert_contains "$out" "source: status-log" "a valid poll keeps the fallback sourced from the lifecycle receipt"
+    else
+      assert_contains "$out" "state: unknown" "$scenario merge-wait claim must not authenticate the idle fallback"
+      assert_not_contains "$out" "state: awaiting-merge" "$scenario merge-wait claim must not report awaiting merge"
+    fi
+  done
+  pass "idle fallback requires an authenticated poll before reporting awaiting-merge"
 }
 
 test_no_run_idle_pane_uses_keyed_log() {
@@ -1418,6 +1541,10 @@ test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
+test_ci_monitoring_declared_no_ci_surfaces_done
+test_no_ci_awaiting_merge_is_a_distinct_lifecycle_state
+test_awaiting_merge_requires_an_authenticated_poll
+test_stale_awaiting_merge_receipt_cannot_override_active_review
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
@@ -1439,6 +1566,7 @@ test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log
+test_no_run_idle_pane_awaiting_merge_requires_authenticated_poll
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb

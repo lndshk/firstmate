@@ -702,6 +702,7 @@ test_squash_merged_branch_deleted_allows() {
   # the only signal that the work landed.
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   append_pr_meta_for_current_head "$case_dir"
+  printf 'awaiting-merge: PR https://github.com/example/repo/pull/7 checks green; merge poll armed\n' > "$case_dir/state/task-x1.status"
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
@@ -712,7 +713,7 @@ test_squash_merged_branch_deleted_allows() {
 
   expect_code 0 "$rc" "squash-merged: teardown should succeed when the PR is merged"
   ! grep -q REFUSED "$case_dir/stderr" || fail "squash-merged: teardown printed a REFUSED line"
-  pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
+  pass "a merged awaiting-merge PR tears down under the unchanged landed-work guard"
 }
 
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
